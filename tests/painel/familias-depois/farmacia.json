@@ -1,0 +1,43 @@
+{
+ "identidade": "marcello",
+ "familia": "nova",
+ "inicio": "2026-10-14T18:00:00Z",
+ "mensagens": [
+  {
+   "texto": "Boa tarde, sou da Drogaria São Paulo, estou com uma receita do Dr. Marcello da paciente Tatiane Mendes e preciso confirmar a dosagem do medicamento, a letra ficou ilegível"
+  },
+  {
+   "toque": "3"
+  },
+  {
+   "texto": "Ok. Meu nome é Carlos, sou farmacêutico da Drogaria São Paulo (unidade Gonzaga, Santos). A receita é da paciente Tatiane Mendes, datada de 10/10. O medicamento parece ser domperidona suspensão mas não dá pra ler a dose nem a posologia. A mãe está aqui no balcão aguardando. Podem me confirmar?"
+  },
+  {
+   "espera_min": 15
+  },
+  {
+   "texto": "Boa tarde, alguém disponível? A cliente ainda está aguardando aqui na farmácia"
+  },
+  {
+   "espera_min": 10
+  },
+  {
+   "texto": "Vocês têm um telefone fixo do consultório para eu ligar?"
+  },
+  {
+   "espera_min": 5
+  },
+  {
+   "texto": "0"
+  },
+  {
+   "texto": "Qual o telefone do consultório?"
+  },
+  {
+   "espera_min": 10
+  },
+  {
+   "texto": "Tudo bem. Vou orientar a mãe a entrar em contato com vocês depois. Obrigado."
+  }
+ ]
+}

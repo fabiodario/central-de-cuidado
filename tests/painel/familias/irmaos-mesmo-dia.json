@@ -1,0 +1,49 @@
+{
+ "identidade": "marcello",
+ "familia": "irmaos",
+ "inicio": "2026-10-14T13:30:00Z",
+ "mensagens": [
+  {
+   "texto": "Bom dia! Gostaria de marcar consulta para os meus dois filhos, a Helena e o Theo, em Santos. Dá pra marcar os dois juntos, no mesmo dia, um seguido do outro?"
+  },
+  {
+   "texto": "Para os dois"
+  },
+  {
+   "texto": "1"
+  },
+  {
+   "toque": "1"
+  },
+  {
+   "toque": "1"
+  },
+  {
+   "texto": "Helena às 09:20 e o Theo logo em seguida, às 10:00"
+  },
+  {
+   "texto": "Essa foi a da Helena, certo? E o Theo? Preciso dele às 10:00 no mesmo dia"
+  },
+  {
+   "toque": "2"
+  },
+  {
+   "toque": "2"
+  },
+  {
+   "texto": "Theo"
+  },
+  {
+   "texto": "2"
+  },
+  {
+   "toque": "1"
+  },
+  {
+   "texto": "Dia 21, às 10:00, logo depois da Helena"
+  },
+  {
+   "toque": "3"
+  }
+ ]
+}

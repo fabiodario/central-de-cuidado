@@ -1,0 +1,97 @@
+name: Backup diario do banco
+
+# Copia do banco FORA do Supabase, todo dia (24/09/2026).
+#
+# O plano gratuito do Supabase nao tem recuperacao para um ponto no tempo, e o
+# deploy roda `db push` direto em producao. Uma migration errada, uma exclusao
+# por engano ou um problema na conta, e nao havia de onde voltar.
+#
+# O arquivo sai CIFRADO (AES-256, gpg simetrico) com a senha do segredo
+# BACKUP_PASSPHRASE. Isto nao e detalhe: o repositorio e PUBLICO, e artefato de
+# repositorio publico pode ser baixado por qualquer pessoa logada no GitHub.
+# Sem a senha configurada, o backup NAO roda e a execucao fica vermelha - nunca
+# sai um dump aberto.
+#
+# Fica guardado 30 dias como artefato da execucao. Nao inclui os arquivos do
+# Storage (PDFs assinados, anexos do WhatsApp), so o banco.
+#
+# Para restaurar (quem tiver a senha):
+#   gpg --decrypt backup-AAAA-MM-DD.tar.gz.gpg > backup.tar.gz
+#   tar xzf backup.tar.gz   ->  roles.sql, schema.sql, data.sql
+#   psql "<url do banco>" -f roles.sql -f schema.sql -f data.sql
+
+on:
+  schedule:
+    # 06:30 UTC = 03:30 em Brasilia, fora do horario da clinica.
+    - cron: '30 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+      # Projeto do Dr. Fabio, da variavel do repositorio (ver deploy-pages.yml).
+      # Estava fixo o banco do Dr. Marcello, de quem este sistema e espelho.
+      PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+    steps:
+      - name: Conferir os segredos
+        run: |
+          if [ -z "$PROJECT_REF" ] || [ "$PROJECT_REF" = "favohmryseurvnlxocfc" ]; then
+            echo "::error::Backup NAO feito. SUPABASE_PROJECT_REF falta ou aponta para o banco do Dr. Marcello."
+            exit 1
+          fi
+          faltando=""
+          [ -z "$SUPABASE_ACCESS_TOKEN" ] && faltando="$faltando SUPABASE_ACCESS_TOKEN"
+          [ -z "$SUPABASE_DB_PASSWORD" ] && faltando="$faltando SUPABASE_DB_PASSWORD"
+          [ -z "$BACKUP_PASSPHRASE" ] && faltando="$faltando BACKUP_PASSPHRASE"
+          if [ -n "$faltando" ]; then
+            echo "::error::Backup NAO feito. Falta configurar nos secrets do repositorio:$faltando"
+            exit 1
+          fi
+
+      - name: Baixar o projeto
+        uses: actions/checkout@v6
+
+      - name: Preparar a CLI do Supabase
+        uses: supabase/setup-cli@v1
+        with:
+          version: 2.117.0
+
+      - name: Copiar o banco
+        run: |
+          supabase link --project-ref "$PROJECT_REF" --password "$SUPABASE_DB_PASSWORD"
+          mkdir -p copia
+          supabase db dump --linked --role-only -f copia/roles.sql
+          supabase db dump --linked -f copia/schema.sql
+          supabase db dump --linked --data-only --use-copy -f copia/data.sql
+          # Dump vazio e falha, e nao sucesso: o erro silencioso e o que ja
+          # custou semanas aqui.
+          if [ ! -s copia/data.sql ] || [ ! -s copia/schema.sql ]; then
+            echo "::error::O dump saiu vazio. Backup NAO feito."
+            exit 1
+          fi
+
+      - name: Cifrar
+        run: |
+          nome="backup-$(date -u +%Y-%m-%d)"
+          tar czf "$nome.tar.gz" -C copia .
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$BACKUP_PASSPHRASE" \
+            --symmetric --cipher-algo AES256 -o "$nome.tar.gz.gpg" "$nome.tar.gz"
+          # Nada em claro sobra no disco da maquina da execucao.
+          rm -rf copia "$nome.tar.gz"
+          echo "NOME=$nome" >> "$GITHUB_ENV"
+          ls -la "$nome.tar.gz.gpg"
+
+      - name: Guardar
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NOME }}
+          path: ${{ env.NOME }}.tar.gz.gpg
+          retention-days: 30
+          if-no-files-found: error

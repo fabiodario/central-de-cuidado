@@ -1,0 +1,15 @@
+{
+ "identidade": "marcello",
+ "familia": "com_consulta",
+ "inicio": "2026-10-14T15:00:00Z",
+ "mensagens": [
+  { "texto": "oi, preciso mudar a consulta da Helena, nao vou conseguir ir" },
+  { "toque": "4" },
+  { "toque": "REMARCAR" },
+  { "toque": "SIM" },
+  { "texto": "santos" },
+  { "toque": "2" },
+  { "texto": "ah nao, pensando bem deixa a que ja ta marcada mesmo" },
+  { "texto": "ok obrigada" }
+ ]
+}

@@ -1,0 +1,204 @@
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 36 28% 97%;
+    --foreground: 211 67% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 211 67% 11%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 211 67% 11%;
+    --primary: 211 67% 11%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 31 43% 94%;
+    --secondary-foreground: 211 67% 11%;
+    --muted: 210 20% 96%;
+    --muted-foreground: 215 15% 45%;
+    --accent: 24 58% 92%;
+    --accent-foreground: 211 67% 11%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 210 19% 89%;
+    --input: 210 19% 86%;
+    --ring: 24 62% 62%;
+    --radius: 1rem;
+    --sidebar-background: 211 67% 11%;
+    --sidebar-foreground: 210 20% 96%;
+    --sidebar-primary: 24 62% 62%;
+    --sidebar-primary-foreground: 211 67% 11%;
+    --sidebar-accent: 212 52% 18%;
+    --sidebar-accent-foreground: 0 0% 100%;
+    --sidebar-border: 212 42% 22%;
+    --sidebar-ring: 24 62% 62%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    background: #f7f5f1;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    min-width: 320px;
+    min-height: 100vh;
+    font-family: 'Manrope', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
+  }
+
+  button,
+  a {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  :focus-visible {
+    outline: 3px solid rgba(47, 127, 193, 0.32);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: #cfe4f6;
+    color: #081b2c;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .surface-card {
+    border: 1px solid rgba(8, 27, 44, 0.075);
+    background: rgba(255, 255, 255, 0.92);
+    box-shadow:
+      0 1px 2px rgba(8, 27, 44, 0.025),
+      0 14px 34px rgba(8, 27, 44, 0.045);
+  }
+
+  /* Barra de rolagem fina e clara, para as areas que rolam por dentro (a
+     lista e a conversa em Respostas). A barra padrao do Windows tem 17px,
+     fundo cinza e setas nas pontas - numa coluna de 320px ela vira um
+     elemento de interface, e nao um indicador. Esta some quando nao ha o
+     que rolar, escurece um pouco ao passar o mouse e nao tem trilho. */
+  .rolagem-fina {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(8, 27, 44, 0.16) transparent;
+  }
+  .rolagem-fina::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .rolagem-fina::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .rolagem-fina::-webkit-scrollbar-thumb {
+    background: rgba(8, 27, 44, 0.16);
+    border-radius: 999px;
+  }
+  .rolagem-fina:hover::-webkit-scrollbar-thumb {
+    background: rgba(8, 27, 44, 0.3);
+  }
+  .rolagem-fina::-webkit-scrollbar-button {
+    display: none;
+    height: 0;
+  }
+
+  .soft-grid {
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+
+  .animate-enter {
+    animation: enter 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .scrollbar-subtle {
+    scrollbar-color: rgba(8, 27, 44, 0.18) transparent;
+    scrollbar-width: thin;
+  }
+}
+
+@keyframes enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/*
+ * Contorno pulsante da foto no topo (01/10/2026), no azul-marinho do BI
+ * (#0A1F32), pulsando devagar como os indicadores dos paineis. Na barra
+ * escura do celular o marinho some no fundo, entao la o halo e claro.
+ * Quem pediu menos movimento no sistema ve so o contorno, parado.
+ */
+.foto-pulsante {
+  box-shadow: 0 0 0 2px #0a1f32;
+  animation: foto-pulso 2.8s ease-in-out infinite;
+}
+.foto-pulsante-escura {
+  box-shadow: 0 0 0 2px #86bce4;
+  animation: foto-pulso-escura 2.8s ease-in-out infinite;
+}
+@keyframes foto-pulso {
+  0%, 100% { box-shadow: 0 0 0 2px #0a1f32, 0 0 0 2px rgba(10, 31, 50, 0.45); }
+  50% { box-shadow: 0 0 0 2px #0a1f32, 0 0 0 9px rgba(10, 31, 50, 0); }
+}
+@keyframes foto-pulso-escura {
+  0%, 100% { box-shadow: 0 0 0 2px #86bce4, 0 0 0 2px rgba(134, 188, 228, 0.5); }
+  50% { box-shadow: 0 0 0 2px #86bce4, 0 0 0 8px rgba(134, 188, 228, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .foto-pulsante,
+  .foto-pulsante-escura {
+    animation: none;
+  }
+}
+
+/*
+ * Balao do modo WhatsApp na barra do celular (02/10/2026): o azul do sistema,
+ * pulsando devagar como a foto, para quem nunca usou descobrir que ele existe.
+ */
+.pulso-whatsapp {
+  animation: pulso-whatsapp 2.6s ease-in-out infinite;
+}
+@keyframes pulso-whatsapp {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(47, 127, 193, 0.65); }
+  50% { box-shadow: 0 0 0 8px rgba(47, 127, 193, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pulso-whatsapp {
+    animation: none;
+  }
+}

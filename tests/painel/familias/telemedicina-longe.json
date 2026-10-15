@@ -1,0 +1,52 @@
+{
+ "identidade": "marcello",
+ "familia": "nova",
+ "inicio": "2026-10-14T17:00:00Z",
+ "mensagens": [
+  {
+   "texto": "Oi boa tarde! vcs fazem consulta online? moro em Campinas"
+  },
+  {
+   "texto": "vcs fazem consulta online?"
+  },
+  {
+   "toque": "0"
+  },
+  {
+   "toque": "1"
+  },
+  {
+   "toque": "3"
+  },
+  {
+   "texto": "como funciona? precisa baixar algum app?"
+  },
+  {
+   "texto": "e se o medico precisar examinar presencial? ai tenho q ir ate santos?"
+  },
+  {
+   "espera_min": 20
+  },
+  {
+   "texto": "0"
+  },
+  {
+   "texto": "quero marcar a consulta online"
+  },
+  {
+   "toque": "3"
+  },
+  {
+   "texto": "pode ser sexta dia 16"
+  },
+  {
+   "toque": "4"
+  },
+  {
+   "texto": "Lucas Ferreira Campos, nasceu 03/05/2022"
+  },
+  {
+   "texto": "ja falei kkk 03/05/2022"
+  }
+ ]
+}

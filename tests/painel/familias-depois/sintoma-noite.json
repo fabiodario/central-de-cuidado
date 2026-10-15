@@ -1,0 +1,49 @@
+{
+ "identidade": "marcello",
+ "familia": "nova",
+ "inicio": "2026-10-14T01:40:00Z",
+ "mensagens": [
+  {
+   "texto": "boa noite meu filho ta vomitando desde a tarde e com febre 38"
+  },
+  {
+   "texto": "posso dar dipirona?"
+  },
+  {
+   "texto": "ele tem 3 anos"
+  },
+  {
+   "texto": "mas posso ou nao?"
+  },
+  {
+   "texto": "ta bom. entao quero marcar uma consulta pra ele o mais rapido possivel"
+  },
+  {
+   "toque": "MARCAR_AGORA"
+  },
+  {
+   "texto": "santos"
+  },
+  {
+   "toque": "1"
+  },
+  {
+   "texto": "8h"
+  },
+  {
+   "texto": "lucas oliveira santos"
+  },
+  {
+   "texto": "12/03/23"
+  },
+  {
+   "texto": "patricia oliveira"
+  },
+  {
+   "texto": "nao sei de cabeca"
+  },
+  {
+   "texto": "paty.oliveira@exemplo.com"
+  }
+ ]
+}

@@ -1,0 +1,49 @@
+{
+ "identidade": "marcello",
+ "familia": "cadastrada",
+ "inicio": "2026-10-14T17:30:00Z",
+ "mensagens": [
+  {
+   "anexo": true
+  },
+  {
+   "texto": "o resultado ta normal?"
+  },
+  {
+   "texto": "o dr pode dar uma olhada?"
+  },
+  {
+   "texto": "ou precisa marcar retorno pra mostrar o exame pra ele?"
+  },
+  {
+   "espera_min": 120
+  },
+  {
+   "texto": "oi, ninguem respondeu ainda. vou deixar marcado o retorno entao, quero em sao paulo"
+  },
+  {
+   "toque": "0"
+  },
+  {
+   "toque": "2"
+  },
+  {
+   "texto": "sao paulo"
+  },
+  {
+   "texto": "2"
+  },
+  {
+   "toque": "2"
+  },
+  {
+   "texto": "as 16h"
+  },
+  {
+   "texto": "16:00"
+  },
+  {
+   "texto": "obrigada! mas o dr vai olhar o exame antes ne? se precisar de algo antes me avisa"
+  }
+ ]
+}

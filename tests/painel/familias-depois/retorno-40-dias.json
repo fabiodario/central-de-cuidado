@@ -1,0 +1,7 @@
+{ "identidade": "marcello", "familia": "cadastrada", "inicio": "2026-10-14T13:45:00Z",
+  "mensagens": [
+    { "texto": "bom dia, o dr marcello pediu pra Helena voltar daqui uns 40 dias, mais ou menos no fim de novembro, consigo marcar ja?" },
+    { "texto": "ok. em santos, de manha, tipo dia 25 ou a semana depois" },
+    { "espera_min": 90 },
+    { "texto": "oi, conseguem ver pra mim?" }
+  ] }

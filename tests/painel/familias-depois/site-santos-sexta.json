@@ -1,0 +1,37 @@
+{
+ "identidade": "marcello",
+ "familia": "nova",
+ "inicio": "2026-10-14T13:00:00Z",
+ "mensagens": [
+  {
+   "texto": "Olá! Vim pelo site do Dr. Marcello e gostaria de agendar uma consulta."
+  },
+  {
+   "texto": "Santos, por favor. Vocês têm horário na sexta de manhã?"
+  },
+  {
+   "texto": "Não tem nenhum horário na sexta-feira?"
+  },
+  {
+   "texto": "Entendi. Então pode ser na quarta, dia 21, de manhã."
+  },
+  {
+   "toque": "3"
+  },
+  {
+   "texto": "Helena Martins Costa"
+  },
+  {
+   "texto": "12 de março de 2020"
+  },
+  {
+   "texto": "Juliana Martins Costa"
+  },
+  {
+   "texto": "Não sei o CPF dela de cabeça agora. Posso mandar depois?"
+  },
+  {
+   "texto": "juliana.mcosta@gmail.com"
+  }
+ ]
+}

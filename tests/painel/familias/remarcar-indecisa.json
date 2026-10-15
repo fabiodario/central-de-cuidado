@@ -1,0 +1,43 @@
+{
+ "identidade": "marcello",
+ "familia": "com_consulta",
+ "inicio": "2026-10-14T15:00:00Z",
+ "mensagens": [
+  {
+   "texto": "oi, preciso mudar a consulta da Helena, nao vou conseguir ir"
+  },
+  {
+   "toque": "4"
+  },
+  {
+   "toque": "REMARCAR"
+  },
+  {
+   "toque": "SIM"
+  },
+  {
+   "texto": "santos"
+  },
+  {
+   "texto": "1"
+  },
+  {
+   "toque": "2"
+  },
+  {
+   "texto": "ah nao, pensando bem deixa a que ja ta marcada mesmo"
+  },
+  {
+   "texto": "nao quero remarcar mais, quero manter a do dia 21"
+  },
+  {
+   "texto": "0"
+  },
+  {
+   "texto": "a consulta do dia 21 continua marcada ne?"
+  },
+  {
+   "texto": "so queria confirmar que a consulta da Helena dia 21 as 8h nao foi desmarcada. obrigada"
+  }
+ ]
+}

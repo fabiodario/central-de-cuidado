@@ -1,0 +1,25 @@
+{
+ "identidade": "marcello",
+ "familia": "nova",
+ "inicio": "2026-10-14T21:00:00Z",
+ "mensagens": [
+  {
+   "texto": "quem é? recebi ligação desse número"
+  },
+  {
+   "texto": "não tenho filho pequeno, deve ser engano"
+  },
+  {
+   "texto": "tirem meu número da lista por favor"
+  },
+  {
+   "espera_min": 60
+  },
+  {
+   "texto": "e aí? vão tirar ou não"
+  },
+  {
+   "texto": "vou bloquear esse número então. absurdo"
+  }
+ ]
+}

@@ -1,0 +1,34 @@
+{
+ "identidade": "marcello",
+ "familia": "cadastrada",
+ "inicio": "2026-10-14T16:00:00Z",
+ "mensagens": [
+  {
+   "texto": "vcs atendem unimed?"
+  },
+  {
+   "texto": "e bradesco saude?"
+  },
+  {
+   "texto": "como funciona o reembolso?"
+  },
+  {
+   "texto": "preciso da nota fiscal da consulta do mes passado pra mandar pro plano"
+  },
+  {
+   "texto": "oi? nao perguntei idade kkk. eu quero a nota fiscal da consulta da helena"
+  },
+  {
+   "texto": "foi dia 16/09 em santos. pode mandar por aqui msm ou no email"
+  },
+  {
+   "espera_min": 120
+  },
+  {
+   "texto": "oi, alguem viu minha msg da nota fiscal?"
+  },
+  {
+   "texto": "ta, fico no aguardo. obrigada"
+  }
+ ]
+}

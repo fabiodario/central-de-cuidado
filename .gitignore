@@ -1,0 +1,76 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Arquivos gerados apenas para abertura local
+ABRIR SISTEMA.html
+SIMULADOR - Dr Fabio Dario.html
+
+# Metadados locais dos agentes de desenvolvimento
+.agents/
+.codex/
+
+# Environment variables (mantenha apenas o modelo versionado)
+.env
+.env.*
+!.env.example
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+# Todo arquivo gerado pelo npm run test:bot (15/10/2026). A lista abaixo,
+# herdada, esquecia alguns (aviso-mudanca, campos-do-texto, modelos), e eles
+# entravam no repositorio a cada teste.
+tests/*.build.mjs
+tests/atendimento.build.mjs
+tests/lembrete.build.mjs
+tests/prontuario.build.mjs
+tests/datas.build.mjs
+tests/receita-no-texto.build.mjs
+tests/nome.build.mjs
+tests/categoria-da-receita.build.mjs
+tests/mascaras.build.mjs
+tests/eventos-do-webhook.build.mjs
+tests/expediente.build.mjs
+tests/papel.build.mjs
+tests/paginar.build.mjs
+tests/alergias.build.mjs
+tests/dados-para-memed.build.mjs
+tests/continuidade-da-consulta.build.mjs
+tests/retorno.build.mjs
+tests/curvas.build.mjs
+tests/followup.build.mjs
+tests/telefone-br.build.mjs
+tests/mensagem-recebida.build.mjs
+tests/linha-do-tempo.build.mjs
+tests/saude-dos-envios.build.mjs
+tests/bloqueio-de-dia.build.mjs
+tests/whatsapp-teste.build.mjs
+tests/marca.build.mjs
+tests/quem-atende.build.mjs
+tests/web-push.build.mjs
+tests/aviso-da-equipe.build.mjs
+tests/rajada.build.mjs
+tests/ficha-pendente.build.mjs
+tests/conteudo.build.mjs
+tests/simulador.build/
+
+# Saida do SIMULAR CONVERSAS.bat
+simulacao-do-robo.txt

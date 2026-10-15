@@ -1,0 +1,15 @@
+{ "identidade": "marcello", "familia": "cadastrada", "inicio": "2026-10-14T14:30:00Z",
+  "mensagens": [
+    {"texto": "Oi, bom dia! Sou a mãe da Helena. Perdi a receita do omeprazol dela, tem como pedir uma segunda via?"},
+    {"texto": "Na verdade preciso dos dois, a receita e tbm o pedido do exame de sangue que o dr falou na consulta"},
+    {"texto": "omeprazol"},
+    {"texto": "não, eu perdi o papel mesmo"},
+    {"texto": "Obrigada! E o pedido do exame de sangue? Também preciso"},
+    {"espera_min": 5},
+    {"toque": "0"},
+    {"toque": "5"},
+    {"toque": "2"},
+    {"texto": "Não tenho o pedido, é o exame de sangue que o dr falou na última consulta. Não sei o nome certinho"},
+    {"toque": "não"},
+    {"texto": "Perfeito. Vocês mandam por aqui pelo WhatsApp mesmo ou por e-mail? Se for por e-mail é marina@exemplo.com"}
+  ] }

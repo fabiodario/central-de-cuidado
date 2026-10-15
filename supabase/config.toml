@@ -1,0 +1,48 @@
+﻿project_id = "central-cuidado-fabio-dario"
+
+# Sem este arquivo a CLI publica TODA funcao com verify_jwt = true, e o gateway
+# do Supabase passa a exigir um JWT antes do codigo da funcao rodar. Isso quebra
+# quem chama de fora do app:
+#   - a Meta, que entrega os webhooks sem JWT nenhum;
+#   - o pg_cron, que chama o disparo diario pelo pg_net.
+# Nos dois casos a autenticacao e feita dentro da propria funcao (assinatura da
+# Meta e CRON_SECRET), entao desligar a verificacao do gateway nao abre a porta.
+
+[functions.whatsapp-send]
+# Disparo manual pela tela: exige sessao de usuario e checa RLS. Mantem o JWT.
+verify_jwt = true
+
+[functions.whatsapp-reply]
+# Resposta livre da equipe pela tela. Exige sessao de usuario e checa RLS.
+verify_jwt = true
+
+[functions.meta-webhook]
+# A Meta nao envia JWT. A funcao valida a assinatura com META_APP_SECRET.
+verify_jwt = false
+
+[functions.whatsapp-dispatch]
+# Chamada pelo pg_cron via pg_net. A funcao exige o header x-cron-secret.
+verify_jwt = false
+
+[functions.appointment-reminders]
+# Lembrete de consulta, tambem chamado pelo pg_cron. Exige x-cron-secret.
+verify_jwt = false
+
+[functions.transcrever-audio]
+# Chamada pelo navegador com a sessao do usuario logado. Mantem o JWT.
+verify_jwt = true
+
+[functions.aviso-mudanca-santos]
+# Aviso unico da mudanca de Santos (26/09/2026), chamado a mao pelo editor SQL
+# via pg_net, sem sessao de usuario. Exige x-cron-secret, como o lembrete.
+verify_jwt = false
+
+[functions.notificar-equipe]
+# Chamada pelo navegador com a sessao do usuario logado (chave publica e botao
+# de teste das notificacoes no celular). Mantem o JWT.
+verify_jwt = true
+
+[functions.ficha-pendente]
+# Reserva sem cadastro (01/10/2026): chamada a cada 15 min pelo pg_cron, sem
+# sessao de usuario. Exige x-cron-secret, como o lembrete.
+verify_jwt = false

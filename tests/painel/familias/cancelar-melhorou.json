@@ -1,0 +1,49 @@
+{
+ "identidade": "marcello",
+ "familia": "com_consulta",
+ "inicio": "2026-10-14T20:00:00Z",
+ "mensagens": [
+  {
+   "texto": "boa tarde, pode cancelar a consulta da Helena, ela ja melhorou graças a Deus"
+  },
+  {
+   "toque": "CANCELAR"
+  },
+  {
+   "texto": "sim pode cancelar"
+  },
+  {
+   "texto": "ok obrigada. mas se ela piorar eu perco o retorno?"
+  },
+  {
+   "texto": "e posso marcar de novo depois?"
+  },
+  {
+   "texto": "nao agora nao precisa, so queria saber mesmo. obrigada"
+  },
+  {
+   "texto": "ta bom, obrigada!"
+  },
+  {
+   "espera_min": 2400
+  },
+  {
+   "texto": "oi bom dia, a Helena voltou a reclamar de dor na barriga, queria marcar de novo"
+  },
+  {
+   "texto": "quero marcar em santos"
+  },
+  {
+   "texto": "1"
+  },
+  {
+   "toque": "1"
+  },
+  {
+   "texto": "as 8 mesmo"
+  },
+  {
+   "toque": "1"
+  }
+ ]
+}

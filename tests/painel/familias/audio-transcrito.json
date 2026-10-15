@@ -1,0 +1,49 @@
+{
+ "identidade": "marcello",
+ "familia": "cadastrada",
+ "inicio": "2026-10-14T15:30:00Z",
+ "mensagens": [
+  {
+   "texto": "oi bom dia tudo bem entao a helena passou com o dr mes passado e ele pediu pra voltar com os exames que ela fez semana passada ai eu queria saber se esse retorno é cobrado e se tem horario pra semana que vem em santos de preferencia de manha porque eu trabalho a tarde e outra coisa o irmao dela de 16 anos ta com refluxo o dr atende adolescente?"
+  },
+  {
+   "texto": "nao nao eu nao to pedindo orientacao nao kkk é que assim eu so queria saber duas coisas primeiro se o retorno da helena com os exames é cobrado ou se ta incluso na consulta que ela fez e segundo se o dr atende adolescente porque o meu filho mais velho tem 16 e eu queria levar ele tambem mas nao sei se pediatra atende ate essa idade"
+  },
+  {
+   "texto": "ah que bom entao ele atende o meu filho tambem otimo depois eu vejo dele mas e o retorno da helena é cobrado ou nao? porque na primeira consulta eu paguei particular e a moça falou alguma coisa de retorno mas eu nao lembro direito e tem horario semana que vem em santos de manha?"
+  },
+  {
+   "toque": "1"
+  },
+  {
+   "texto": "pode ser dia 21 sim mas tem que ser de manha ta porque a tarde eu trabalho e voce ainda nao me respondeu se o retorno é cobrado ne porque se for eu preciso me programar"
+  },
+  {
+   "toque": "4"
+  },
+  {
+   "texto": "ai obrigada mas so pra deixar claro isso é o retorno ta nao é consulta nova ela passou com o dr dia 22 do mes passado se nao me engano e eu vou levar os exames de sangue e o ultrassom que ela fez e ai esse retorno é cobrado ou nao? ninguem me respondeu isso ainda"
+  },
+  {
+   "toque": "1"
+  },
+  {
+   "toque": "1"
+  },
+  {
+   "texto": "ah ta agora sim entao inclui retorno em 30 dias ne ela passou dia 22/09 e o retorno ficou pra 21/10 entao ta dentro ne nao vou pagar de novo? e ai esse link de pagamento da livance eu nao preciso pagar ne porque é retorno, so confirma pra mim pra eu nao pagar errado"
+  },
+  {
+   "toque": "9"
+  },
+  {
+   "texto": "ta bom entao deixa eu explicar pra moça marquei agora o retorno da helena dia 21/10 as 10h em santos ela passou dia 22/09 queria confirmar que nao paga e que eu nao preciso pagar aquele link da livance e aproveitando queria marcar tambem pro meu filho o pedro de 16 anos que ta com refluxo se der no mesmo dia logo depois dela seria otimo porque ai eu levo os dois de manha"
+  },
+  {
+   "toque": "MARCAR_AGORA"
+  },
+  {
+   "toque": "2"
+  }
+ ]
+}

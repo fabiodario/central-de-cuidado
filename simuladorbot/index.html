@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#000000" />
+    <!-- Pagina de demonstracao para reunioes: fora dos buscadores. -->
+    <meta name="robots" content="noindex, nofollow" />
+    <!--
+      Sempre em https (14/10/2026). O GitHub Pages serve o dominio tambem em
+      http, e aberta assim a pagina ficava girando para sempre: em pagina nao
+      segura o navegador desliga o crypto.subtle, que confere se a conta esta
+      liberada. Alem disso, http e https sao "sites" diferentes para o
+      navegador, cada um com o seu login - o que entrou num nao vale no outro.
+      Fora do ar (localhost do npm run dev) nao mexe em nada.
+    -->
+    <script>
+      if (location.protocol === 'http:' && !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)) {
+        location.replace('https:' + location.href.slice(5));
+      }
+    </script>
+    <!-- O icone vai dentro do arquivo (15/10/2026): o simulador do Dr. Fabio
+         tambem e aberto como arquivo solto, com duplo clique, e ali nao existe
+         ../favicon.ico para buscar. -->
+    <link rel="icon" type="image/png" href="/src/assets/fabio-icone.png" />
+    <title>Simulador do atendimento | Dr. Fábio Dario</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/simulador/main.tsx"></script>
+  </body>
+</html>

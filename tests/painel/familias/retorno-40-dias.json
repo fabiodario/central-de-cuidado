@@ -1,0 +1,11 @@
+{ "identidade": "marcello", "familia": "cadastrada", "inicio": "2026-10-14T13:45:00Z",
+  "mensagens": [
+    { "texto": "bom dia, o dr marcello pediu pra Helena voltar daqui uns 40 dias, mais ou menos no fim de novembro, consigo marcar ja?" },
+    { "toque": "1" },
+    { "texto": "e pro dia 25 de novembro?" },
+    { "texto": "mas nenhuma dessas serve, ela tem q voltar so no fim de novembro. nao tem data mais pra frente?" },
+    { "toque": "9" },
+    { "texto": "oi! queria marcar o retorno da Helena em Santos pro fim de novembro, tipo dia 25 ou a semana depois. o dr pediu uns 40 dias. pode ser qualquer horario de manha" },
+    { "espera_min": 90 },
+    { "texto": "oi, conseguem ver pra mim?" }
+  ] }

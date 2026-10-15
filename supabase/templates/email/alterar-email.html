@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="pt-BR">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Troca de e-mail</title></head>
+<body style="margin:0;padding:0;background:#f4f2ee;font-family:'Segoe UI',Tahoma,Arial,Helvetica,sans-serif;color:#081b2c;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="font-family:'Segoe UI',Tahoma,Arial,Helvetica,sans-serif;background:#f4f2ee;padding:36px 12px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="font-family:'Segoe UI',Tahoma,Arial,Helvetica,sans-serif;max-width:520px;">
+        <tr><td style="font-family:'Segoe UI',Tahoma,Arial,Helvetica,sans-serif;background:#081b2c;border-radius:20px 20px 0 0;padding:26px 32px 22px;">
+          <img src="https://PREENCHER-DOMINIO-DO-DR-FABIO/assets/logo-email.png" alt="Dr. Fábio Dario" width="200" style="font-family:'Segoe UI',Tahoma,Arial,Helvetica,sans-serif;display:block;width:200px;height:auto;border:0">
+          <div style="font-family:'Segoe UI',Tahoma,Arial,Helvetica,sans-serif;font-size:10px;letter-spacing:.24em;text-transform:uppercase;color:rgba(255,255,255,.55);margin-top:14px;">Central de Cuidado</div>
+        </td></tr>
+        <tr><td style="font-family:'Segoe UI',Tahoma,Arial,Helvetica,sans-serif;background:#ffffff;border-radius:0 0 20px 20px;padding:34px 32px 30px;border:1px solid rgba(8,27,44,.06);border-top:0;">
+          <div style="font-family:'Segoe UI',Tahoma,Arial,Helvetica,sans-serif;font-size:11px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#1f4f78;margin-bottom:10px;">Troca de e-mail</div>
+          <div style="font-family:'Segoe UI',Tahoma,Arial,Helvetica,sans-serif;font-size:22px;font-weight:700;letter-spacing:-.02em;margin-bottom:14px;color:#081b2c;">Confirme o novo e-mail.</div>
+          <div style="font-family:'Segoe UI',Tahoma,Arial,Helvetica,sans-serif;font-size:14px;line-height:1.7;color:#3d4852;">Você pediu para trocar o e-mail da sua conta na Central de Cuidado para <strong>{{ .NewEmail }}</strong>. Confirme para concluir a troca.</div>
+          <table role="presentation" cellspacing="0" cellpadding="0" style="font-family:'Segoe UI',Tahoma,Arial,Helvetica,sans-serif;margin:26px 0 8px;"><tr>
+            <td style="font-family:'Segoe UI',Tahoma,Arial,Helvetica,sans-serif;background:#2f7fc1;border-radius:14px;">
+              <a href="{{ .ConfirmationURL }}" style="font-family:'Segoe UI',Tahoma,Arial,Helvetica,sans-serif;display:inline-block;padding:13px 26px;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700;">Confirmar troca de e-mail</a>
+            </td>
+          </tr></table>
+          <div style="font-family:'Segoe UI',Tahoma,Arial,Helvetica,sans-serif;font-size:12px;line-height:1.6;color:#8a8f96;margin-top:18px;">Se o botão não abrir, copie este endereço no navegador:<br><a href="{{ .ConfirmationURL }}" style="font-family:'Segoe UI',Tahoma,Arial,Helvetica,sans-serif;color:#1f4f78;word-break:break-all;">{{ .ConfirmationURL }}</a></div>
+        </td></tr>
+        <tr><td style="font-family:'Segoe UI',Tahoma,Arial,Helvetica,sans-serif;padding:18px 8px 0;font-size:11px;line-height:1.7;color:#8a8f96;">
+          Se você não pediu isso, fale com o administrador da clínica.<br>
+          Consultório Dr. Fábio Dario · Otorrinolaringologia · Santos e São Paulo<br>
+          Este é um e-mail automático do sistema da clínica; não precisa responder.
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
