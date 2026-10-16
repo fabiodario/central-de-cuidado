@@ -18,6 +18,7 @@ Gera:
     src/assets/fabio-logo-fundo-claro.png   traco preto, texto escuro (impressao, troca de senha)
     src/assets/fabio-logo-fundo-escuro.png  traco creme, texto branco (login, menu, simulador)
     src/assets/fabio-icone.png              foto do robo no simulador
+    public/logo-email.png                   cabecalho dos e-mails do login
     public/favicon.ico, icone-16/32/192/512, icone-maskable-512,
     apple-touch-icon, icone-badge
 Depois de gerar, suba o ?v= dos icones em index.html, public/manifest.json e
@@ -115,6 +116,10 @@ def logo(simb, cor_texto, saida, altura=280, altura_final=200):
 
 logo(simbolo, TEXTO_ESCURO, ASSETS / 'fabio-logo-fundo-claro.png')
 logo(traco_em(simbolo, CREME), BRANCO, ASSETS / 'fabio-logo-fundo-escuro.png')
+# Cabecalho azul-escuro dos e-mails do login (supabase/templates/email): 400 px
+# de largura, mostrado a 200 px, nitido em tela retina. Fica em public/ para
+# ter endereco proprio no site (os e-mails buscam a imagem pela internet).
+logo(traco_em(simbolo, CREME), BRANCO, PUBLIC / 'logo-email.png', altura_final=95)
 
 # ---------------------------------------------------------------- icones
 

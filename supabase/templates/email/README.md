@@ -14,21 +14,29 @@ troque o **Subject** e cole o HTML do arquivo no corpo. Salve um por um.
 As variaveis entre chaves duplas ({{ .ConfirmationURL }}, {{ .NewEmail }}) sao
 preenchidas pelo Supabase; nao mexa nelas.
 
-## Antes de colar: o logo
+## O logo
 
 Os cinco modelos mostram o logo do Dr. Fabio a partir de
-`https://PREENCHER-DOMINIO-DO-DR-FABIO/assets/logo-email.png`. O marcador e de
-proposito (15/10/2026): o endereco onde o logo vai ficar ainda nao existe, e o
-que estava aqui era o logo do Dr. Marcello, de onde o sistema veio. Publique o
-logo (PNG claro, largura 400 px, para o fundo azul-escuro do cabecalho) e
-troque o marcador nos cinco arquivos antes de colar no Supabase. Sem isso o
-e-mail mostra so o texto alternativo "Dr. Fábio Dario" no lugar da imagem.
+`https://fabiodario.github.io/central-de-cuidado/logo-email.png` (16/10/2026):
+o arquivo e `public/logo-email.png`, publicado junto com o sistema, e sai de
+`scripts/marca/gerar_marca.py` (versao de letra branca para o cabecalho
+azul-escuro, 400 px de largura, mostrada a 200 px). Se o sistema mudar de
+endereco, troque nos cinco arquivos e cole de novo no Supabase.
 
 ## Remetente
 
-O nome "Supabase Auth" e o endereco noreply@mail.app.supabase.io so mudam com
-SMTP proprio (Authentication → SMTP Settings). Precisa de uma conta num
-provedor de envio (Resend, Brevo, SendGrid...) e de um dominio verificado,
-por exemplo um endereco no dominio do site do Dr. Fabio (drfabiopavanidario.com.br),
-se o consultorio liberar. Sem isso o texto fica bonito, mas o remetente
-continua sendo o do Supabase.
+Desde 16/10/2026 os e-mails saem pelo Gmail `fabiopavanisistema@gmail.com`
+(Authentication → Emails → SMTP Settings: smtp.gmail.com, porta 465, com uma
+senha de app da conta), com o nome "Central de Cuidado | Dr. Fábio Dario".
+O servico de e-mail padrao do Supabase so entrega para quem e da equipe da
+organizacao no Supabase, 2 por hora: o cadastro do Dr. Fabio e da Dayane e o
+"Esqueci minha senha" nao funcionavam sem SMTP proprio.
+
+O endereco `fabiopavani@proton.me` nao serve de remetente: a Proton so libera
+SMTP para dominio proprio, e e-mail em nome de um @proton.me mandado por outro
+servico cai no spam (a Proton publica DMARC com p=quarantine). Para sair de
+`nao-responda@drfabiopavanidario.com.br`, o caminho e o Resend com o dominio,
+que precisa de acesso ao DNS na GoDaddy.
+
+Esses e-mails so vao para a equipe (confirmar cadastro, trocar senha):
+paciente nunca recebe nenhum deles.
