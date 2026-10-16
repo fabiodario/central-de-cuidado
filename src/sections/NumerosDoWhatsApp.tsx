@@ -9,6 +9,7 @@ import {
   UserRound,
 } from 'lucide-react'
 import { getCurrentMembership, numerosDoWhatsApp, type NumerosDoWhatsApp as Numeros } from '@/lib/repository'
+import { publicoDaClinica } from '@/lib/publico'
 
 const NAVY = '#081b2c'
 const AZUL = '#2f7fc1'
@@ -124,6 +125,9 @@ function Bloco({
 }
 
 export default function NumerosDoWhatsApp() {
+  // Quem responde ao lembrete: o paciente no otorrino, a familia na pediatria
+  // (15/10/2026, ver publico.ts).
+  const geral = publicoDaClinica() === 'geral'
   const [dias, setDias] = useState(30)
   const [dados, setDados] = useState<Numeros | null>(null)
   const [carregando, setCarregando] = useState(true)
@@ -303,7 +307,7 @@ export default function NumerosDoWhatsApp() {
               contadas em lugar nenhum. */}
           <Bloco
             titulo="Respostas ao lembrete da véspera"
-            subtitulo="O que as famílias fizeram com o lembrete, pelo botão ou por escrito"
+            subtitulo={`O que ${geral ? 'os pacientes' : 'as famílias'} fizeram com o lembrete, pelo botão ou por escrito`}
           >
             {(() => {
               const respostas = [

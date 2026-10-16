@@ -51,6 +51,7 @@ import QuemEstaOnline from '@/components/QuemEstaOnline'
 import { AssinaturaEmLote } from '@/components/AssinaturaEmLote'
 import { enviarMinhaFoto, useEquipeOnline } from '@/lib/equipe-online'
 import { ligarModoWhatsApp } from '@/lib/modo-whatsapp'
+import { publicoDaClinica } from '@/lib/publico'
 
 type Tab = 'dashboard' | 'agenda' | 'followups' | 'conversas' | 'pacientes' | 'config' | 'admin'
 type Icon = ComponentType<{ className?: string; strokeWidth?: number }>
@@ -237,6 +238,9 @@ export default function Home() {
   // Clinica atual, para o logo do menu (ver lib/marca.ts). Comeca pela ultima
   // vista neste navegador para o menu nao piscar a cada recarga.
   const [clinicaId, setClinicaId] = useState<string | null>(ultimaClinicaVista)
+  // Quem espera resposta: o paciente no otorrino, a familia na pediatria
+  // (15/10/2026, ver publico.ts).
+  const geral = publicoDaClinica(clinicaId) === 'geral'
   const marca = clinicaId ? marcaDaClinica(clinicaId) : null
   const logo = marca ? logoNoFundoEscuro(marca) : null
   // Altura do cabecalho do celular, publicada como --altura-topo-celular (27/09/2026).
@@ -758,7 +762,9 @@ export default function Home() {
                       {
                         chave: 'conversas' as Tab,
                         n: espera.total,
-                        titulo: espera.total === 1 ? 'família esperando resposta' : 'famílias esperando resposta',
+                        titulo: geral
+                          ? espera.total === 1 ? 'paciente esperando resposta' : 'pacientes esperando resposta'
+                          : espera.total === 1 ? 'família esperando resposta' : 'famílias esperando resposta',
                         detalhe: espera.total > 0 ? `A mais antiga: ${espera.ha}` : '',
                         cor: esperaLonga ? 'bg-red-500' : 'bg-[#e0a33a]',
                       },

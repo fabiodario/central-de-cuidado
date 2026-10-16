@@ -10,6 +10,7 @@ import {
   type EstadoNoServidor,
   type SituacaoDoAparelho,
 } from '@/lib/notificacoes'
+import { publicoDaClinica } from '@/lib/publico'
 
 /**
  * Cartao "Avisos neste celular" em Preferencias (28/09/2026).
@@ -31,6 +32,9 @@ function quando(iso: string | null): string {
 }
 
 export default function NotificacoesNoCelular({ clinicId }: { clinicId: string | null }) {
+  // Quem pede para falar com a equipe: o paciente no otorrino, a familia na
+  // pediatria (15/10/2026, ver publico.ts).
+  const geral = publicoDaClinica(clinicId) === 'geral'
   const [situacao, setSituacao] = useState<SituacaoDoAparelho>(() => situacaoDoAparelho())
   const [estado, setEstado] = useState<EstadoNoServidor | null>(null)
   const [ocupado, setOcupado] = useState<'' | 'ativar' | 'testar' | 'desativar'>('')
@@ -93,7 +97,7 @@ export default function NotificacoesNoCelular({ clinicId }: { clinicId: string |
             <p className="text-[9px] font-extrabold uppercase tracking-[0.15em] text-[#1f4f78]">Notificações</p>
             <h2 className="mt-1 text-base font-extrabold text-[#081b2c]">Avisos neste celular</h2>
             <p className="mt-1 text-xs leading-relaxed text-[#50677b]">
-              Quando uma família pedir para falar com a equipe, marcar urgência ou pedir 2ª via de receita ou exame,
+              Quando {geral ? 'um paciente' : 'uma família'} pedir para falar com a equipe, marcar urgência ou pedir 2ª via de receita ou exame,
               este aparelho avisa como uma mensagem de WhatsApp. Tocar no aviso abre a conversa.
             </p>
           </div>

@@ -25,6 +25,7 @@ import {
 import { supabase } from '@/lib/supabase'
 import { situacaoDosAcompanhamentos } from '@/lib/repository'
 import { SaudeDosEnvios } from '@/components/SaudeDosEnvios'
+import { publicoDaClinica } from '@/lib/publico'
 
 const NAVY = '#081b2c'
 const AZUL = '#2f7fc1'
@@ -139,6 +140,9 @@ export default function Followups({ patients, setFollowup, onAbrirConversa }: Pr
   const { avisar, perguntar } = useDialogos()
   const [situacoes, setSituacoes] = useState<Map<string, SituacaoDoEnvio | null>>(new Map())
   const items = pendingFollowups(patients)
+  // Quem recebe e responde: o paciente no otorrino, a familia na pediatria
+  // (15/10/2026, ver publico.ts).
+  const geral = publicoDaClinica() === 'geral'
 
   // Ids dos que ja sairam, numa string so: muda quando um novo e enviado, e
   // nao a cada renderizacao (a lista de pacientes e recriada a cada carga).
@@ -210,8 +214,9 @@ export default function Followups({ patients, setFollowup, onAbrirConversa }: Pr
       if (responsePayload?.code === 'CONSENT_REQUIRED' && !consentConfirmed) {
         const confirmed = await perguntar({
           titulo: `${item.patient.responsavel || item.patient.nome} autorizou receber mensagens no WhatsApp?`,
-          detalhe:
-            'A autorização fica registrada no cadastro. Ela vale para os acompanhamentos de 15, 30 e 90 dias, e a família pode sair a qualquer momento respondendo SAIR.',
+          detalhe: `A autorização fica registrada no cadastro. Ela vale para os acompanhamentos de 15, 30 e 90 dias, e ${
+            geral ? 'o paciente' : 'a família'
+          } pode sair a qualquer momento respondendo SAIR.`,
           confirmar: 'Sim, autorizou',
           cancelar: 'Ainda não',
         })
@@ -389,7 +394,10 @@ export default function Followups({ patients, setFollowup, onAbrirConversa }: Pr
                 Fila inteligente
               </div>
               <h2 className="max-w-lg text-balance text-xl font-extrabold leading-tight tracking-[-0.035em] sm:text-2xl">
-                Hoje, o cuidado pede atenção para {overdue.length + today.length} {overdue.length + today.length === 1 ? 'família' : 'famílias'}.
+                Hoje, o cuidado pede atenção para {overdue.length + today.length}{' '}
+                {overdue.length + today.length === 1
+                  ? (geral ? 'paciente' : 'família')
+                  : (geral ? 'pacientes' : 'famílias')}.
               </h2>
               <p className="mt-3 max-w-xl text-[11px] leading-relaxed text-white/50 sm:text-xs">
                 A fila organiza automaticamente os contatos de 15, 30 e 90 dias, priorizando o que não pode esperar.
@@ -431,7 +439,7 @@ export default function Followups({ patients, setFollowup, onAbrirConversa }: Pr
             <Group title="Agendados" hint="Jornadas futuras já programadas" items={scheduled} accent="scheduled">{card}</Group>
             <Group
               title="Enviados, aguardando"
-              hint="A mensagem já saiu. Conclua quando a família responder ou não precisar de mais nada"
+              hint={`A mensagem já saiu. Conclua quando ${geral ? 'o paciente' : 'a família'} responder ou não precisar de mais nada`}
               items={aguardando}
               accent="sent"
             >

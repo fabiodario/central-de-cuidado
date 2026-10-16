@@ -69,6 +69,7 @@ import MandarHorarios from '@/sections/MandarHorarios'
 import SimuladorNasRespostas from '@/sections/SimuladorNasRespostas'
 import { useDialogos } from '@/components/dialogos-contexto'
 import { useVoltarDoCelular } from '@/lib/voltar-do-celular'
+import { publicoDaClinica } from '@/lib/publico'
 import {
   preencherCampos,
   problemasDoTexto,
@@ -564,6 +565,10 @@ export default function Conversations({
   const [error, setError] = useState('')
   const { perguntar } = useDialogos()
   const [clinicId, setClinicId] = useState<string | null>(null)
+  // Com quem a conversa e: o paciente no otorrino, a familia na pediatria
+  // (15/10/2026, ver publico.ts). Decide as frases da tela e a previa do menu.
+  const geral = publicoDaClinica(clinicId) === 'geral'
+  const quemRecebe = geral ? 'o paciente' : 'a família'
   const [prontas, setProntas] = useState<RespostaPronta[]>([])
   // Valor e endereco de cada atendimento: a resposta pronta com {valores}
   // entra no campo ja preenchida, como o robo a mandaria (14/10/2026).
@@ -1521,7 +1526,11 @@ export default function Conversations({
             </p>
             <div className="mt-1 whitespace-pre-line rounded-[14px] border border-[#081b2c]/10 bg-[#fbfaf8] p-3 text-[11px] leading-relaxed text-[#081b2c]">
               <span className="text-slate-500">{autoReply.text || 'Saudação'}</span>
-              {'\n\nEstamos aqui para cuidar do seu filho. Como podemos ajudar hoje?\n\n' +
+              {/* O convite tambem e copia, de mostrarMenu em atendimento.ts: no
+                  perfil 'geral' e a frase da Dayane (15/10/2026). */}
+              {(geral
+                ? '\n\nEstamos à disposição para ajudar com informações, agendamentos e dúvidas. Como podemos ajudar hoje?\n\n'
+                : '\n\nEstamos aqui para cuidar do seu filho. Como podemos ajudar hoje?\n\n') +
                 MENU_DO_ROBO.map((linha) => linha).join('\n') +
                 '\n\nResponda com o número ou toque em "Ver opções".'}
             </div>
@@ -1547,8 +1556,18 @@ export default function Conversations({
             />
             <p className="mt-2 text-[10px] text-slate-500">
               O sistema identifica o paciente pelo telefone. <strong>{'{nome}'}</strong> é o primeiro nome
-              da criança. Quem escreve costuma ser a mãe, então &quot;Olá, {'{nome}'}!&quot; sai como
-              &quot;Olá!&quot;, e o nome da criança aparece logo abaixo, no menu.
+              {geral ? (
+                <>
+                  {' '}do paciente. Adulto é cumprimentado pelo nome. Se for menor de idade, ou estiver sem
+                  data de nascimento no cadastro, quem escreve costuma ser a mãe ou o pai, então
+                  &quot;Olá, {'{nome}'}!&quot; sai como &quot;Olá!&quot;.
+                </>
+              ) : (
+                <>
+                  {' '}da criança. Quem escreve costuma ser a mãe, então &quot;Olá, {'{nome}'}!&quot; sai como
+                  &quot;Olá!&quot;, e o nome da criança aparece logo abaixo, no menu.
+                </>
+              )}
             </p>
 
             <p className="mt-3 text-[10px] font-extrabold uppercase tracking-wide text-slate-400">
@@ -2317,7 +2336,7 @@ export default function Conversations({
                                   {nota.texto}
                                 </p>
                                 <span className="mt-0.5 block text-right text-[10px] text-[#8a6a10]/80">
-                                  {formatWhen(nota.criadoEm)} · a família não vê
+                                  {formatWhen(nota.criadoEm)} · {quemRecebe} não vê
                                 </span>
                               </div>
                             </div>
@@ -2382,7 +2401,7 @@ export default function Conversations({
                     {escrevendoNota ? (
                       <div className="rounded-[14px] border border-[#e8c96a] bg-[#fffaf0] p-3">
                         <p className="flex items-center gap-1.5 text-[10px] font-extrabold text-[#8a6a10]">
-                          <Lock className="h-3.5 w-3.5" /> Nota interna · só a equipe vê, a família não recebe
+                          <Lock className="h-3.5 w-3.5" /> Nota interna · só a equipe vê, {quemRecebe} não recebe
                         </p>
                         <textarea
                           value={textoDaNota}
@@ -2419,7 +2438,7 @@ export default function Conversations({
                         type="button"
                         onClick={() => setEscrevendoNota(true)}
                         className="inline-flex items-center gap-1.5 rounded-xl border border-[#e8c96a] bg-[#fffaf0] px-3 py-1.5 text-[10px] font-extrabold text-[#8a6a10] transition hover:bg-[#fff3d6]"
-                        title="Recado para a equipe, dentro desta conversa. A família não recebe."
+                        title={`Recado para a equipe, dentro desta conversa. ${geral ? 'O paciente' : 'A família'} não recebe.`}
                       >
                         <Lock className="h-3.5 w-3.5" /> Nota interna
                       </button>
@@ -2568,7 +2587,7 @@ export default function Conversations({
                                 ? 'border-[#2f7fc1]/40 bg-[#f1f7fd] text-[#1f4f78]'
                                 : 'border-[#081b2c]/10 bg-white text-slate-600 hover:border-[#081b2c]/25 hover:text-[#081b2c]'
                             }`}
-                            title="Manda a lista de dias e horários livres; a família toca e o robô marca a consulta"
+                            title={`Manda a lista de dias e horários livres; ${quemRecebe} toca e o robô marca a consulta`}
                           >
                             <CalendarClock className="h-3.5 w-3.5" />
                             Mandar horários
@@ -2585,7 +2604,11 @@ export default function Conversations({
                           disabled={enviando}
                           onClick={() => void enviarQuestionario()}
                           className="inline-flex items-center gap-1.5 rounded-xl border border-[#081b2c]/10 bg-white px-3 py-2 text-[10px] font-extrabold text-slate-600 transition hover:border-[#081b2c]/25 hover:text-[#081b2c] disabled:opacity-40"
-                          title="Refaz as perguntas do cadastro (nome, nascimento, responsável, CPF e e-mail) para a próxima consulta desta pessoa"
+                          title={
+                            geral
+                              ? 'Refaz as perguntas do cadastro (nome, nascimento, responsável se for menor de idade, motivo da consulta, CPF e e-mail) para a próxima consulta desta pessoa'
+                              : 'Refaz as perguntas do cadastro (nome, nascimento, responsável, CPF e e-mail) para a próxima consulta desta pessoa'
+                          }
                         >
                           <ClipboardList className="h-3.5 w-3.5" />
                           Questionário
@@ -2626,14 +2649,14 @@ export default function Conversations({
                       <p className="mt-1 text-[10px] font-semibold text-[#16456b]/80">
                         A Meta só permite texto livre nas 24 horas seguintes à mensagem do paciente.
                         Fora delas você tem dois caminhos: responder agora dentro de um modelo
-                        aprovado, ou convidar a família a escrever para a conversa reabrir.
+                        aprovado, ou convidar {quemRecebe} a escrever para a conversa reabrir.
                       </p>
                       {/* Perguntado em 23/09/2026: "por que o menu do robo nao
                           fica disponivel?". O menu tem botoes, e mensagem com
                           botao a Meta so aceita com a janela aberta. Dizer aqui
                           evita a equipe achar que o botao sumiu por defeito. */}
                       <p className="mt-1 text-[10px] font-semibold text-[#16456b]/80">
-                        O menu do robô só pode ser enviado com a janela aberta. Quando a família
+                        O menu do robô só pode ser enviado com a janela aberta. Quando {quemRecebe}{' '}
                         responder o convite, a janela reabre e o botão "Enviar menu de opções" volta.
                       </p>
 

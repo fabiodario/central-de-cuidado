@@ -7,6 +7,7 @@
  * na porta. Antes de bloquear um dia com consultas, a tela diz quantas e
  * quais, e lembra que cancelar (com aviso) e outra acao.
  */
+import type { Publico } from './publico'
 
 type ConsultaDaAgenda = {
   startsAt: string
@@ -28,8 +29,13 @@ export function consultasDeUmDia<C extends ConsultaDaAgenda>(consultas: C[], dia
   )
 }
 
-/** Texto da pergunta, com ate cinco nomes. */
-export function avisoDoBloqueio(consultas: ConsultaDaAgenda[]): { titulo: string; detalhe: string } {
+/**
+ * Texto da pergunta, com ate cinco nomes.
+ *
+ * Quem deixa de ser avisado segue o perfil da clinica (15/10/2026, ver
+ * publico.ts): no otorrino e o paciente, na pediatria a familia.
+ */
+export function avisoDoBloqueio(consultas: ConsultaDaAgenda[], publico: Publico): { titulo: string; detalhe: string } {
   const hora = new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })
   const nomes = consultas
     .slice(0, 5)
@@ -41,6 +47,9 @@ export function avisoDoBloqueio(consultas: ConsultaDaAgenda[]): { titulo: string
     detalhe:
       `${nomes.join(' · ')}${resto}.\n\n` +
       `Bloquear só impede novas marcações. ${uma ? 'Essa consulta continua marcada' : 'Essas consultas continuam marcadas'} ` +
-      'e as famílias NÃO são avisadas. Se o médico não vai atender, cancele cada uma pela Agenda: o cancelamento avisa a família no WhatsApp.',
+      (publico === 'geral'
+        ? `${uma ? 'e o paciente NÃO é avisado' : 'e os pacientes NÃO são avisados'}. Se o médico não vai atender, ` +
+          'cancele cada uma pela Agenda: o cancelamento avisa o paciente no WhatsApp.'
+        : 'e as famílias NÃO são avisadas. Se o médico não vai atender, cancele cada uma pela Agenda: o cancelamento avisa a família no WhatsApp.'),
   }
 }

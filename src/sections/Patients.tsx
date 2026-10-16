@@ -27,6 +27,7 @@ import { FOLLOWUP_LABEL } from '@/types/patient'
 import { opcoesDeUnidade, useUnidades } from '@/lib/unidades'
 import { apagarParametrosDoEndereco, parametrosDoEndereco } from '@/lib/endereco'
 import { useVoltarDoCelular } from '@/lib/voltar-do-celular'
+import { publicoDaClinica } from '@/lib/publico'
 import {
   Sheet,
   SheetContent,
@@ -117,9 +118,14 @@ function dataDoTexto(texto?: string): string | null {
  * conferido. Some no instante em que alguem abre o cadastro e salva.
  */
 function AConferir() {
+  // Quem informou os dados: o paciente no otorrino, a familia na pediatria
+  // (15/10/2026, ver publico.ts).
+  const geral = publicoDaClinica() === 'geral'
   return (
     <span
-      title="Cadastro criado pelo sistema a partir do agendamento no WhatsApp. Abra, confira com a família e salve."
+      title={`Cadastro criado pelo sistema a partir do agendamento no WhatsApp. Abra, confira com ${
+        geral ? 'o paciente' : 'a família'
+      } e salve.`}
       className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[#e1eef8] px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-wide text-[#1f4f78]"
     >
       A conferir
@@ -258,6 +264,10 @@ export default function Patients({
 }: Props) {
   const unidadesDaClinica = useUnidades()
   const { avisar, perguntar } = useDialogos()
+  // Otorrino atende adulto e crianca; a pediatria, so crianca (15/10/2026,
+  // ver publico.ts). O responsavel, no otorrino, e de menor de idade, como na
+  // ficha do robo.
+  const geral = publicoDaClinica() === 'geral'
   const [query, setQuery] = useState('')
   // Lista simples e o padrao: cabe mais paciente na tela e a busca visual e
   // mais rapida. O modo de cartoes continua a um clique.
@@ -957,10 +967,10 @@ export default function Patients({
 
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Nome do paciente" required className="sm:col-span-2">
-                <input className={inputClass} value={form.nome} onChange={(event) => set('nome', event.target.value)} placeholder="Nome completo da criança" />
+                <input className={inputClass} value={form.nome} onChange={(event) => set('nome', event.target.value)} placeholder={geral ? 'Nome completo do paciente' : 'Nome completo da criança'} />
               </Field>
               <Field label="Responsável">
-                <input className={inputClass} value={form.responsavel} onChange={(event) => set('responsavel', event.target.value)} placeholder="Nome do pai, mãe ou tutor" />
+                <input className={inputClass} value={form.responsavel} onChange={(event) => set('responsavel', event.target.value)} placeholder={geral ? 'Pai, mãe ou tutor, se for menor de idade' : 'Nome do pai, mãe ou tutor'} />
               </Field>
               <Field label="WhatsApp com DDD" required>
                 <input

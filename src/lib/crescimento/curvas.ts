@@ -1,4 +1,5 @@
 import { TABELAS_OMS, type LinhaLMS } from './tabelas-oms'
+import type { Publico } from '../publico'
 
 /**
  * Curvas de crescimento da OMS a partir das consultas (25/09/2026).
@@ -52,6 +53,45 @@ export function idadeEmMeses(nascimento: string, data: string): number | null {
   const ate = Date.parse(`${data.slice(0, 10)}T12:00:00Z`)
   if (Number.isNaN(de) || Number.isNaN(ate) || ate < de) return null
   return (ate - de) / 86_400_000 / DIAS_POR_MES
+}
+
+/**
+ * Anos completos na data, pelo calendario: o aniversario conta no proprio
+ * dia. Meses de 30,4 dias nao servem aqui - no dia em que faz 18 anos, quem
+ * nasceu em 16/10/2008 ainda tem 215,98 deles, e seguiria menor de idade.
+ */
+export function anosCompletos(nascimento: string, data: string): number | null {
+  const n = /^(\d{4})-(\d{2})-(\d{2})/.exec(nascimento.trim())
+  const d = /^(\d{4})-(\d{2})-(\d{2})/.exec(data.trim())
+  if (!n || !d) return null
+  const [anoN, mesN, diaN] = n.slice(1).map(Number)
+  const [anoD, mesD, diaD] = d.slice(1).map(Number)
+  const anos = anoD - anoN - (mesD < mesN || (mesD === mesN && diaD < diaN) ? 1 : 0)
+  return anos >= 0 ? anos : null
+}
+
+/**
+ * Se o prontuario mostra a aba Crescimento (15/10/2026).
+ *
+ * A curva veio da consulta de gastropediatria do Dr. Marcello, onde todo
+ * paciente e crianca, pesada e medida a cada consulta. No otorrino (perfil
+ * 'geral', ver quem-atende.ts) a maioria e adulta, e a referencia da OMS acaba
+ * aos 19 anos: para o adulto a aba so mostrava o aviso de fora da faixa. Para
+ * crianca ela continua util - amigdala e adenoide grandes, com apneia, podem
+ * atrasar o ganho de peso, e o peso de cada consulta ja e anotado.
+ *
+ * A regra e a do robo para o responsavel (filaSemResponsavelDeAdulto em
+ * atendimento.ts): menor de 18 anos mostra; adulto, ou nascimento em branco,
+ * nao. Na pediatria aparece sempre, como sempre foi, e pede a data se faltar.
+ */
+export function mostraCurvaDeCrescimento(
+  publico: Publico,
+  nascimento: string | null | undefined,
+  hoje: string,
+): boolean {
+  if (publico === 'pediatria') return true
+  const anos = nascimento ? anosCompletos(nascimento, hoje) : null
+  return anos !== null && anos < 18
 }
 
 /** "2 a 3 m", "5 m", "10 a". Para eixo e tabela. */

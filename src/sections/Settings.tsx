@@ -28,6 +28,7 @@ import RespostasProntas from '@/sections/RespostasProntas'
 import InformacoesDoWhatsApp from '@/sections/InformacoesDoWhatsApp'
 import NotificacoesNoCelular from '@/sections/NotificacoesNoCelular'
 import { marcaSemClinicaConhecida } from '@/lib/marca'
+import { publicoDaClinica } from '@/lib/publico'
 
 interface Props {
   db: Db
@@ -68,6 +69,9 @@ export default function Settings({ db, importDb, clearAll }: Props) {
     site: '',
   })
   const [clinicId, setClinicId] = useState<string | null>(null)
+  // Quem recebe o acompanhamento: o paciente no otorrino, a familia na
+  // pediatria (15/10/2026, ver publico.ts).
+  const geral = publicoDaClinica(clinicId) === 'geral'
   const [salvandoPerfil, setSalvandoPerfil] = useState(false)
   const [perfilSalvo, setPerfilSalvo] = useState(false)
 
@@ -192,7 +196,9 @@ export default function Settings({ db, importDb, clearAll }: Props) {
             </span>
             <div>
               <p className="text-[9px] font-extrabold uppercase tracking-[0.15em] text-[#1f4f78]">Acompanhamento automático</p>
-              <h2 className="mt-1 text-base font-extrabold tracking-[-0.03em] text-[#081b2c]">O que a família recebe em 15, 30 e 90 dias</h2>
+              <h2 className="mt-1 text-base font-extrabold tracking-[-0.03em] text-[#081b2c]">
+                O que {geral ? 'o paciente' : 'a família'} recebe em 15, 30 e 90 dias
+              </h2>
               <p className="mt-1.5 max-w-2xl text-[11px] leading-relaxed text-slate-400">
                 A mensagem sai sozinha às 9h, pelo WhatsApp da clínica. As três etapas usam o
                 mesmo texto, aprovado pela Meta.

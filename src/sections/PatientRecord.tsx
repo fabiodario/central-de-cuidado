@@ -143,6 +143,8 @@ import {
   type Rascunho,
 } from '@/lib/prontuario-extra'
 import { CurvaDeCrescimento } from '@/sections/prontuario/CurvaDeCrescimento'
+import { mostraCurvaDeCrescimento } from '@/lib/crescimento/curvas'
+import { publicoDaClinica } from '@/lib/publico'
 import { ExamesDoPaciente } from '@/sections/prontuario/ExamesDoPaciente'
 import { MarcarRetorno } from '@/sections/prontuario/MarcarRetorno'
 import { AdendosDaConsulta } from '@/sections/prontuario/AdendosDaConsulta'
@@ -2265,6 +2267,13 @@ export default function PatientRecord({
   const [erroDosAdendos, setErroDosAdendos] = useState('')
   // O que a coluna da direita mostra no historico (25/09/2026).
   const [painel, setPainel] = useState<'consultas' | 'crescimento' | 'exames'>('consultas')
+  // Crescimento so para menor de idade no otorrino (15/10/2026). Se a aba
+  // some com ela aberta (a data de nascimento mudou no cadastro), a tela
+  // volta para as consultas em vez de ficar sem nenhuma vista marcada.
+  const mostraCrescimento = patient
+    ? mostraCurvaDeCrescimento(publicoDaClinica(clinicId), patient.nascimento, todayISO())
+    : false
+  const painelVisivel = painel === 'crescimento' && !mostraCrescimento ? 'consultas' : painel
   // Cartao com o painel de marcar retorno aberto, se algum.
   const [retornoAberto, setRetornoAberto] = useState<string | null>(null)
 
@@ -3375,7 +3384,8 @@ export default function PatientRecord({
                 <div className="min-w-0">
               {/* Tres vistas do mesmo paciente (25/09/2026). As consultas
                   continuam sendo a primeira; curva e exames ficam a um clique,
-                  sem sair do prontuario. */}
+                  sem sair do prontuario. A curva so para menor de idade no
+                  otorrino (15/10/2026, ver mostraCurvaDeCrescimento). */}
               <div className="mb-3 flex gap-1 rounded-2xl border border-[#081b2c]/[0.08] bg-white p-1">
                 {(
                   [
@@ -3383,26 +3393,28 @@ export default function PatientRecord({
                     ['crescimento', 'Crescimento'],
                     ['exames', 'Exames'],
                   ] as const
-                ).map(([valor, rotulo]) => (
+                )
+                  .filter(([valor]) => valor !== 'crescimento' || mostraCrescimento)
+                  .map(([valor, rotulo]) => (
                   <button
                     key={valor}
                     type="button"
                     onClick={() => setPainel(valor)}
                     className={`flex-1 rounded-xl px-3 py-2 text-[11px] font-extrabold transition ${
-                      painel === valor ? 'bg-[#081b2c] text-white' : 'text-slate-500 hover:bg-[#f4f4f1] hover:text-[#081b2c]'
+                      painelVisivel === valor ? 'bg-[#081b2c] text-white' : 'text-slate-500 hover:bg-[#f4f4f1] hover:text-[#081b2c]'
                     }`}
                   >
                     {rotulo}
                   </button>
                 ))}
               </div>
-              {painel === 'crescimento' ? (
+              {painelVisivel === 'crescimento' ? (
                 <CurvaDeCrescimento
                   nascimento={patient.nascimento}
                   sexo={patient.sexo}
                   consultas={consultations}
                 />
-              ) : painel === 'exames' ? (
+              ) : painelVisivel === 'exames' ? (
                 <ExamesDoPaciente clinicId={clinicId} patientId={patient.id} />
               ) : loading ? (
                 <div className="flex min-h-[280px] items-center justify-center text-center">
@@ -3779,7 +3791,7 @@ export default function PatientRecord({
                     className={inputClass}
                     value={form.cid}
                     onChange={(event) => set('cid', event.target.value)}
-                    placeholder="Ex.: K59.0"
+                    placeholder="Ex.: J34.2"
                   />
                 </Field>
 

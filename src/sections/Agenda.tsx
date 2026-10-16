@@ -72,6 +72,7 @@ import {
 } from '@/components/ui/sheet'
 import type { Patient } from '@/types/patient'
 import { supabase } from '@/lib/supabase'
+import { publicoDaClinica } from '@/lib/publico'
 
 type Aba = 'calendario' | 'historico' | 'configuracao'
 
@@ -643,6 +644,11 @@ export default function Agenda({
   const [marcando, setMarcando] = useState<string | null>(null)
   const [ligarHoje, setLigarHoje] = useState<PendenciaDeLigar[]>([])
   const [clinicId, setClinicId] = useState<string | null>(null)
+  // Quem marca pelo WhatsApp e responde a ficha: o paciente no otorrino, a
+  // familia na pediatria (15/10/2026, ver publico.ts).
+  const publico = publicoDaClinica(clinicId)
+  const geral = publico === 'geral'
+  const quemInformou = geral ? 'pelo paciente' : 'pela família'
   const [units, setUnits] = useState<Unit[]>([])
   // Desativadas (Liferty, Trasmontano): so aparecem no Historico. Ver
   // listInactiveUnits.
@@ -704,7 +710,7 @@ export default function Agenda({
   async function podeBloquear(dia: string) {
     const doDia = consultasDeUmDia(appointments, dia)
     if (doDia.length === 0) return true
-    return perguntar({ ...avisoDoBloqueio(doDia), confirmar: 'Bloquear mesmo assim', cancelar: 'Voltar', perigo: true })
+    return perguntar({ ...avisoDoBloqueio(doDia, publico), confirmar: 'Bloquear mesmo assim', cancelar: 'Voltar', perigo: true })
   }
 
   // Formularios
@@ -1859,14 +1865,14 @@ export default function Agenda({
                       rotulo: 'Janela (dias)',
                       min: 1,
                       max: 180,
-                      ajuda: 'Até quantos dias à frente a família pode marcar pelo WhatsApp. Com 45, o bot só oferece datas dentro dos próximos 45 dias.',
+                      ajuda: `Até quantos dias à frente ${geral ? 'o paciente' : 'a família'} pode marcar pelo WhatsApp. Com 45, o bot só oferece datas dentro dos próximos 45 dias.`,
                     },
                     {
                       chave: 'minNoticeHours' as const,
                       rotulo: 'Antecedência (h)',
                       min: 0,
                       max: 168,
-                      ajuda: 'Antecedência mínima para marcar pelo WhatsApp. Com 2, o bot só oferece horários que comecem pelo menos 2 horas depois do momento em que a família está marcando.',
+                      ajuda: `Antecedência mínima para marcar pelo WhatsApp. Com 2, o bot só oferece horários que comecem pelo menos 2 horas depois do momento em que ${geral ? 'o paciente' : 'a família'} está marcando.`,
                     },
                   ].map((campo) => (
                     <label key={campo.chave} className="block">
@@ -2329,7 +2335,7 @@ export default function Agenda({
                   emEdicao.ficha.email) && (
                   <div className="rounded-[16px] border border-[#2f7fc1]/25 bg-[#f1f7fd] p-3.5">
                     <p className="text-[10px] font-extrabold uppercase tracking-wide text-[#1f4f78]">
-                      Informado pela família no WhatsApp
+                      Informado {quemInformou} no WhatsApp
                     </p>
                     <dl className="mt-2 space-y-1.5">
                       {[
@@ -2353,8 +2359,8 @@ export default function Agenda({
                         novo achando que nada foi salvo. */}
                     <p className="mt-2 text-[10px] leading-relaxed text-slate-400">
                       {emEdicao.patientId
-                        ? 'Declarado pela família. Os campos que estavam vazios já foram para o cadastro do paciente; confira em Pacientes.'
-                        : 'Dados declarados pela família; confira ao cadastrar.'}
+                        ? `Declarado ${quemInformou}. Os campos que estavam vazios já foram para o cadastro do paciente; confira em Pacientes.`
+                        : `Dados declarados ${quemInformou}; confira ao cadastrar.`}
                     </p>
                   </div>
                 )}

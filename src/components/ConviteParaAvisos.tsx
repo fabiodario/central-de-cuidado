@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { BellRing, RefreshCw, Share, SquarePlus, X } from 'lucide-react'
 import { ativarNotificacoes, estadoDesteAparelho, situacaoDoAparelho } from '@/lib/notificacoes'
+import { publicoDaClinica } from '@/lib/publico'
 
 /**
  * Convite para ativar os avisos, na abertura do sistema (28/09/2026).
@@ -39,6 +40,9 @@ function adiar() {
 type Modo = 'oculto' | 'ativar' | 'iphone'
 
 export default function ConviteParaAvisos({ clinicId }: { clinicId: string | null }) {
+  // De quem vem o aviso: o paciente no otorrino, a familia na pediatria
+  // (15/10/2026, ver publico.ts).
+  const geral = publicoDaClinica(clinicId) === 'geral'
   const [modo, setModo] = useState<Modo>('oculto')
   const [ocupado, setOcupado] = useState(false)
   const [erro, setErro] = useState('')
@@ -118,7 +122,7 @@ export default function ConviteParaAvisos({ clinicId }: { clinicId: string | nul
         </span>
         <div className="min-w-0">
           <p className="text-sm font-extrabold text-[#081b2c]">
-            {feito ? 'Avisos ativados ✅' : 'Receber avisos das famílias?'}
+            {feito ? 'Avisos ativados ✅' : geral ? 'Receber avisos dos pacientes?' : 'Receber avisos das famílias?'}
           </p>
           {!feito && (
             <p className="mt-1 text-xs leading-relaxed text-[#50677b]">

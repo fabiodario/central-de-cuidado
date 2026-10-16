@@ -12,6 +12,7 @@ import {
   type RespostaPronta,
 } from '@/lib/repository'
 import { lugaresDoRobo } from '@/lib/lugares'
+import { publicoDaClinica } from '@/lib/publico'
 import {
   CAMPOS,
   preencherCampos,
@@ -68,6 +69,9 @@ const NOVA: Omit<Item, 'ordem'> = {
 export default function RespostasProntas() {
   const { avisar, perguntar } = useDialogos()
   const [clinicId, setClinicId] = useState<string | null>(null)
+  // Quem escreve a mensagem: o paciente no otorrino, a familia na pediatria
+  // (15/10/2026, ver publico.ts).
+  const geral = publicoDaClinica(clinicId) === 'geral'
   const [itens, setItens] = useState<Item[]>([])
   const [carregando, setCarregando] = useState(true)
   const [salvando, setSalvando] = useState(false)
@@ -206,8 +210,8 @@ export default function RespostasProntas() {
             <p className="text-[9px] font-extrabold uppercase tracking-[0.15em] text-[#1f4f78]">Atendimento automático</p>
             <h2 className="mt-1 text-base font-extrabold tracking-[-0.03em] text-[#081b2c]">Respostas prontas</h2>
             <p className="mt-1.5 max-w-2xl text-[11px] leading-relaxed text-slate-400">
-              Perguntas que o robô responde sozinho, no seu texto. Ele procura as palavras abaixo na mensagem da
-              família e envia a resposta correspondente. Quando nada bate, oferece o menu como sempre.
+              Perguntas que o robô responde sozinho, no seu texto. Ele procura as palavras abaixo na mensagem
+              {geral ? ' do paciente' : ' da família'} e envia a resposta correspondente. Quando nada bate, oferece o menu como sempre.
             </p>
           </div>
         </div>

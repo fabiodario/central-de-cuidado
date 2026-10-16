@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { CalendarClock, X } from 'lucide-react'
 import type { Lugar } from '../../supabase/functions/_shared/campos-do-texto.ts'
 import type { PedidoDeHorarios } from '@/lib/repository'
+import { publicoDaClinica } from '@/lib/publico'
 
 /**
  * Painel do botao "Mandar horarios" (14/10/2026).
@@ -48,6 +49,9 @@ export default function MandarHorarios({
   onEnviar: (pedido: PedidoDeHorarios) => void
   onFechar: () => void
 }) {
+  // Quem recebe a lista: o paciente no otorrino, a familia na pediatria
+  // (15/10/2026, ver publico.ts).
+  const geral = publicoDaClinica() === 'geral'
   const [unidade, setUnidade] = useState(lugares[0]?.id ?? '')
   const [modo, setModo] = useState<Modo>('aberta')
   const [de, setDe] = useState('')
@@ -87,7 +91,7 @@ export default function MandarHorarios({
         </button>
       </div>
       <p className="mt-0.5 text-[10px] leading-relaxed text-slate-500">
-        A família recebe a lista e toca no dia e no horário. O robô marca na hora, pede o cadastro se faltar e
+        {geral ? 'O paciente' : 'A família'} recebe a lista e toca no dia e no horário. O robô marca na hora, pede o cadastro se faltar e
         manda a confirmação. A consulta aparece na Agenda.
       </p>
 

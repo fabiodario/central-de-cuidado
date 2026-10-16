@@ -16,6 +16,8 @@ import type { Patient } from '@/types/patient'
 import type { PendingRequest } from '@/lib/repository'
 import { dueCount, idadeAnos, pendingFollowups } from '@/lib/followup'
 import { nomeDoCid } from '@/lib/cid'
+import { contarPorFaixa, faixasEtarias } from '@/lib/faixas-etarias'
+import { publicoDaClinica } from '@/lib/publico'
 import NumerosDoWhatsApp from '@/sections/NumerosDoWhatsApp'
 
 const NAVY = '#081b2c'
@@ -324,19 +326,17 @@ export default function Dashboard({
   const male = patients.filter((patient) => patient.sexo === 'M').length
   const other = patients.filter((patient) => patient.sexo === 'O').length
 
-  const ageRanges = [
-    { label: '0 a 2 anos', test: (age: number) => age <= 2 },
-    { label: '3 a 5 anos', test: (age: number) => age >= 3 && age <= 5 },
-    { label: '6 a 9 anos', test: (age: number) => age >= 6 && age <= 9 },
-    { label: '10 a 13 anos', test: (age: number) => age >= 10 && age <= 13 },
-    { label: '14+ anos', test: (age: number) => age >= 14 },
-  ].map((range) => ({
-    label: range.label,
-    value: patients.filter((patient) => range.test(idadeAnos(patient.nascimento))).length,
-  }))
+  // Faixas e frases pelo perfil da clinica (15/10/2026): o otorrino atende
+  // adulto e crianca, a pediatria so crianca. Ver faixas-etarias.ts.
+  const publico = publicoDaClinica()
+  const geral = publico === 'geral'
+  const ageRanges = contarPorFaixa(
+    patients.map((patient) => (patient.nascimento ? idadeAnos(patient.nascimento) : null)),
+    faixasEtarias(publico),
+  ).map((faixa) => ({ label: faixa.rotulo, value: faixa.valor }))
   const maxAge = Math.max(...ageRanges.map((range) => range.value), 1)
 
-  // Agrupado pelo nome, e nao pelo codigo: assim "K59.0" e "K59,0" - a virgula
+  // Agrupado pelo nome, e nao pelo codigo: assim "J34.2" e "J34,2" - a virgula
   // do teclado numerico - contam como a mesma coisa, que e o que sao.
   const cids = topN(countBy(patients, (patient) => nomeDoCid(patient.cid)), 5)
   const cities = topN(countBy(patients, (patient) => patient.cidade), 5)
@@ -410,7 +410,8 @@ export default function Dashboard({
               Cuidado que continua depois da consulta.
             </h2>
             <p className="mt-3 max-w-xl text-xs leading-relaxed text-white/55 sm:text-sm">
-              Sua base clínica transforma datas em contatos oportunos e mantém cada família próxima da equipe.
+              Sua base clínica transforma datas em contatos oportunos e mantém{' '}
+              {geral ? 'cada paciente próximo da equipe' : 'cada família próxima da equipe'}.
             </p>
           </div>
 
