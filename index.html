@@ -6,14 +6,15 @@
     <meta name="theme-color" content="#000000" />
     <meta name="description" content="Central de Cuidado do consultório do Dr. Fábio Dario, otorrinolaringologista: agenda, prontuário e atendimento pelo WhatsApp." />
 
-    <!-- Icone oficial (21/09/2026), gerado por gerar_icones.py no repositorio do
-         site a partir do proprio logo. Ate aqui a aba do sistema mostrava o
-         globo em branco do navegador, e quem deixava a Central aberta ao lado
-         do site nao distinguia uma da outra. -->
-    <link rel="icon" href="./favicon.ico?v=3" sizes="any" />
-    <link rel="icon" type="image/png" sizes="32x32" href="./icone-32.png?v=3" />
-    <link rel="icon" type="image/png" sizes="16x16" href="./icone-16.png?v=3" />
-    <link rel="apple-touch-icon" href="./apple-touch-icon.png?v=3" />
+    <!-- Icone da clinica (21/09/2026): sem ele a aba mostrava o globo em
+         branco do navegador. Desde 15/10/2026 sao os tres circulos do logo do
+         Dr. Fabio, gerados por scripts/marca/gerar_marca.py. Ate ali eram os
+         icones herdados do Dr. Marcello (o M), na aba e no atalho do celular.
+         Trocou o icone, sobe o ?v= aqui, no manifest.json e no sw.js. -->
+    <link rel="icon" href="./favicon.ico?v=4" sizes="any" />
+    <link rel="icon" type="image/png" sizes="32x32" href="./icone-32.png?v=4" />
+    <link rel="icon" type="image/png" sizes="16x16" href="./icone-16.png?v=4" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png?v=4" />
     <meta name="apple-mobile-web-app-title" content="Central" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
@@ -56,7 +57,7 @@
         if (!celular) return;
         var l = document.createElement('link');
         l.rel = 'manifest';
-        l.href = './manifest.json?v=3';
+        l.href = './manifest.json?v=4';
         document.head.appendChild(l);
       })();
     </script>

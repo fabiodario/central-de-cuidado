@@ -28,12 +28,13 @@ self.addEventListener('push', (evento) => {
   evento.waitUntil(
     self.registration.showNotification(titulo, {
       body: aviso.corpo || 'Nova mensagem',
-      icon: 'icone-192.png?v=3',
+      icon: 'icone-192.png?v=4',
       // Icone pequeno da barra de status (02/10/2026). O Android pinta de
       // branco tudo o que nao e transparente: com o icone colorido aparecia um
       // quadrado branco ao lado do relogio. Este e so o desenho do logo, em
-      // branco sobre fundo transparente.
-      badge: 'icone-badge.png?v=1',
+      // branco sobre fundo transparente. Desde 15/10/2026, os circulos do
+      // Dr. Fabio (ate ali era o M do Dr. Marcello).
+      badge: 'icone-badge.png?v=2',
       tag: aviso.etiqueta || undefined,
       // Mesma conversa escrevendo de novo: troca a notificacao e toca de novo,
       // como o WhatsApp, em vez de empilhar ou ficar muda.

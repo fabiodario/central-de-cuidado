@@ -12,8 +12,8 @@ import {
   UserRoundPlus,
 } from 'lucide-react'
 import { useAuth } from '@/auth/AuthProvider'
-import { marcaSemClinicaConhecida } from '@/lib/marca'
-import gastroWatermark from '@/assets/sidebar-gastro-full.jpg'
+import { logoNoFundoEscuro, marcaSemClinicaConhecida } from '@/lib/marca'
+import arteDeFundo from '@/assets/sidebar-otorrino.jpg'
 
 const inputClass =
   'w-full rounded-2xl border border-[#081b2c]/10 bg-[#fafaf8] py-3.5 pl-11 pr-4 text-sm font-semibold text-[#081b2c] outline-none transition placeholder:font-normal placeholder:text-slate-300 focus:border-[#2f7fc1] focus:bg-white focus:ring-4 focus:ring-[#2f7fc1]/10 disabled:cursor-not-allowed disabled:opacity-60'
@@ -22,6 +22,7 @@ export default function Login() {
   // Antes do login nao se sabe a clinica: vale a ultima vista neste navegador
   // (ver lib/marca.ts). A clinica de teste mostra a marca do produto.
   const marca = marcaSemClinicaConhecida()
+  const logo = logoNoFundoEscuro(marca)
   const { signIn, requestAccess, sendPasswordReset, authError, configurationError, clearAuthError } = useAuth()
   const [mode, setMode] = useState<'login' | 'request' | 'reset'>('login')
   const [resetSent, setResetSent] = useState(false)
@@ -108,12 +109,16 @@ export default function Login() {
 
       <div className="relative mx-auto grid min-h-dvh max-w-[1500px] lg:grid-cols-[minmax(0,1.08fr)_minmax(440px,.92fr)]">
         <section className="soft-grid relative hidden overflow-hidden bg-[#081b2c] p-12 text-white lg:flex lg:flex-col lg:justify-between">
+          {/* Arte de otorrino (15/10/2026): no primeiro login publicado do Dr.
+              Fabio ainda aparecia a do Dr. Marcello, o aparelho digestivo. O
+              foco em 40% da largura mantem o nariz e o ouvido a vista (ver
+              src/assets/README.md). */}
           <img
-            src={gastroWatermark}
+            src={arteDeFundo}
             alt=""
             aria-hidden="true"
             draggable={false}
-            className="pointer-events-none absolute inset-y-0 right-0 h-full w-[54%] object-cover object-center opacity-[0.22] mix-blend-screen select-none"
+            className="pointer-events-none absolute inset-y-0 right-0 h-full w-[54%] object-cover object-[40%_center] opacity-[0.22] mix-blend-screen select-none"
           />
           <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-[#081b2c] via-[#081b2c]/75 to-[#081b2c]/30" />
           <div className="absolute -right-24 top-20 h-80 w-80 rounded-full bg-[#2f7fc1]/15 blur-3xl" />
@@ -121,9 +126,9 @@ export default function Login() {
 
           <div className="relative">
             <img
-              src={marca.src}
+              src={logo.src}
               alt={marca.nome}
-              className="h-14 w-auto max-w-[220px] brightness-0 invert"
+              className={`h-14 w-auto max-w-[260px] ${logo.classe}`}
             />
             <div className="mt-6 flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.24em] text-white/45">
               <HeartHandshake className="h-4 w-4 text-[#6aa8d9]" />
@@ -137,7 +142,7 @@ export default function Login() {
               Cuidado contínuo
             </div>
             <h1 className="mt-6 max-w-xl text-balance text-4xl font-extrabold leading-[1.08] tracking-[-0.05em] xl:text-5xl">
-              Cada família acompanhada no momento certo.
+              Cada paciente acompanhado no momento certo.
             </h1>
             <p className="mt-5 max-w-xl text-sm leading-relaxed text-white/50 xl:text-base">
               Uma visão segura da jornada de cada paciente, das consultas aos contatos de 15, 30 e 90 dias.
@@ -158,7 +163,7 @@ export default function Login() {
           </div>
 
           <p className="relative text-[10px] font-semibold text-white/30">
-            Gastroenterologia pediátrica · Central de Cuidado
+            Otorrinolaringologia · Central de Cuidado
           </p>
         </section>
 
@@ -167,9 +172,9 @@ export default function Login() {
             <div className="mb-8 flex justify-center lg:hidden">
               <div className="rounded-[22px] bg-[#081b2c] px-6 py-4 shadow-[0_18px_40px_rgba(8,27,44,.18)]">
                 <img
-                  src={marca.src}
+                  src={logo.src}
                   alt={marca.nome}
-                  className="h-10 w-auto max-w-[180px] brightness-0 invert"
+                  className={`h-10 w-auto max-w-[200px] ${logo.classe}`}
                 />
               </div>
             </div>

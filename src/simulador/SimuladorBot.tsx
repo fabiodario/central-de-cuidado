@@ -32,7 +32,7 @@ import {
 } from 'lucide-react'
 import { useAuth } from '@/auth/AuthProvider'
 import logoCentral from '@/assets/logo-central-de-cuidado.webp'
-import logoFabio from '@/assets/fabio-logo.png'
+import logoFabio from '@/assets/fabio-logo-fundo-escuro.png'
 import iconeFabio from '@/assets/fabio-icone.png'
 import { FAMILIAS, IDENTIDADES, type ChaveFamilia } from './dados'
 import { agendaValida, copiarAgenda, type AgendaDaClinica } from './agenda'

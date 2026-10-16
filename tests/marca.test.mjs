@@ -2,7 +2,7 @@
 //
 // Espelho do Dr. Fabio Dario (15/10/2026): a marca propria deste sistema e a
 // dele. Clinica sem marca cadastrada entra com a do produto, como sempre.
-import { marcaDaClinica, marcaSemClinicaConhecida } from './marca.build.mjs'
+import { logoNoFundoEscuro, marcaDaClinica, marcaSemClinicaConhecida } from './marca.build.mjs'
 import { CLINICA_DR_FABIO } from './quem-atende.build.mjs'
 
 let ok = 0
@@ -29,6 +29,20 @@ confere('nenhuma marca deste sistema cita o Dr. Marcello', ![marcaDaClinica(FABI
 confere('sem clinica conhecida, login e impressao ficam no logo do Dr. Fabio', marcaSemClinicaConhecida(null).nome === 'Dr. Fábio Dario')
 confere('impressao de outra clinica sai com Central de Cuidado', marcaSemClinicaConhecida(OUTRA).nome === 'Central de Cuidado')
 confere('o acompanhamento pediatrico (v2) nao vale para o otorrino', marcaDaClinica(FABIO).acompanhamentoV2 === false)
+
+// Logo no fundo escuro (15/10/2026). O do Dr. Fabio e colorido: pintado de
+// branco pelo filtro do logo do produto, os tres circulos viravam manchas. E a
+// caixa mais estreita que o logo o achatava. (O build deste teste carrega os
+// PNG como data URL para os dois arquivos poderem ser comparados.)
+const escuroFabio = logoNoFundoEscuro(marcaDaClinica(FABIO))
+const escuroProduto = logoNoFundoEscuro(marcaDaClinica(OUTRA))
+confere('logo do Dr. Fabio no fundo escuro sai sem o filtro que pinta de branco', !/invert|brightness-0/.test(escuroFabio.classe), escuroFabio.classe)
+confere(
+  'logo do Dr. Fabio no fundo escuro e a versao propria, nao a do fundo claro',
+  /^data:image\/png/.test(escuroFabio.src ?? '') && escuroFabio.src !== marcaDaClinica(FABIO).src,
+)
+confere('logo do produto continua pintado de branco no fundo escuro', /brightness-0 invert/.test(escuroProduto.classe), escuroProduto.classe)
+confere('nenhum logo e achatado na caixa', [escuroFabio, escuroProduto].every((l) => /object-contain/.test(l.classe)))
 
 console.log(`Marca: ${ok} verificações passaram.`)
 if (falhas) {

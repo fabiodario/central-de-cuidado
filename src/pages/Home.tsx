@@ -40,8 +40,8 @@ import { prepararPrescricao } from '@/lib/memed'
 import Agenda from '@/sections/Agenda'
 import Settings from '@/sections/Settings'
 import AccessAdmin from '@/sections/AccessAdmin'
-import { lembrarClinica, marcaDaClinica, ultimaClinicaVista } from '@/lib/marca'
-import gastroWatermark from '@/assets/sidebar-gastro-full.jpg'
+import { lembrarClinica, logoNoFundoEscuro, marcaDaClinica, ultimaClinicaVista } from '@/lib/marca'
+import arteDoMenu from '@/assets/sidebar-otorrino.jpg'
 import { useAuth } from '@/auth/AuthProvider'
 import { useDialogos } from '@/components/dialogos-contexto'
 import { apagarParametrosDoEndereco, parametrosDoEndereco } from '@/lib/endereco'
@@ -238,6 +238,7 @@ export default function Home() {
   // vista neste navegador para o menu nao piscar a cada recarga.
   const [clinicaId, setClinicaId] = useState<string | null>(ultimaClinicaVista)
   const marca = clinicaId ? marcaDaClinica(clinicaId) : null
+  const logo = marca ? logoNoFundoEscuro(marca) : null
   // Altura do cabecalho do celular, publicada como --altura-topo-celular (27/09/2026).
   // O cabecalho da conversa tambem e grudado no topo, e ficava POR TRAS deste:
   // no celular sumiam o "Todas as conversas" e o nome de quem fala. Medido, e
@@ -523,20 +524,24 @@ export default function Home() {
   return (
     <div className="min-h-dvh bg-[#f7f5f1] text-[#081b2c]">
       <aside className="fixed inset-y-0 left-0 z-40 hidden w-[286px] flex-col overflow-hidden bg-[#081b2c] text-white lg:flex">
+        {/* Arte de otorrino (15/10/2026), no lugar do aparelho digestivo do
+            Dr. Marcello. O foco em 40% da largura mantem o nariz e o ouvido
+            dentro da coluna, do notebook ao monitor alto (ver
+            src/assets/README.md). */}
         <img
-          src={gastroWatermark}
+          src={arteDoMenu}
           alt=""
           aria-hidden="true"
           draggable={false}
-          className="pointer-events-none absolute inset-0 h-full w-full object-cover object-center opacity-[0.17] mix-blend-screen select-none"
+          className="pointer-events-none absolute inset-0 h-full w-full object-cover object-[40%_center] opacity-[0.17] mix-blend-screen select-none"
         />
         <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-[#081b2c]/80 via-[#081b2c]/25 to-[#081b2c]/80" />
         <div className="soft-grid absolute inset-0 opacity-40" />
         <div className="absolute -right-24 top-24 h-64 w-64 rounded-full bg-[#2f7fc1]/10 blur-3xl" />
         <div className="relative flex h-full flex-col">
           <div className="px-7 pb-7 pt-8 [@media(max-height:820px)]:pb-4 [@media(max-height:820px)]:pt-5">
-            {marca ? (
-              <img src={marca.src} alt={marca.nome} className="h-12 w-auto max-w-[190px] brightness-0 invert [@media(max-height:820px)]:h-9" />
+            {marca && logo ? (
+              <img src={logo.src} alt={marca.nome} className={`h-12 w-auto max-w-[230px] ${logo.classe} [@media(max-height:820px)]:h-9`} />
             ) : (
               <div className="h-12 [@media(max-height:820px)]:h-9" aria-hidden="true" />
             )}
@@ -676,8 +681,8 @@ export default function Home() {
         className="sticky top-0 z-30 border-b border-white/10 bg-[#081b2c]/95 px-4 py-3 text-white backdrop-blur-xl lg:hidden"
       >
         <div className="relative mx-auto flex max-w-2xl items-center justify-between">
-          {marca ? (
-            <img src={marca.src} alt={marca.nome} className="h-7 w-auto max-w-[112px] brightness-0 invert min-[400px]:h-8 min-[400px]:max-w-[150px]" />
+          {marca && logo ? (
+            <img src={logo.src} alt={marca.nome} className={`h-7 w-auto max-w-[120px] ${logo.classe} min-[400px]:h-8 min-[400px]:max-w-[150px]`} />
           ) : (
             <div className="h-8" aria-hidden="true" />
           )}

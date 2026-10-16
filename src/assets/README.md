@@ -1,6 +1,40 @@
 # Arte de fundo da barra lateral
 
-`sidebar-gastro-full.jpg` é a marca-d'água atrás do menu: uma criança de corpo
+## Dr. Fábio: `sidebar-otorrino.jpg` (15/10/2026)
+
+Perfil de cabeça e pescoço olhando para a esquerda, com o caminho do ar aceso:
+nariz e seios da face, ouvido com a cóclea, faringe, laringe e traqueia até os
+pulmões. Entrou no lugar de `sidebar-gastro-full.jpg`, a criança com o aparelho
+digestivo do Dr. Marcello, que ainda aparecia no primeiro login publicado deste
+sistema. Está no menu (`src/pages/Home.tsx`) e no login (`src/pages/Login.tsx`).
+
+Gerada no GPT Image 2.5 (qualidade média, 9:16, 752 × 1344, reduzida para
+640 × 1144 em JPEG 88%), com este pedido:
+
+> Vertical 9:16 anatomical line illustration on a solid very dark navy blue
+> background (#081b2c). Side profile view of an adult human head, neck and upper
+> chest, facing left, centered horizontally, drawn with thin, delicate, softly
+> glowing pale blue and white lines, like a calm medical hologram. The ear, nose
+> and throat anatomy is the luminous highlight, glowing gently in warm white: the
+> outer ear and the inner ear with the cochlea, the nasal cavity and the
+> paranasal sinuses, the mouth and tongue, the pharynx, the larynx with the vocal
+> cords, and the trachea descending down the neck into the upper chest where it
+> branches into the two main bronchi. The skull, face contour, neck and shoulders
+> are drawn only with faint thin outlines. Elegant, minimal, clinical, serene.
+> The whole head is fully inside the frame with dark space above it, and there is
+> generous empty dark navy space on the left and right sides. No text, no labels,
+> no numbers, no letters, no logos, no arrows, no watermark, no border, no frame.
+
+**Foco em 40% da largura (`object-[40%_center]`).** Ao contrário da criança de
+corpo inteiro, esta arte ocupa a largura toda, e a coluna do menu (286 px)
+mostra só uma faixa dela: num monitor alto, cerca de 40%. Centralizada, o nariz
+ficava na borda e o ouvido saía da coluna. Com o foco em 40%, nariz e ouvido
+ficam dentro dela do notebook (760 px de altura) ao monitor alto (1265 px). Arte
+nova com outro enquadramento pede a conta de novo.
+
+## A arte anterior (Dr. Marcello)
+
+`sidebar-gastro-full.jpg` era a marca-d'água atrás do menu: uma criança de corpo
 inteiro com o aparelho digestivo aceso. Este arquivo existe porque chegar nela
 custou uma tarde inteira de tentativas erradas, em 20/09/2026, e o próximo que
 for trocar essa imagem merece o atalho.
@@ -21,7 +55,7 @@ Duas escolhas fazem esse trecho funcionar, e nenhuma é óbvia:
 
 **`mix-blend-screen`.** A arte tem fundo escuro. Com opacidade pura, esse fundo
 vira um retângulo de borda visível sobre o azul da barra. Com `screen`, o preto
-da imagem some no azul e sobra apenas o brilho do desenho — sem emenda.
+da imagem some no azul e sobra apenas o brilho do desenho, sem emenda.
 
 **O degradê por cima.** Escurece topo e base, clareia o meio. Protege as duas
 pontas onde há conteúdo: o logo em cima, o cartão "Dados protegidos" embaixo.
@@ -32,8 +66,8 @@ pontas onde há conteúdo: o logo em cima, o cartão "Dados protegidos" embaixo.
    bastante espaço vazio nas laterais**. O espaço não é enfeite: é o que o
    `object-cover` vai comer.
 2. Baixe o **arquivo original** do resultado. Nunca print de tela, miniatura ou
-   prévia — elas vêm comprimidas e às vezes com elementos de interface.
-3. Salve aqui, em `src/assets/`. Para web, ~640 × 1133 px, JPEG 85–90%, fica
+   prévia: elas vêm comprimidas e às vezes com elementos de interface.
+3. Salve aqui, em `src/assets/`. Para web, ~640 × 1133 px, JPEG 85 a 90%, fica
    leve e nítido (o atual tem 69 KB).
 4. **Abra o arquivo e confira** antes de integrar: sem texto, número ou marca;
    cabeça, mãos e pés inteiros; vertical; figura centralizada; sobra lateral.
@@ -48,7 +82,7 @@ pontas onde há conteúdo: o logo em cima, o cartão "Dados protegidos" embaixo.
 
 6. Veja **no tamanho real da barra**, não a imagem isolada. Confira se o
    `object-cover` está cortando braços ou pés. Teste numa tela alta E num
-   notebook — o corte muda com a altura da janela.
+   notebook: o corte muda com a altura da janela.
 7. Só publique depois de compilar e abrir a página no navegador.
 
 ## O que não funciona (aprendido do jeito difícil)

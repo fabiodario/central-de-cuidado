@@ -1,4 +1,5 @@
-import logoDrFabio from '@/assets/fabio-logo-transparente.png'
+import logoDrFabio from '@/assets/fabio-logo-fundo-claro.png'
+import logoDrFabioNoEscuro from '@/assets/fabio-logo-fundo-escuro.png'
 import logoCentral from '@/assets/logo-central-de-cuidado.webp'
 import { CLINICA_DR_FABIO } from '../../supabase/functions/_shared/quem-atende.ts'
 
@@ -11,17 +12,24 @@ import { CLINICA_DR_FABIO } from '../../supabase/functions/_shared/quem-atende.t
  * marca propria. Clinica nova entra com a marca do produto sem precisar de
  * nada aqui.
  *
- * Os dois arquivos sao desenhados em uma cor so: o menu pinta de branco
+ * O logo do produto e desenhado em uma cor so: o menu pinta de branco
  * (brightness-0 invert), entao qualquer cor vira silhueta branca.
  *
  * Espelho do Dr. Fabio Dario (15/10/2026): a marca propria aqui e a dele, e e
- * ela que fica no login e na impressao. O logo veio do site dele em fundo
- * preto; fabio-logo-transparente.png e o mesmo desenho com o preto virado
- * transparencia, porque o menu so enxerga o contorno (o branco por cima do
- * preto viraria um retangulo branco).
+ * ela que fica no login e na impressao. O logo dele e colorido (tres circulos:
+ * ouvido, nariz e garganta), e pintado de branco pelo filtro os circulos
+ * viravam manchas. Por isso ele tem uma versao propria para o fundo escuro,
+ * sem filtro. Os dois arquivos saem de scripts/marca/gerar_marca.py.
  */
 export type Marca = {
+  /** Logo para fundo claro: troca de senha e prontuario impresso. */
   src: string
+  /**
+   * Logo pronto para o fundo azul-escuro (login, menu), usado sem filtro.
+   * Ausente = o filtro pinta o src de branco, o que so serve para logo de uma
+   * cor so, como o do produto.
+   */
+  srcFundoEscuro?: string
   nome: string
   mostraEtiquetaDoProduto: boolean
   /** Titulo da aba do navegador. */
@@ -50,6 +58,7 @@ export type Marca = {
 
 const DR_FABIO: Marca = {
   src: logoDrFabio,
+  srcFundoEscuro: logoDrFabioNoEscuro,
   nome: 'Dr. Fábio Dario',
   // A etiqueta "Central de cuidado" embaixo do logo diz de que sistema se
   // trata. Com o logo do produto, ela so repetiria o nome.
@@ -76,6 +85,19 @@ const CENTRAL: Marca = {
 
 const CLINICAS_COM_MARCA_PROPRIA: Record<string, Marca> = {
   [CLINICA_DR_FABIO]: DR_FABIO, // Consultorio Dr. Fabio Dario
+}
+
+/**
+ * O logo para o fundo azul-escuro do login e do menu: a versao propria da
+ * clinica quando ela existe, ou o logo de uma cor so pintado de branco.
+ *
+ * object-contain em todos: a caixa do logo tem altura fixa e largura maxima, e
+ * logo mais largo que a caixa era achatado (15/10/2026, o do Dr. Fabio).
+ */
+export function logoNoFundoEscuro(marca: Marca): { src: string; classe: string } {
+  return marca.srcFundoEscuro
+    ? { src: marca.srcFundoEscuro, classe: 'object-contain object-left' }
+    : { src: marca.src, classe: 'object-contain object-left brightness-0 invert' }
 }
 
 export function marcaDaClinica(clinicId: string | null | undefined): Marca {
