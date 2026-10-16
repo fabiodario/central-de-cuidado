@@ -155,7 +155,12 @@ const FABIO: Identidade = {
     },
     {
       subject: 'O que o Dr. Fábio trata',
-      keywords: ['trata', 'tratam', 'cuida', 'cuidam', 'especialidade', 'especialista', 'otorrino', 'otorrinolaringologista', 'nariz', 'entupido', 'entupida', 'entupimento', 'ronco', 'ronca', 'roncar', 'roncando', 'apneia', 'desvio', 'septo', 'respiracao', 'respiração', 'respirar', 'bucal', 'sinusite', 'rinite', 'olfato', 'cheiro', 'adenoide', 'amigdala', 'amígdala', 'amigdalas', 'amígdalas', 'ouvido', 'ouvidos', 'zumbido', 'audicao', 'audição', 'garganta', 'labirintite', 'tontura', 'sono'],
+      // No maximo 40 palavras: o banco recusa mais (bot_answers_keywords_limit),
+      // e foi assim que a carga da clinica real falhou em 15/10/2026, com 41.
+      // Sem "roncar", "roncando", "ouvidos" e "amigdalas": palavra de cinco
+      // letras ou mais tambem vale pelo comeco (respostas.ts), entao "ronca",
+      // "ouvido" e "amigdala" ja as encontram.
+      keywords: ['trata', 'tratam', 'cuida', 'cuidam', 'especialidade', 'especialista', 'otorrino', 'otorrinolaringologista', 'nariz', 'entupido', 'entupida', 'entupimento', 'ronco', 'ronca', 'apneia', 'desvio', 'septo', 'respiracao', 'respiração', 'respirar', 'bucal', 'sinusite', 'rinite', 'olfato', 'cheiro', 'adenoide', 'amigdala', 'amígdala', 'ouvido', 'zumbido', 'audicao', 'audição', 'garganta', 'labirintite', 'tontura', 'sono'],
       answer:
         '👃 *Respirar bem é viver melhor.*\n\n' +
         'O Dr. Fábio Dario é otorrinolaringologista e especialista em cirurgia das vias aéreas superiores, com mais de 10 anos de experiência. ' +

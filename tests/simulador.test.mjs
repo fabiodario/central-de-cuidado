@@ -456,5 +456,23 @@ await caso('painel: "ta bom, obrigada" depois de cancelar nao apaga o aviso para
   assert.equal(s.motivo, 'cancelou_sozinho')
 })
 
+// A demonstracao cabe no banco de verdade (15/10/2026). A clinica real do Dr.
+// Fabio foi carregada com estes mesmos dados, e a carga falhou: "O que o Dr.
+// Fabio trata" tinha 41 palavras, e o banco aceita 40. O banco falso nao tem
+// as regras do Postgres, entao elas ficam aqui (migrations 20260824000000 e
+// 20260909140000).
+await caso('respostas e unidades da demonstracao cabem nas regras do banco', async () => {
+  for (const r of FABIO.respostas) {
+    assert.ok(r.keywords.length <= 40, `"${r.subject}" tem ${r.keywords.length} palavras; o banco aceita 40`)
+    assert.ok(r.subject.trim().length >= 1 && r.subject.trim().length <= 120, `assunto "${r.subject}" fora de 1 a 120 letras`)
+    assert.ok(r.answer.trim().length >= 1 && r.answer.trim().length <= 1024, `resposta de "${r.subject}" com ${r.answer.trim().length} letras; o banco aceita 1024`)
+  }
+  for (const u of FABIO.agendaPadrao.unidades) {
+    assert.ok(u.nome.trim().length >= 1 && u.nome.trim().length <= 160, `nome da unidade "${u.nome}" fora de 1 a 160 letras`)
+    assert.ok(u.endereco.length <= 400, `endereco de "${u.nome}" com mais de 400 letras`)
+    assert.ok(u.informacoes.length <= 1024, `texto de "${u.nome}" com ${u.informacoes.length} letras; o banco aceita 1024`)
+  }
+})
+
 console.warn = warnOriginal
 console.log(`simulador.test: ${ok} casos ok`)
