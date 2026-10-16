@@ -1,32 +1,46 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Loader2, Lock, LogOut } from 'lucide-react'
 import { useAuth } from '@/auth/AuthProvider'
-import { isSupabaseConfigured } from '@/lib/supabase'
+import { isSupabaseConfigured, supabase } from '@/lib/supabase'
 import logoCentral from '@/assets/logo-central-de-cuidado.webp'
 
 /**
- * Quem pode abrir o simulador: o login do sistema, e so as contas listadas.
+ * Quem pode abrir o simulador: o login do sistema, de quem tem acesso ativo a
+ * uma clinica, ou das contas listadas abaixo.
+ *
+ * O acesso pela clinica e de 16/10/2026: o simulador passou a morar dentro de
+ * Respostas e a ler a configuracao da clinica do login. Quem enxerga Respostas
+ * (o Dr. Fabio, a Dayane) tem de conseguir testar o robo ali, e a lista de
+ * e-mails, herdada das demonstracoes de venda do Dr. Marcello, barrava os dois.
  *
  * A lista guarda o SHA-256 do e-mail, e nao o e-mail: a pagina e publica no
  * GitHub Pages e qualquer um le o codigo dela. Para liberar outra pessoa, gere
  * o hash do e-mail em minusculas e acrescente aqui:
  *   node -e "console.log(require('crypto').createHash('sha256').update('email@exemplo.com').digest('hex'))"
  *
- * O que esta trava protege e o acesso a demonstracao, nao dado da clinica: o
- * simulador roda inteiro no navegador, com banco falso, e nao le nem grava nada
- * no Supabase. A sessao e a do proprio sistema (mesmo endereco), entao quem ja
- * entrou na Central entra direto.
+ * O simulador so LE a configuracao da clinica (unidades, horarios, respostas
+ * prontas), com a mesma permissao do sistema, e nunca grava: as conversas e as
+ * consultas da simulacao ficam num banco falso, no navegador. A sessao e a do
+ * proprio sistema (mesmo endereco), entao quem ja entrou na Central entra
+ * direto.
  */
-const CONTAS_LIBERADAS = [
-  '86c69d3de7e3c3f8b51abe860f78d35d2a1c23682c638c579439ae5f8b0746cf',
-  // O login da conta de teste (14/10/2026): quem configura a clinica de teste
-  // no sistema e abre o simulador logo em seguida, no mesmo navegador.
-  '4f943e5f80a8ac3ca3ce47d1d0cec2ea709866ebc6654bbfcb75cf6e91ead222',
-]
+const CONTAS_LIBERADAS = ['86c69d3de7e3c3f8b51abe860f78d35d2a1c23682c638c579439ae5f8b0746cf']
 
 async function impressaoDoEmail(email: string): Promise<string> {
   const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(email.trim().toLowerCase()))
   return [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** Tem acesso ativo a alguma clinica? Erro de rede sobe, e a tela diz qual foi. */
+async function temClinicaAtiva(usuario: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('clinic_memberships')
+    .select('clinic_id')
+    .eq('user_id', usuario)
+    .eq('status', 'active')
+    .limit(1)
+  if (error) throw new Error(error.message)
+  return (data ?? []).length > 0
 }
 
 function Carregando() {
@@ -57,15 +71,16 @@ export function Acesso({ children }: { children: ReactNode }) {
   const [liberado, setLiberado] = useState<{ email: string; ok: boolean; erro?: string } | null>(null)
 
   const emailDaSessao = user?.email ?? ''
+  const idDaSessao = user?.id ?? ''
   useEffect(() => {
-    if (!emailDaSessao) return
+    if (!emailDaSessao || !idDaSessao) return
     let vivo = true
     // Falha aqui tem de aparecer. Em 14/10/2026 a pagina aberta em http (onde
     // crypto.subtle nao existe) rejeitava esta promessa em silencio, e a tela
     // ficava girando para sempre sem dizer nada.
-    impressaoDoEmail(emailDaSessao)
-      .then((h) => {
-        if (vivo) setLiberado({ email: emailDaSessao, ok: CONTAS_LIBERADAS.includes(h) })
+    Promise.all([impressaoDoEmail(emailDaSessao), temClinicaAtiva(idDaSessao)])
+      .then(([h, temClinica]) => {
+        if (vivo) setLiberado({ email: emailDaSessao, ok: temClinica || CONTAS_LIBERADAS.includes(h) })
       })
       .catch((erro: unknown) => {
         if (vivo) setLiberado({ email: emailDaSessao, ok: false, erro: erro instanceof Error ? erro.message : String(erro) })
@@ -73,17 +88,16 @@ export function Acesso({ children }: { children: ReactNode }) {
     return () => {
       vivo = false
     }
-  }, [emailDaSessao])
+  }, [emailDaSessao, idDaSessao])
 
   // So no servidor de desenvolvimento (npm run dev), para conferir a tela sem
   // senha: o build de producao troca import.meta.env.DEV por false e este
   // atalho nao chega ao site publicado.
   if (import.meta.env.DEV && new URLSearchParams(window.location.search).has('semlogin')) return <>{children}</>
 
-  // Espelho do Dr. Fabio Dario (15/10/2026): o sistema dele ainda nao tem
-  // banco, entao nao ha conta para conferir - e o simulador nao le nem grava
-  // nada. Assim ele abre direto, ate como arquivo com duplo clique na reuniao.
-  // Quando o banco do Dr. Fabio existir (.env.local preenchido), a trava volta.
+  // Sem banco configurado (o arquivo da reuniao, gerado sem .env.local), nao
+  // ha conta para conferir, e o simulador roda com os dados de exemplo. Assim
+  // ele abre direto com duplo clique, sem internet.
   if (!isSupabaseConfigured) return <>{children}</>
 
   if (loading) return <Carregando />
@@ -164,7 +178,8 @@ export function Acesso({ children }: { children: ReactNode }) {
           <Lock className="h-5 w-5 text-[#2f7fc1]" /> Acesso restrito
         </h1>
         <p className="mt-2 text-sm text-slate-500">
-          Esta demonstração está liberada só para contas específicas. Você entrou como <strong>{emailDaSessao}</strong>.
+          O simulador abre para quem tem acesso a uma clínica neste sistema. Você entrou como <strong>{emailDaSessao}</strong>, que
+          ainda não tem: peça a liberação na tela Acessos da equipe.
         </p>
         <button
           type="button"

@@ -1,18 +1,19 @@
 /**
- * Le a configuracao da clinica de teste no Supabase, so leitura, com a sessao
- * de quem abriu o simulador. Ver da-clinica.ts para o que vira o que.
+ * Le a configuracao da clinica de quem esta logado, so leitura, com a sessao
+ * do sistema. Ver da-clinica.ts para o que vira o que.
  *
- * Qual clinica: a do login que esta no simulador (14/10/2026). A conta de teste
- * tem login proprio, e o fluxo de reuniao e entrar nela
- * no sistema, configurar a clinica do cliente ("Clinica Cintia") e abrir o
- * simulador no mesmo navegador. Ate aqui o id da clinica de teste era fixo e o
- * banco recusava a leitura para quem nao era membro dela - o simulador caia na
- * copia fixa e a Clinica Cintia nao aparecia. A clinica real do Dr. Marcello
- * nunca e lida: com esse login, tenta a clinica de teste de sempre.
+ * Simulador dentro de Respostas (16/10/2026): o Edu pediu o simulador aberto
+ * no proprio sistema, "ja como vai ser o robo do Dr. Fabio". O robo da
+ * simulacao responde com o que esta cadastrado de verdade: unidades, horarios,
+ * excecoes, preferencias da agenda, saudacao e respostas prontas. Mudou uma
+ * resposta pronta, recarrega o simulador e ve o robo novo.
  *
- * So tabelas de configuracao: unidades, horarios, excecoes, clinic_settings e
- * respostas prontas. Paciente e consulta nunca sao lidos - a demonstracao
- * aparece na frente de cliente.
+ * Herdado do sistema do Dr. Marcello, onde lia so a clinica de teste das
+ * demonstracoes de venda e nunca a clinica real dele. Aqui a clinica e a do
+ * login: e para ela que o robo vai responder.
+ *
+ * So tabelas de configuracao. Paciente e consulta nunca sao lidos: as
+ * consultas da simulacao continuam no banco falso, no navegador.
  *
  * Mesma regra do resto do sistema para coluna nova: vai em consulta separada,
  * dentro de try/catch. O Postgres recusa o SELECT inteiro quando falta uma
@@ -20,13 +21,9 @@
  * inteira por causa dela, nao.
  */
 import { supabase } from '@/lib/supabase'
-import { CLINICA_DE_TESTE } from '@/lib/clinica-de-teste'
 import type { Linha } from './banco-falso'
 import { diaDeBrasilia } from './agenda'
 import type { LinhasDaClinica } from './da-clinica'
-
-/** A clinica real (ver lib/marca.ts): nunca vira demonstracao. */
-const CLINICA_DO_DR_MARCELLO = '1ffde840-a905-4300-b4fd-51571fcefdc0'
 
 type Resposta = { data: unknown; error: { message: string } | null }
 type Consulta = PromiseLike<Resposta> & {
@@ -53,33 +50,29 @@ async function opcional(consulta: Consulta, oQue: string): Promise<Linha[]> {
   try {
     return await linhas(consulta)
   } catch (erro) {
-    console.warn(`[simulador] sem ${oQue} da clinica de teste; seguindo sem`, erro)
+    console.warn(`[simulador] sem ${oQue} da clinica; seguindo sem`, erro)
     return []
   }
 }
 
 /**
- * A clinica do login, na mesma ordem do getCurrentMembership do sistema (a
- * vinculacao ativa mais antiga), pulando a clinica real. Sem nenhuma, a clinica
- * de teste de sempre - e se o login nao for membro dela, a leitura acusa.
+ * A clinica do login, na mesma ordem do getCurrentMembership do sistema: a
+ * vinculacao ativa mais antiga. Sem nenhuma, para com o motivo, em vez de cair
+ * calado nos dados de exemplo.
  */
 async function clinicaDoLogin(): Promise<string> {
-  try {
-    const { data } = await supabase.auth.getSession()
-    const usuario = data.session?.user.id
-    if (!usuario) return CLINICA_DE_TESTE
-    const vinculos = await linhas(
-      tabela('clinic_memberships').select('clinic_id').eq('user_id', usuario).eq('status', 'active').order('created_at', { ascending: true }),
-    )
-    const outra = vinculos.map((v) => String(v.clinic_id)).find((id) => id && id !== CLINICA_DO_DR_MARCELLO)
-    return outra ?? CLINICA_DE_TESTE
-  } catch (erro) {
-    console.warn('[simulador] nao consegui ver de qual clinica e este login; tentando a clinica de teste', erro)
-    return CLINICA_DE_TESTE
-  }
+  const { data } = await supabase.auth.getSession()
+  const usuario = data.session?.user.id
+  if (!usuario) throw new Error('não há ninguém logado no sistema neste navegador')
+  const vinculos = await linhas(
+    tabela('clinic_memberships').select('clinic_id').eq('user_id', usuario).eq('status', 'active').order('created_at', { ascending: true }),
+  )
+  const clinica = vinculos.map((v) => String(v.clinic_id)).find(Boolean)
+  if (!clinica) throw new Error('a sua conta não tem acesso ativo a nenhuma clínica')
+  return clinica
 }
 
-export async function lerClinicaDeTeste(): Promise<LinhasDaClinica> {
+export async function lerClinicaDoLogin(): Promise<LinhasDaClinica> {
   const c = await clinicaDoLogin()
   const hoje = diaDeBrasilia(new Date())
   const [clinica, unidades, regras, excecoes, agenda, saudacao, telemedicina, respostas, marcaTele, convenios, valores, valorTele] =
@@ -105,16 +98,14 @@ export async function lerClinicaDeTeste(): Promise<LinhasDaClinica> {
       opcional(tabela('bot_answers').select('id,subject,keywords,answer,ask_unit,is_active,position').eq('clinic_id', c), 'as respostas prontas'),
       opcional(tabela('clinic_units').select('id,telemedicina').eq('clinic_id', c), 'a marca de telemedicina das unidades'),
       opcional(tabela('clinic_units').select('id,accepts_insurance').eq('clinic_id', c), 'o convenio das unidades'),
-      // Colunas de 14/10/2026: sem elas, a demonstracao segue sem os valores.
       opcional(tabela('clinic_units').select('id,price_cents').eq('clinic_id', c), 'o valor das unidades'),
       opcional(tabela('clinic_settings').select('telemedicine_price_cents').eq('clinic_id', c).limit(1), 'o valor da telemedicina'),
     ])
 
-  // RLS nao da erro para quem nao e membro: devolve lista vazia. Sem unidade
-  // nenhuma, ou a conta nao enxerga a clinica de teste ou ela esta sem
-  // unidades - nos dois casos o simulador nao pode fingir que leu.
-  if (unidades.length === 0) {
-    throw new Error('a sua conta não enxerga nenhuma unidade da clínica de teste')
+  // RLS nao da erro para quem nao enxerga: devolve lista vazia. Sem unidade
+  // nenhuma, o robo nao tem onde marcar, e a simulacao nao pode fingir que leu.
+  if (unidades.filter((u) => !u.archived_at).length === 0) {
+    throw new Error('a clínica ainda não tem nenhuma unidade ativa cadastrada')
   }
 
   const porId = (lista: Linha[]) => new Map(lista.map((l) => [l.id, l]))

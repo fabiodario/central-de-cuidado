@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useEffectEvent, useRef, useState, type ReactNode } from 'react'
 import {
   ArrowLeft,
   BellRing,
@@ -20,6 +20,7 @@ import {
   Paperclip,
   Phone,
   Play,
+  RefreshCw,
   Reply,
   RotateCcw,
   Send,
@@ -31,11 +32,14 @@ import {
   X,
 } from 'lucide-react'
 import { useAuth } from '@/auth/AuthProvider'
+import { isSupabaseConfigured } from '@/lib/supabase'
 import logoCentral from '@/assets/logo-central-de-cuidado.webp'
 import logoFabio from '@/assets/fabio-logo-fundo-escuro.png'
 import iconeFabio from '@/assets/fabio-icone.png'
-import { FAMILIAS, IDENTIDADES, type ChaveFamilia } from './dados'
+import { FAMILIAS, IDENTIDADES, type ChaveFamilia, type Identidade } from './dados'
 import { agendaValida, copiarAgenda, type AgendaDaClinica } from './agenda'
+import { identidadeDoSistema } from './da-clinica'
+import { lerClinicaDoLogin } from './ler-clinica'
 import ConfiguracaoDaAgenda from './ConfiguracaoDaAgenda'
 import { ROTEIROS, type Roteiro } from './roteiros'
 import { ETAPAS, MOTIVOS, Simulacao, type Alerta, type Mensagem, type Registro, type Situacao, type Tom } from './sessao'
@@ -43,18 +47,40 @@ import type { Toque } from './motor.js'
 
 /**
  * Espelho do Dr. Fabio Dario (15/10/2026): uma identidade so, a do consultorio
- * dele, sem leitura de conta de teste (o sistema do Dr. Fabio ainda nao tem
- * banco). Roda inteiro no navegador, inclusive aberto como arquivo, sem rede:
- * a reuniao nao pode depender do Wi-Fi da sala.
+ * dele. Duas fontes para o que o robo sabe:
  *
- * A agenda montada na aba Agenda fica guardada neste navegador. E conveniencia
- * de quem apresenta - os dias, horarios e valores ainda sao de exemplo, e quem
- * ajusta antes da reuniao nao quer refazer a cada recarga. Tudo em try/catch:
- * sem armazenamento, vale a agenda padrao.
+ * - Com login no sistema (o simulador dentro de Respostas, 16/10/2026): a
+ *   configuracao de verdade da clinica, lida do banco (ler-clinica.ts). O robo
+ *   da simulacao e o robo que vai atender: mudou uma resposta pronta, "Ler a
+ *   clinica de novo" e ele ja responde com ela.
+ * - Sem banco (o arquivo da reuniao, aberto com duplo clique): os dados de
+ *   exemplo de dados.ts. Roda inteiro no navegador, sem rede: a reuniao nao
+ *   pode depender do Wi-Fi da sala.
+ *
+ * Nos dados de exemplo, a agenda montada na aba Agenda fica guardada neste
+ * navegador: os dias, horarios e valores sao de exemplo, e quem ajusta antes
+ * da reuniao nao quer refazer a cada recarga. Tudo em try/catch: sem
+ * armazenamento, vale a agenda padrao. Com a clinica, a agenda mexida aqui
+ * vale so para a simulacao: a de verdade se muda na tela Agenda.
  */
 const CHAVE_DA_AGENDA = 'simuladorbot.agenda.fabio'
 
 const IDENTIDADE = IDENTIDADES.fabio
+
+/**
+ * Aberto de dentro de Respostas (?no-sistema): a sessao e a do proprio
+ * sistema, que esta logo atras. O botao de sair some, porque sair aqui
+ * deslogaria o sistema inteiro.
+ */
+const NO_SISTEMA = new URLSearchParams(window.location.search).has('no-sistema')
+
+type Fonte = 'exemplo' | 'carregando' | 'clinica'
+type Carga = { identidade: Identidade; agenda: AgendaDaClinica }
+
+async function carregarDaClinica(): Promise<Carga> {
+  const identidade = identidadeDoSistema(IDENTIDADE, await lerClinicaDoLogin())
+  return { identidade, agenda: copiarAgenda(identidade.agendaPadrao) }
+}
 
 function lerGuardado(chave: string): unknown {
   try {
@@ -402,8 +428,14 @@ function NotificacaoNoCelular({ alerta, onFechar }: { alerta: Alerta; onFechar: 
 // ---------------------------------------------------------------
 
 export default function SimuladorBot() {
-  const { signOut, user } = useAuth()
+  const { signOut, user, session } = useAuth()
+  const usuarioId = session?.user.id ?? null
   const [chaveFamilia, setChaveFamilia] = useState<ChaveFamilia>('nova')
+  const [identidade, setIdentidade] = useState<Identidade>(IDENTIDADE)
+  // Com banco, comeca lendo a clinica; o arquivo da reuniao ja nasce no exemplo.
+  const [fonte, setFonte] = useState<Fonte>(() => (isSupabaseConfigured ? 'carregando' : 'exemplo'))
+  const [erroDaClinica, setErroDaClinica] = useState<string | null>(null)
+  const [leitura, setLeitura] = useState(0)
   const [agenda, setAgenda] = useState<AgendaDaClinica>(agendaGuardada)
   const [aba, setAba] = useState<'respostas' | 'agenda'>('respostas')
   const [avisoDoRoteiro, setAvisoDoRoteiro] = useState<string | null>(null)
@@ -461,9 +493,9 @@ export default function SimuladorBot() {
     for (const a of novas) window.setTimeout(() => fecharNotificacao(a.id), NOTIFICACAO_MS)
   }
 
-  function recomecar(cf: ChaveFamilia = chaveFamilia): Simulacao {
+  function recomecar(cf: ChaveFamilia = chaveFamilia, base: Carga = { identidade, agenda }): Simulacao {
     geracao.current += 1
-    const nova = new Simulacao(IDENTIDADE, FAMILIAS[cf], { agenda })
+    const nova = new Simulacao(base.identidade, FAMILIAS[cf], { agenda: base.agenda })
     simAtual.current = nova
     setSim(nova)
     setChaveFamilia(cf)
@@ -481,12 +513,50 @@ export default function SimuladorBot() {
     return nova
   }
 
-  /** Agenda nova vale na hora, na conversa aberta, e fica salva neste navegador. */
+  /**
+   * Agenda nova vale na hora, na conversa aberta. Nos dados de exemplo fica
+   * salva neste navegador; com a clinica, vale so ate recarregar.
+   */
   function mudarAgenda(nova: AgendaDaClinica, ehPadrao = false) {
     setAgenda(nova)
     simAtual.current.aplicarAgenda(nova)
-    guardar(CHAVE_DA_AGENDA, ehPadrao ? null : nova)
+    if (fonte === 'exemplo') guardar(CHAVE_DA_AGENDA, ehPadrao ? null : nova)
     setVersao((v) => v + 1)
+  }
+
+  // A configuracao da clinica do login. Chegou, a conversa recomeca com ela;
+  // falhou, fica no exemplo e diz por que, em vez de fingir que leu.
+  const usarClinica = useEffectEvent((carga: Carga) => {
+    setIdentidade(carga.identidade)
+    setAgenda(carga.agenda)
+    setErroDaClinica(null)
+    setFonte('clinica')
+    recomecar(chaveFamilia, carga)
+  })
+  const ficarNoExemplo = useEffectEvent((erro: unknown) => {
+    setErroDaClinica(erro instanceof Error ? erro.message : String(erro))
+    setFonte('exemplo')
+  })
+  useEffect(() => {
+    if (!isSupabaseConfigured || !usuarioId) return
+    let vivo = true
+    carregarDaClinica().then(
+      (carga) => {
+        if (vivo) usarClinica(carga)
+      },
+      (erro: unknown) => {
+        if (vivo) ficarNoExemplo(erro)
+      },
+    )
+    return () => {
+      vivo = false
+    }
+  }, [usuarioId, leitura])
+
+  /** Le a clinica de novo: depois de mudar uma resposta pronta no sistema, por exemplo. */
+  function lerDeNovo() {
+    setFonte('carregando')
+    setLeitura((n) => n + 1)
   }
 
   /**
@@ -525,7 +595,7 @@ export default function SimuladorBot() {
 
   /** Toque manual: so na opcao da ultima mensagem, e nunca no meio de outra resposta. */
   function tocar(o: Toque) {
-    if (ocupado || roteiroAtivo) return
+    if (ocupado || roteiroAtivo || fonte === 'carregando') return
     void enviar({ texto: o.titulo, idDoToque: o.id })
   }
 
@@ -625,7 +695,7 @@ export default function SimuladorBot() {
 
   const enviarRascunho = () => {
     const texto = rascunho.trim()
-    if (!texto || ocupado || roteiroAtivo) return
+    if (!texto || ocupado || roteiroAtivo || fonte === 'carregando') return
     setRascunho('')
     void enviar({ texto })
   }
@@ -634,8 +704,10 @@ export default function SimuladorBot() {
   const pacientes = sim.pacientes()
   const etapa = sim.etapa
   const situacao = sim.situacao
-  const travado = ocupado || Boolean(roteiroAtivo)
-  const agendaAlterada = JSON.stringify(agenda) !== JSON.stringify(IDENTIDADE.agendaPadrao)
+  // Enquanto le a clinica, a conversa espera: ela recomeca quando a leitura chega.
+  const lendo = fonte === 'carregando' && Boolean(usuarioId)
+  const travado = ocupado || Boolean(roteiroAtivo) || lendo
+  const agendaAlterada = JSON.stringify(agenda) !== JSON.stringify(identidade.agendaPadrao)
 
   return (
     <div className="flex min-h-dvh flex-col bg-[#f6f4ef] text-[#1d1d1b] lg:h-dvh">
@@ -645,8 +717,26 @@ export default function SimuladorBot() {
         <div className="hidden h-7 w-px bg-white/15 sm:block" />
         <div className="mr-auto">
           <p className="text-[15px] font-extrabold leading-tight">Simulador do atendimento no WhatsApp</p>
-          <p className="text-[11.5px] text-white/55">Robô de verdade, banco de demonstração. Nada é enviado nem gravado.</p>
+          <p className="text-[11.5px] text-white/55">
+            {lendo
+              ? 'Lendo a configuração da clínica...'
+              : fonte === 'clinica'
+                ? 'Robô de verdade, com a configuração da clínica. Nada é enviado nem gravado.'
+                : 'Robô de verdade, com dados de exemplo. Nada é enviado nem gravado.'}
+          </p>
         </div>
+
+        {isSupabaseConfigured && usuarioId && (
+          <button
+            type="button"
+            onClick={lerDeNovo}
+            disabled={lendo || ocupado || Boolean(roteiroAtivo)}
+            title="Lê de novo unidades, horários, saudação e respostas prontas cadastradas no sistema, e recomeça a conversa"
+            className="flex items-center gap-1.5 whitespace-nowrap rounded-xl border border-white/15 px-3 py-2 text-[13px] font-bold text-white/85 transition hover:bg-white/10 disabled:opacity-50"
+          >
+            <RefreshCw className={`h-4 w-4 ${lendo ? 'animate-spin' : ''}`} /> Ler a clínica de novo
+          </button>
+        )}
 
         <div ref={menu} className="relative">
           <button
@@ -683,12 +773,24 @@ export default function SimuladorBot() {
         >
           <RotateCcw className="h-4 w-4" /> Recomeçar
         </button>
-        {user && (
+        {user && !NO_SISTEMA && (
           <button type="button" onClick={() => void signOut()} title={`Sair (${user.email})`} className="rounded-xl p-2 text-white/50 hover:bg-white/10 hover:text-white">
             <LogOut className="h-4 w-4" />
           </button>
         )}
       </header>
+
+      {erroDaClinica && (
+        <div className="flex items-center gap-3 bg-amber-100 px-4 py-2 text-[13px] font-semibold text-amber-900 lg:px-6">
+          <span className="min-w-0 flex-1">
+            Não consegui ler a configuração da clínica ({erroDaClinica}). A simulação está com os dados de exemplo, e não com o que está
+            cadastrado no sistema.
+          </span>
+          <button type="button" onClick={lerDeNovo} className="rounded-lg bg-amber-900 px-2.5 py-1 text-[12px] font-bold text-white">
+            Tentar de novo
+          </button>
+        </div>
+      )}
 
       {roteiroAtivo && (
         <div className="flex items-center gap-3 bg-[#a9c3b3] px-4 py-2 text-[13px] font-bold text-[#1d1d1b] lg:px-6">
@@ -751,7 +853,7 @@ export default function SimuladorBot() {
                 <img src={iconeFabio} alt="" className="h-full w-full object-cover" />
               </span>
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-[15.5px] font-semibold text-[#111b21]">{IDENTIDADE.nomeNoWhatsApp}</span>
+                <span className="block truncate text-[15.5px] font-semibold text-[#111b21]">{identidade.nomeNoWhatsApp}</span>
                 <span className="block truncate text-[12px] text-[#667781]">{digitando ? 'digitando...' : 'Conta comercial'}</span>
               </span>
               <Video className="h-5 w-5 text-[#54656f]" />
@@ -866,7 +968,11 @@ export default function SimuladorBot() {
               </button>
             ))}
             <span className="ml-auto hidden text-[11.5px] text-white/50 sm:block">
-              {aba === 'agenda' ? 'Configure aqui; o robô usa na hora' : `O que a ${IDENTIDADE.equipe} e a equipe veem, ao mesmo tempo`}
+              {aba === 'agenda'
+                ? fonte === 'clinica'
+                  ? 'A agenda do sistema; mudanças aqui são só de teste'
+                  : 'Configure aqui; o robô usa na hora'
+                : `O que a ${IDENTIDADE.equipe} e a equipe veem, ao mesmo tempo`}
             </span>
           </div>
 
@@ -874,14 +980,17 @@ export default function SimuladorBot() {
             <ConfiguracaoDaAgenda
               agenda={agenda}
               onMudar={(nova) => mudarAgenda(nova)}
-              onRestaurar={() => mudarAgenda(copiarAgenda(IDENTIDADE.agendaPadrao), true)}
+              onRestaurar={() => mudarAgenda(copiarAgenda(identidade.agendaPadrao), true)}
               previa={(id) => sim.horariosLivres(id)}
               alterada={agendaAlterada}
               explicacao={
-                'Dias, horários e valores aqui ainda são de exemplo: ajuste com o que o consultório confirmar. ' +
-                'O que muda vale na hora, na conversa ao lado, e fica salvo neste navegador.'
+                fonte === 'clinica'
+                  ? 'Estes são os dias e horários cadastrados na Agenda do sistema. Mudar aqui serve para testar: vale só nesta ' +
+                    'simulação, na conversa ao lado. Para mudar de verdade, use a tela Agenda e depois "Ler a clínica de novo".'
+                  : 'Dias, horários e valores aqui ainda são de exemplo: ajuste com o que o consultório confirmar. ' +
+                    'O que muda vale na hora, na conversa ao lado, e fica salvo neste navegador.'
               }
-              rotuloRestaurar="Voltar ao exemplo"
+              rotuloRestaurar={fonte === 'clinica' ? 'Voltar à agenda do sistema' : 'Voltar ao exemplo'}
             />
           ) : (
           <div className="grid min-h-0 flex-1 xl:grid-cols-[1fr_340px]">

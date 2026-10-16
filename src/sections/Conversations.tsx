@@ -66,6 +66,7 @@ import {
 } from '@/lib/repository'
 import { lugaresDoRobo } from '@/lib/lugares'
 import MandarHorarios from '@/sections/MandarHorarios'
+import SimuladorNasRespostas from '@/sections/SimuladorNasRespostas'
 import { useDialogos } from '@/components/dialogos-contexto'
 import { useVoltarDoCelular } from '@/lib/voltar-do-celular'
 import {
@@ -1459,6 +1460,10 @@ export default function Conversations({
             : `${outrasAtencoes.length} pacientes responderam e estão aguardando retorno da equipe.`}
         </div>
       )}
+
+      {/* Simulador do robo (16/10/2026): testar o robo desta clinica sem
+          paciente de verdade. Ver SimuladorNasRespostas.tsx. */}
+      <SimuladorNasRespostas compacto={compacto} />
 
       {/* Resposta automatica de primeiro contato. Fica aqui, e nao numa tela de
           configuracao escondida, porque quem cuida das conversas e quem sabe se
