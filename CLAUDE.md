@@ -69,6 +69,18 @@ Ao portar correções do robô do Dr. Marcello para cá, compare os dois
 `dados.ts`, roteiros em `roteiros.ts`. Sem banco configurado ele abre sem
 login.
 
+- **Dentro do sistema** (16/10/2026): o cartão "Simulador do robô", no topo de
+  Respostas (`src/sections/SimuladorNasRespostas.tsx`), abre
+  `simuladorbot/?no-sistema` num quadro, com a sessão do sistema. Com login,
+  o simulador lê a configuração de verdade da clínica (`ler-clinica.ts` +
+  `da-clinica.ts`): unidades, horários, exceções, saudação e respostas
+  prontas. "Ler a clínica de novo" recarrega depois de uma mudança. Abre para
+  quem tem acesso ativo a uma clínica. Pacientes e consultas nunca são lidos,
+  e nada é gravado.
+- Os dados de `dados.ts` precisam caber nas regras do banco (máximo de 40
+  palavras por resposta pronta, tamanhos de texto): a clínica real foi
+  carregada com eles, e `tests/simulador.test.mjs` confere.
+
 - `GERAR SIMULADOR.bat` (ou `npm run simulador:arquivo`): confere o robô e gera
   `SIMULADOR - Dr Fabio Dario.html`, arquivo único que abre com duplo clique,
   sem internet. Gerar de novo depois de qualquer mudança.
