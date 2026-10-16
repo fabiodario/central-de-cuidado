@@ -64,7 +64,11 @@ const DR_FABIO: Marca = {
   // trata. Com o logo do produto, ela so repetiria o nome.
   mostraEtiquetaDoProduto: true,
   titulo: 'Central de Cuidado | Dr. Fábio Dario',
-  nomeNoRodape: 'Dr. Fábio Dario',
+  // Sem nome fixo (16/10/2026): com "Dr. Fabio Dario" aqui, quem entrava sem
+  // nome no cadastro (o Edu, criado pelo painel do Supabase) aparecia como
+  // "FD" no topo e como o medico no rodape. No consultorio entram o Edu, o
+  // Dr. Fabio e a Dayane: cada um com o proprio nome.
+  nomeNoRodape: null,
   quemEntraEmContato: 'O consultório do Dr. Fábio Dario',
   consultorioNaResposta: 'o consultório do Dr. Fábio Dario',
   // O v2 e o modelo pediatrico (pergunta pela crianca). O Dr. Fabio fica no

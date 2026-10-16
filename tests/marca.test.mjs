@@ -23,7 +23,10 @@ confere('clinica nova entra com a marca do produto', marcaDaClinica(OUTRA).nome 
 confere('logo do produto nao repete a etiqueta', marcaDaClinica(OUTRA).mostraEtiquetaDoProduto === false)
 confere('logo do Dr. Fabio mantem a etiqueta', marcaDaClinica(FABIO).mostraEtiquetaDoProduto === true)
 confere('clinica sem marca nao leva nome de medico no rodape', marcaDaClinica(OUTRA).nomeNoRodape === null)
-confere('Dr. Fabio no rodape e na aba', marcaDaClinica(FABIO).nomeNoRodape === 'Dr. Fábio Dario' && /Fábio Dario/.test(marcaDaClinica(FABIO).titulo))
+confere('Dr. Fabio na aba do navegador', /Fábio Dario/.test(marcaDaClinica(FABIO).titulo))
+// Rodape e foto do topo mostram quem entrou (16/10/2026): com o nome do medico
+// fixo na marca, o Edu sem nome no cadastro aparecia como "FD".
+confere('a marca do Dr. Fabio nao poe o nome dele em quem entrou', marcaDaClinica(FABIO).nomeNoRodape === null)
 confere('nenhuma marca deste sistema cita o Dr. Marcello', ![marcaDaClinica(FABIO), marcaDaClinica(OUTRA)].some((m) => /Marcello/.test(JSON.stringify(m))))
 // Sem window/localStorage (como no node): o login e a impressao ficam no logo da clinica deste sistema.
 confere('sem clinica conhecida, login e impressao ficam no logo do Dr. Fabio', marcaSemClinicaConhecida(null).nome === 'Dr. Fábio Dario')
