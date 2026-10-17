@@ -24,6 +24,26 @@ echo %REPOSITORIO% | findstr /i "clinicamarcelloruiz" >nul && goto repositorio_e
 rem Remove a trava que sobra quando algum processo de git foi interrompido.
 if exist ".git\index.lock" del /f /q ".git\index.lock" >nul 2>&1
 
+rem As dependencias ficam FORA do OneDrive (15/10/2026): node_modules e um
+rem atalho (juncao) para %LOCALAPPDATA%\fabio-dario-sistema, como nos outros
+rem .bat. Em outro computador o atalho nao existe: cria de novo e instala.
+if not exist "node_modules\.bin\eslint.cmd" (
+  echo --- Preparando pela primeira vez, pode demorar alguns minutos ---
+  if not exist "node_modules" (
+    mkdir "%LOCALAPPDATA%\fabio-dario-sistema\node_modules" >nul 2>&1
+    mklink /J "node_modules" "%LOCALAPPDATA%\fabio-dario-sistema\node_modules" >nul
+  )
+  call npm install
+  if errorlevel 1 goto erro_conferencia
+  echo.
+)
+
+rem Em 17/10/2026, no primeiro uso deste PUBLICAR com dois cliques, a
+rem conferencia parou em "'eslint' nao e reconhecido", com o eslint instalado
+rem e o mesmo comando passando fora dele. A pasta dos comandos do projeto vai
+rem no PATH aqui, em vez de depender so do npm.
+set "PATH=%CD%\node_modules\.bin;%PATH%"
+
 rem Confere o projeto ANTES de enviar, com os mesmos comandos que o GitHub usa.
 rem Em 30/08/2026 um erro de tipagem passou daqui e a publicacao falhou la, sem
 rem ninguem perceber: o site continuou com a versao antiga por horas.
@@ -153,6 +173,13 @@ pause
 exit /b 1
 
 :erro_conferencia
+rem O que o Claude precisa para achar a causa sem adivinhar (17/10/2026).
+echo.
+echo --- Para o Claude ---
+echo pasta: %CD%
+if exist "node_modules\.bin\eslint.cmd" (echo eslint.cmd: existe) else (echo eslint.cmd: NAO existe)
+where eslint 2>&1
+where npm 2>&1
 echo.
 echo ============================================
 echo   NAO PUBLIQUEI - O PROJETO TEM UM ERRO
