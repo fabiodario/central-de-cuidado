@@ -105,6 +105,11 @@ robô como sempre.
   só nos segredos das Edge Functions (`TYPESAFE_API_KEY`), nunca no banco nem
   na tela. Ligado sem chave, cada leitura fica registrada como "falhou: sem
   chave", e Preferências mostra.
+- No simulador de dentro do sistema (17/10/2026), o Jev também lê: o
+  simulador pergunta pela função `jev-ler` (sessão obrigatória, só quem tem
+  acesso ativo à clínica, desligado nem chama a TypeSafe), aplica a mesma
+  `decidirSegundaLeitura` do webhook e mostra a nota em "O que aconteceu" e o
+  selo "Jev ligado" no topo. O arquivo da reunião, sem login, segue sem o Jev.
 - Os limiares foram medidos com a versão fixa `jev-1.13.0` e a pergunta
   palavra por palavra: mudar um dos dois pede medir de novo (`../jev-medicao`,
   fora do repositório).

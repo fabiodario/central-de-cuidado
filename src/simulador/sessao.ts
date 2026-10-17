@@ -14,6 +14,30 @@ import { BancoFalso, type Escrita, type Linha } from './banco-falso'
 import { horariosLivres, tabelasDaAgenda, type AgendaDaClinica } from './agenda'
 import { bancoInicial, type Familia, type Identidade } from './dados'
 import { colherEventos, montarMensagens, tratarConversa, type Toque } from './motor.js'
+import {
+  BOTOES_URGENCIA_OU_DUVIDA,
+  contextoDaLeitura,
+  decidirSegundaLeitura,
+  descreverLeituraDoJev,
+  PERGUNTA_URGENCIA_OU_DUVIDA,
+  precisaDeLeitura,
+  temBotaoDeUrgencia,
+  type Decisao,
+  type Leitura,
+  type ModoDaSegundaLeitura,
+} from '../../supabase/functions/_shared/segunda-leitura.ts'
+
+/**
+ * Quem pergunta ao Jev no simulador (17/10/2026): no sistema, a funcao
+ * jev-ler, pelo servidor, porque a chave nao pode vir para o navegador. modo
+ * null = nao deu para perguntar (rede, sessao). Sem leitor, o simulador e o de
+ * sempre: o arquivo da reuniao nao tem login nem rede.
+ */
+export type LeitorDoJev = (entrada: {
+  texto: string
+  anteriores: string[]
+  ultimaDoRobo: string
+}) => Promise<{ modo: ModoDaSegundaLeitura | null; leitura: Leitura | null }>
 
 export type Autor = 'familia' | 'robo' | 'equipe'
 
@@ -184,6 +208,10 @@ export class Simulacao {
   readonly banco: BancoFalso
   /** Alguem da equipe respondeu: o robo deixa de puxar assunto, como no webhook. */
   equipeConversando = false
+  /** O Jev, quando o simulador roda dentro do sistema (ver LeitorDoJev). */
+  leitorDoJev: LeitorDoJev | null = null
+  /** O modo que o servidor devolveu na ultima leitura, para o selo da tela. */
+  ultimoModoDoJev: ModoDaSegundaLeitura | null = null
   private contador = 0
   private relogio: () => Date
 
@@ -331,6 +359,17 @@ export class Simulacao {
     const futuras = this.consultas().filter(
       (c) => c.status === 'scheduled' && new Date(String(c.starts_at)).getTime() >= agora.getTime(),
     )
+    // O Jev (17/10/2026), na ordem do meta-webhook: a leitura comeca antes do
+    // robo, com as mensagens de antes (sem a de agora), e a decisao vem
+    // depois, com o que o robo respondeu.
+    const motivoAceso = conversa.needs_attention ? ((conversa.attention_reason as string | null) ?? null) : null
+    const leituraDoJev =
+      this.leitorDoJev && !entrada.anexo && precisaDeLeitura(entrada.texto, Boolean(entrada.idDoToque), motivoAceso)
+        ? this.leitorDoJev({ texto: entrada.texto, ...contextoDaLeitura(this.historicoParaOJev()) }).catch(
+            (erro): { modo: null; leitura: Leitura } => ({ modo: null, leitura: { ok: false, erro: String((erro as Error)?.message ?? erro) } }),
+          )
+        : null
+
     // A mensagem da familia entra no historico ANTES do robo, como o webhook
     // grava (16/10/2026): o robo le as mensagens de antes da conversa - a
     // queixa contada na primeira, por exemplo - e precisa ver a de agora tambem.
@@ -379,6 +418,31 @@ export class Simulacao {
       agora,
     })
 
+    // A decisao do Jev (ver decidirSegundaLeitura): so acrescenta. A urgencia
+    // que ele leu entra no lugar do motivo que a regra deu, como no webhook.
+    let decisaoJev: Decisao | null = null
+    let falhaDoJev: string | null = null
+    if (leituraDoJev) {
+      const { modo, leitura } = await leituraDoJev
+      if (modo === null) {
+        falhaDoJev = leitura && !leitura.ok ? leitura.erro : 'sem resposta'
+      } else {
+        this.ultimoModoDoJev = modo
+        if (modo !== 'desligada') {
+          decisaoJev = decidirSegundaLeitura(leitura, {
+            modo,
+            motivoDoRobo: resultado?.atencao ?? motivoAceso,
+            roboRespondeu: Boolean(resultado),
+            jaTemBotaoDeUrgencia: temBotaoDeUrgencia(resultado),
+          })
+          if (resultado && decisaoJev.atencao) {
+            resultado.atencao = decisaoJev.atencao
+            resultado.concluida = false
+          }
+        }
+      }
+    }
+
     // A bandeira de atencao, na mesma ordem do meta-webhook: concluida fecha,
     // pedido de gente acende com o motivo, e silencio acende com o motivo que
     // ja havia (ou "atendente"). Calar sem acender e o defeito de 22/09/2026.
@@ -392,7 +456,10 @@ export class Simulacao {
       if (resultado.atencao) eventos.push({ evento: 'chamou_equipe', detalhe: resultado.atencao })
       if (resultado.concluida) eventos.push({ evento: 'concluiu_sozinho' })
     } else {
-      Object.assign(conversa, { needs_attention: true, attention_reason: conversa.attention_reason || 'atendente' })
+      Object.assign(conversa, {
+        needs_attention: true,
+        attention_reason: decisaoJev?.atencao ?? (conversa.attention_reason || 'atendente'),
+      })
     }
 
     // A resposta tambem no banco falso, como o webhook grava: e dali que o
@@ -436,6 +503,18 @@ export class Simulacao {
         }
       }
     }
+    // A pergunta do Jev vai depois da resposta, numa mensagem propria, como
+    // no webhook, e entra no historico do banco falso.
+    if (resultado?.resposta && decisaoJev?.botoes) {
+      respostas.push(
+        this.mensagem('robo', PERGUNTA_URGENCIA_OU_DUVIDA, agora, {
+          toques: { tipo: 'botoes', opcoes: BOTOES_URGENCIA_OU_DUVIDA.map((b) => ({ id: b.id, titulo: b.titulo })) },
+        }),
+      )
+      historico.push({
+        conversation_id: CONVERSA, direction: 'outbound', automatic: true, body: PERGUNTA_URGENCIA_OU_DUVIDA, created_at: agora.toISOString(),
+      })
+    }
 
     const registros = [
       ...eventos.flatMap((e) => {
@@ -448,6 +527,15 @@ export class Simulacao {
     if (!resultado) {
       registros.push(this.registro('evento', 'Ficou em silêncio: quem responde agora é a equipe', 'neutro', agora))
     }
+    // A nota do Jev em cada mensagem lida, e a falha quando nao deu para
+    // perguntar: quem testa precisa ver que ele esta lendo.
+    if (decisaoJev) {
+      const lida = descreverLeituraDoJev(decisaoJev.detalhe)
+      const tom: Tom = lida.tom === 'erro' ? 'alerta' : lida.tom === 'alerta' ? 'atencao' : 'neutro'
+      registros.push(this.registro('evento', `Jev: ${lida.texto}`, tom, agora))
+    } else if (falhaDoJev) {
+      registros.push(this.registro('evento', `Jev: não consegui perguntar (${falhaDoJev}). O robô seguiu como sempre.`, 'alerta', agora))
+    }
     const motivoAgora = this.motivo
     if (motivoAgora && (!atencaoAntes.ligada || atencaoAntes.motivo !== motivoAgora)) {
       const m = MOTIVOS[motivoAgora]
@@ -459,11 +547,14 @@ export class Simulacao {
     // marca os dois como urgentes (ver aviso-da-equipe.ts). A urgencia entrou
     // em 16/10/2026, com os sinais de alarme do otorrino.
     const alertas: Alerta[] = []
-    const urgente = resultado?.atencao === 'sangramento' || resultado?.atencao === 'urgencia'
+    // Robo calado (a equipe conversando) com urgencia lida pelo Jev tambem
+    // toca o celular, como no webhook (17/10/2026).
+    const motivoDoAlerta = resultado ? resultado.atencao : decisaoJev?.atencao
+    const urgente = motivoDoAlerta === 'sangramento' || motivoDoAlerta === 'urgencia'
     if (urgente && this.identidade.alertaPara.length > 0) {
       const pacientes = this.pacientes()
       const quem = pacientes.length === 1 ? String(pacientes[0].name) : this.familia.nomeDoPerfil
-      const titulo = resultado?.atencao === 'sangramento' ? `🩸 Sangramento: ${quem}` : `🚨 Urgência: ${quem}`
+      const titulo = motivoDoAlerta === 'sangramento' ? `🩸 Sangramento: ${quem}` : `🚨 Urgência: ${quem}`
       this.contador += 1
       alertas.push({ id: `a${this.contador}`, em: agora, para: this.identidade.alertaPara, titulo, texto: familia.texto })
       registros.push(
@@ -472,6 +563,15 @@ export class Simulacao {
     }
 
     return { familia, respostas, registros, alertas }
+  }
+
+  /** O historico do banco falso como o webhook le para o Jev: da mais nova para a mais antiga. */
+  private historicoParaOJev() {
+    return [...this.banco.linhas('whatsapp_messages')].reverse().map((m) => ({
+      direction: String(m.direction),
+      body: (m.body as string | null) ?? null,
+      automatic: (m.automatic as boolean | null) ?? null,
+    }))
   }
 
   /** A equipe assume a conversa: a partir daqui o robo so fala se for chamado. */

@@ -46,3 +46,8 @@ verify_jwt = true
 # Reserva sem cadastro (01/10/2026): chamada a cada 15 min pelo pg_cron, sem
 # sessao de usuario. Exige x-cron-secret, como o lembrete.
 verify_jwt = false
+
+[functions.jev-ler]
+# O Jev no simulador do sistema (17/10/2026): chamada pelo navegador com a
+# sessao do usuario logado. Mantem o JWT.
+verify_jwt = true

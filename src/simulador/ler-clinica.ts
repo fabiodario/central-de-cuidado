@@ -21,6 +21,7 @@
  * inteira por causa dela, nao.
  */
 import { supabase } from '@/lib/supabase'
+import { modoDaSegundaLeitura, type ModoDaSegundaLeitura } from '../../supabase/functions/_shared/segunda-leitura.ts'
 import type { Linha } from './banco-falso'
 import { diaDeBrasilia } from './agenda'
 import type { LinhasDaClinica } from './da-clinica'
@@ -70,6 +71,21 @@ async function clinicaDoLogin(): Promise<string> {
   const clinica = vinculos.map((v) => String(v.clinic_id)).find(Boolean)
   if (!clinica) throw new Error('a sua conta não tem acesso ativo a nenhuma clínica')
   return clinica
+}
+
+/**
+ * O modo do Jev em Preferencias (17/10/2026), para o selo do simulador. Coluna
+ * nova: consulta propria; sem conseguir ler, null (o selo diz que nao leu).
+ */
+export async function lerModoDoJev(): Promise<ModoDaSegundaLeitura | null> {
+  try {
+    const c = await clinicaDoLogin()
+    const [linha] = await linhas(tabela('clinic_settings').select('jev_segunda_leitura').eq('clinic_id', c).limit(1))
+    return modoDaSegundaLeitura((linha?.jev_segunda_leitura as string | null | undefined) ?? null)
+  } catch (erro) {
+    console.warn('[simulador] sem o modo do Jev', erro)
+    return null
+  }
 }
 
 export async function lerClinicaDoLogin(): Promise<LinhasDaClinica> {

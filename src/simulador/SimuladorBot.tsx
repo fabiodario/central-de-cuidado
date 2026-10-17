@@ -20,6 +20,7 @@ import {
   Paperclip,
   Phone,
   Play,
+  Radar,
   RefreshCw,
   Reply,
   RotateCcw,
@@ -39,7 +40,9 @@ import iconeFabio from '@/assets/fabio-icone.png'
 import { FAMILIAS, IDENTIDADES, type ChaveFamilia, type Identidade } from './dados'
 import { agendaValida, copiarAgenda, type AgendaDaClinica } from './agenda'
 import { identidadeDoSistema } from './da-clinica'
-import { lerClinicaDoLogin } from './ler-clinica'
+import { lerClinicaDoLogin, lerModoDoJev } from './ler-clinica'
+import { perguntarAoJev } from './jev'
+import type { ModoDaSegundaLeitura } from '../../supabase/functions/_shared/segunda-leitura.ts'
 import ConfiguracaoDaAgenda from './ConfiguracaoDaAgenda'
 import { ROTEIROS, type Roteiro } from './roteiros'
 import { ETAPAS, MOTIVOS, Simulacao, type Alerta, type Mensagem, type Registro, type Situacao, type Tom } from './sessao'
@@ -75,11 +78,25 @@ const IDENTIDADE = IDENTIDADES.fabio
 const NO_SISTEMA = new URLSearchParams(window.location.search).has('no-sistema')
 
 type Fonte = 'exemplo' | 'carregando' | 'clinica'
-type Carga = { identidade: Identidade; agenda: AgendaDaClinica }
+/**
+ * jev: o modo do Jev em Preferencias, so quando a clinica vem do sistema
+ * (17/10/2026). undefined = arquivo da reuniao, sem Jev; null = nao deu para
+ * ler o modo, e o simulador pergunta ao servidor mesmo assim.
+ */
+type Carga = { identidade: Identidade; agenda: AgendaDaClinica; jev?: ModoDaSegundaLeitura | null }
 
 async function carregarDaClinica(): Promise<Carga> {
-  const identidade = identidadeDoSistema(IDENTIDADE, await lerClinicaDoLogin())
-  return { identidade, agenda: copiarAgenda(identidade.agendaPadrao) }
+  const [linhas, jev] = await Promise.all([lerClinicaDoLogin(), lerModoDoJev()])
+  const identidade = identidadeDoSistema(IDENTIDADE, linhas)
+  return { identidade, agenda: copiarAgenda(identidade.agendaPadrao), jev }
+}
+
+/** O selo do Jev no topo do simulador do sistema (17/10/2026). */
+const SELO_DO_JEV: Record<ModoDaSegundaLeitura | 'sem_leitura', { texto: string; cor: string }> = {
+  ligada: { texto: 'Jev ligado', cor: 'border-[#9fb0ee]/40 bg-[#4b5a92] text-white' },
+  sombra: { texto: 'Jev só observando', cor: 'border-[#9fb0ee]/40 bg-[#4b5a92]/40 text-white' },
+  desligada: { texto: 'Jev desligado', cor: 'border-white/15 bg-white/5 text-white/55' },
+  sem_leitura: { texto: 'Jev: não li a opção', cor: 'border-amber-300/40 bg-amber-500/15 text-amber-100' },
 }
 
 function lerGuardado(chave: string): unknown {
@@ -437,6 +454,7 @@ export default function SimuladorBot() {
   const [erroDaClinica, setErroDaClinica] = useState<string | null>(null)
   const [leitura, setLeitura] = useState(0)
   const [agenda, setAgenda] = useState<AgendaDaClinica>(agendaGuardada)
+  const [modoDoJev, setModoDoJev] = useState<ModoDaSegundaLeitura | null | undefined>(undefined)
   const [aba, setAba] = useState<'respostas' | 'agenda'>('respostas')
   const [avisoDoRoteiro, setAvisoDoRoteiro] = useState<string | null>(null)
   const [sim, setSim] = useState(() => new Simulacao(IDENTIDADE, FAMILIAS.nova, { agenda }))
@@ -493,9 +511,12 @@ export default function SimuladorBot() {
     for (const a of novas) window.setTimeout(() => fecharNotificacao(a.id), NOTIFICACAO_MS)
   }
 
-  function recomecar(cf: ChaveFamilia = chaveFamilia, base: Carga = { identidade, agenda }): Simulacao {
+  function recomecar(cf: ChaveFamilia = chaveFamilia, base: Carga = { identidade, agenda, jev: modoDoJev }): Simulacao {
     geracao.current += 1
     const nova = new Simulacao(base.identidade, FAMILIAS[cf], { agenda: base.agenda })
+    // Com a clinica do sistema, o Jev pergunta pelo servidor (jev-ler); o
+    // arquivo da reuniao segue sem ele.
+    if (base.jev !== undefined) nova.leitorDoJev = perguntarAoJev
     simAtual.current = nova
     setSim(nova)
     setChaveFamilia(cf)
@@ -529,12 +550,14 @@ export default function SimuladorBot() {
   const usarClinica = useEffectEvent((carga: Carga) => {
     setIdentidade(carga.identidade)
     setAgenda(carga.agenda)
+    setModoDoJev(carga.jev ?? null)
     setErroDaClinica(null)
     setFonte('clinica')
-    recomecar(chaveFamilia, carga)
+    recomecar(chaveFamilia, { ...carga, jev: carga.jev ?? null })
   })
   const ficarNoExemplo = useEffectEvent((erro: unknown) => {
     setErroDaClinica(erro instanceof Error ? erro.message : String(erro))
+    setModoDoJev(undefined)
     setFonte('exemplo')
   })
   useEffect(() => {
@@ -571,6 +594,9 @@ export default function SimuladorBot() {
     setDestaque(null)
     const r = await simAtual.current.enviarDaFamilia(entrada)
     if (geracao.current !== minha) return null
+    // O modo que o servidor devolveu: mudou em Preferencias, o selo acompanha.
+    const modoLido = simAtual.current.ultimoModoDoJev
+    if (modoLido && simAtual.current.leitorDoJev) setModoDoJev(modoLido)
     setMensagens((m) => [...m, r.familia])
     await espera(450)
     // O alerta sai antes da resposta do robo, como em producao: o celular do
@@ -725,6 +751,15 @@ export default function SimuladorBot() {
                 : 'Robô de verdade, com dados de exemplo. Nada é enviado nem gravado.'}
           </p>
         </div>
+
+        {fonte === 'clinica' && modoDoJev !== undefined && (
+          <span
+            title="A segunda leitura pelo Jev muda em Preferências. Aqui ele lê o que você digita, pelo servidor, como faria com o WhatsApp."
+            className={`flex items-center gap-1.5 whitespace-nowrap rounded-xl border px-3 py-2 text-[13px] font-bold ${SELO_DO_JEV[modoDoJev ?? 'sem_leitura'].cor}`}
+          >
+            <Radar className="h-4 w-4" /> {SELO_DO_JEV[modoDoJev ?? 'sem_leitura'].texto}
+          </span>
+        )}
 
         {isSupabaseConfigured && usuarioId && (
           <button

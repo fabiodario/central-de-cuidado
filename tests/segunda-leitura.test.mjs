@@ -324,4 +324,119 @@ await caso('Preferencias: a secao do Jev esta na tela, so o responsavel muda, e 
   assert.match(tela, /perguntar\(/, 'sair do desligado pede confirmacao')
 })
 
+// ---------------------------------------------------------------
+// O Jev no simulador do sistema (17/10/2026): um leitor falso no lugar da
+// funcao jev-ler, e a mesma decisao do webhook.
+// ---------------------------------------------------------------
+
+function simulacao() {
+  let agora = Date.parse('2026-10-14T13:00:00Z')
+  return new Simulacao(IDENTIDADES.fabio, FAMILIAS.nova, { relogio: () => new Date((agora += 30000)) })
+}
+function leitorFalso(resposta, chamadas = []) {
+  return async (entrada) => {
+    chamadas.push(entrada)
+    if (resposta instanceof Error) throw resposta
+    return typeof resposta === 'function' ? resposta(entrada) : resposta
+  }
+}
+const textos = (r) => r.respostas.map((m) => m.texto)
+const registrosDoJev = (r) => r.registros.filter((g) => g.titulo.startsWith('Jev:')).map((g) => g.titulo)
+
+await caso('simulador com o Jev ligado: nota alta vira alerta, bandeira de urgencia e a pergunta com os botoes', async () => {
+  const chamadas = []
+  const s = simulacao()
+  s.leitorDoJev = leitorFalso({ modo: 'ligada', leitura: leu(0.86) }, chamadas)
+  const r = await s.enviarDaFamilia({ texto: 'Oi, tudo bem?' })
+  assert.equal(chamadas.length, 1)
+  assert.deepEqual(chamadas[0], { texto: 'Oi, tudo bem?', anteriores: [], ultimaDoRobo: '' })
+  assert.equal(s.motivo, 'urgencia')
+  assert.equal(r.alertas.length, 1)
+  assert.match(r.alertas[0].titulo, /Urgência/)
+  const ultima = r.respostas.at(-1)
+  assert.equal(ultima.texto, SL.PERGUNTA_URGENCIA_OU_DUVIDA)
+  assert.deepEqual(ultima.toques.opcoes.map((o) => o.id), ['URGENCIA', 'E_DUVIDA'])
+  assert.deepEqual(registrosDoJev(r), ['Jev: Urgência (nota 0,86): a equipe foi avisada.'])
+  assert.equal(s.ultimoModoDoJev, 'ligada')
+  // A resposta da regra continua a mesma de sem o Jev, so com a pergunta depois.
+  const semJev = await simulacao().enviarDaFamilia({ texto: 'Oi, tudo bem?' })
+  assert.deepEqual(textos(r).slice(0, -1), textos(semJev))
+})
+
+await caso('simulador: so observando, desligado ou com falha, nada muda para o paciente; o registro diz o que houve', async () => {
+  const semJev = await simulacao().enviarDaFamilia({ texto: 'Oi, tudo bem?' })
+  const casos = [
+    [{ modo: 'sombra', leitura: leu(0.9) }, ['Jev: Só observando: nota 0,90.']],
+    [{ modo: 'desligada', leitura: null }, []],
+    [new Error('sem rede'), ['Jev: não consegui perguntar (sem rede). O robô seguiu como sempre.']],
+    [{ modo: 'ligada', leitura: { ok: false, erro: 'sem chave' } }, ['Jev: Falhou: falta a chave da TypeSafe nos segredos do Supabase (TYPESAFE_API_KEY).']],
+  ]
+  for (const [resposta, esperado] of casos) {
+    const s = simulacao()
+    s.leitorDoJev = leitorFalso(resposta)
+    const r = await s.enviarDaFamilia({ texto: 'Oi, tudo bem?' })
+    assert.deepEqual(textos(r), textos(semJev), JSON.stringify(esperado))
+    assert.equal(r.alertas.length, 0)
+    assert.equal(s.motivo, null)
+    assert.deepEqual(registrosDoJev(r), esperado)
+  }
+})
+
+await caso('simulador: o Jev le com as mensagens de antes, sem a de agora; toque em botao e anexo nao vao para ele', async () => {
+  const chamadas = []
+  const s = simulacao()
+  s.leitorDoJev = leitorFalso({ modo: 'ligada', leitura: leu(0.05) }, chamadas)
+  const primeira = await s.enviarDaFamilia({ texto: 'Oi' })
+  await s.enviarDaFamilia({ texto: 'estou com tontura' })
+  assert.equal(chamadas.length, 2)
+  assert.deepEqual(chamadas[1].anteriores, ['Oi'])
+  assert.ok(chamadas[1].ultimaDoRobo.length > 0, 'a ultima resposta do robo vai junto')
+  assert.ok(primeira.respostas.map((m) => m.texto).join('\n').startsWith(chamadas[1].ultimaDoRobo.slice(0, 40)))
+  await s.enviarDaFamilia({ texto: 'Marcar uma consulta', idDoToque: '2' })
+  await s.enviarDaFamilia({ texto: '', anexo: true })
+  assert.equal(chamadas.length, 2, 'toque e foto nao vao para o Jev')
+})
+
+await caso('simulador: com a equipe conversando e o robo calado, a urgencia do Jev acende e toca o celular, sem mandar nada', async () => {
+  const s = simulacao()
+  s.leitorDoJev = leitorFalso({ modo: 'ligada', leitura: leu(0.86) })
+  s.responderComoEquipe('Olá, aqui é a Dayane. Em que posso ajudar?')
+  const r = await s.enviarDaFamilia({ texto: 'obrigada, era so isso mesmo' })
+  assert.deepEqual(textos(r), [], 'o robo fica calado com a equipe na conversa')
+  assert.equal(s.motivo, 'urgencia')
+  assert.equal(r.alertas.length, 1)
+})
+
+await caso('simulador sem leitor (o arquivo da reuniao): nenhum registro do Jev', async () => {
+  const r = await simulacao().enviarDaFamilia({ texto: 'Oi, tudo bem?' })
+  assert.deepEqual(registrosDoJev(r), [])
+})
+
+await caso('o que chega do navegador e conferido: vazio ou enorme nao vai; contexto cortado em 3', () => {
+  assert.equal(SL.entradaDoSimulador(null), null)
+  assert.equal(SL.entradaDoSimulador({ texto: '   ' }), null)
+  assert.equal(SL.entradaDoSimulador({ texto: 'x'.repeat(2001) }), null)
+  assert.deepEqual(SL.entradaDoSimulador({ texto: ' oi ', anteriores: ['a', 7, '', 'b', 'c', 'd'], ultimaDoRobo: 5 }), {
+    texto: 'oi',
+    anteriores: ['b', 'c', 'd'],
+    ultimaDoRobo: '',
+  })
+})
+
+await caso('a funcao jev-ler: so com sessao e acesso ativo, le o modo, e desligado nem chama a TypeSafe', () => {
+  const funcao = ler('supabase', 'functions', 'jev-ler', 'index.ts')
+  assert.match(funcao, /if \(!authorization\.startsWith\('Bearer '\)\) return json\(\{ error: 'Sessão obrigatória\.' \}, 401\)/)
+  assert.match(funcao, /\.eq\('user_id', quem\.user\.id\)\s*\.eq\('status', 'active'\)/)
+  assert.match(funcao, /\.select\('jev_segunda_leitura'\)/)
+  const desligado = funcao.indexOf("if (modo === 'desligada') return json({ modo, leitura: null })")
+  assert.ok(desligado > 0 && desligado < funcao.indexOf('lerComJev(entrada'), 'desligado volta antes de chamar a TypeSafe')
+  assert.match(funcao, /Deno\.env\.get\('TYPESAFE_API_KEY'\)/)
+  assert.doesNotMatch(funcao, /return json\([^)]*chave/, 'a chave nunca volta para o navegador')
+  assert.match(ler('supabase', 'config.toml'), /\[functions\.jev-ler\][^[]*verify_jwt = true/)
+  assert.match(ler('.github', 'workflows', 'deploy-pages.yml'), /supabase functions deploy jev-ler --project-ref/)
+  // O simulador pergunta por ela, e so com a clinica do sistema.
+  assert.match(ler('src', 'simulador', 'jev.ts'), /supabase\.functions\.invoke\('jev-ler'/)
+  assert.match(ler('src', 'simulador', 'SimuladorBot.tsx'), /if \(base\.jev !== undefined\) nova\.leitorDoJev = perguntarAoJev/)
+})
+
 console.log(`segunda-leitura: ${ok} casos ok`)

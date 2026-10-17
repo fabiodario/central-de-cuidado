@@ -145,6 +145,23 @@ export function estadosDaLeitura(texto: string, anteriores: string[], ultimaDoRo
   return { sozinha: { mensagem: texto }, comContexto }
 }
 
+/**
+ * O que o simulador do sistema manda para a funcao jev-ler (17/10/2026):
+ * conferido e cortado, porque chega do navegador. Mensagem vazia ou enorme
+ * nao vai para a TypeSafe.
+ */
+export function entradaDoSimulador(corpo: unknown): { texto: string; anteriores: string[]; ultimaDoRobo: string } | null {
+  if (!corpo || typeof corpo !== 'object') return null
+  const c = corpo as Record<string, unknown>
+  const texto = typeof c.texto === 'string' ? c.texto.trim() : ''
+  if (!texto || texto.length > 2000) return null
+  const anteriores = Array.isArray(c.anteriores)
+    ? c.anteriores.filter((a): a is string => typeof a === 'string' && a.trim() !== '').map((a) => a.slice(0, 2000)).slice(-3)
+    : []
+  const ultimaDoRobo = typeof c.ultimaDoRobo === 'string' ? c.ultimaDoRobo.slice(0, 2000) : ''
+  return { texto, anteriores, ultimaDoRobo }
+}
+
 export type Leitura =
   | { ok: true; nota: number; sozinha: number | null; comContexto: number | null; modelo: string }
   | { ok: false; erro: string }
