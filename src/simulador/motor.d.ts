@@ -57,6 +57,8 @@ export type OpcoesDaConversa = {
   textos: { saudacao: string; saudacaoConhecida: string; informacoes: string }
   agora?: Date
   consultaHoje?: boolean
+  /** Por que a conversa esta acesa para a equipe (16/10/2026): sangramento e urgencia ganham o lembrete do pronto-socorro. */
+  motivoDaAtencao?: string | null
 }
 
 export function tratarConversa(opcoes: OpcoesDaConversa): Promise<Resultado>

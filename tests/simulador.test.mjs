@@ -249,11 +249,14 @@ await caso('agenda: video ocupa o medico nas unidades fisicas, e o contrario', (
   assert.ok(!horas(horariosLivres(tabelas({ unidades, regras, consultas: as8('u1') }), 'tele', SEGUNDA_10H)).includes('13 08:00'))
 })
 
-await caso('agenda: a de exemplo do Dr. Fabio abre Santos na segunda a tarde e na quarta de manha', () => {
+// 12/10/2026 e feriado (Nossa Senhora Aparecida): desde 16/10/2026 a agenda de
+// exemplo fecha nos feriados, como a da clinica (ver FERIADOS em dados.ts).
+await caso('agenda: a de exemplo do Dr. Fabio abre Santos na segunda a tarde e na quarta de manha, menos no feriado', () => {
   const s = new Simulacao(FABIO, FAMILIAS.nova, { relogio: () => SEGUNDA_10H })
-  assert.deepEqual(horas(s.horariosLivres('unidade-santos')).slice(0, 7), [
-    '12 14:00', '12 14:40', '12 15:20', '12 16:00', '12 16:40', '12 17:20', '14 08:00',
-  ])
+  const livres = horas(s.horariosLivres('unidade-santos'))
+  assert.ok(!livres.some((h) => h.startsWith('12 ')), 'abriu horario no feriado de 12/10')
+  assert.deepEqual(livres.slice(0, 6), ['14 08:00', '14 08:40', '14 09:20', '14 10:00', '14 10:40', '14 11:20'])
+  assert.deepEqual(livres.filter((h) => h.startsWith('19 ')), ['19 14:00', '19 14:40', '19 15:20', '19 16:00', '19 16:40', '19 17:20'])
 })
 
 /** Passo de conversa por titulo da opcao, para testes que nao sabem o numero de antemao. */
@@ -445,7 +448,9 @@ await caso('painel: consulta da "Outra pessoa" vira cadastro do filho, nao do Ri
 await caso('painel: "ta bom, obrigada" depois de cancelar nao apaga o aviso para a equipe', async () => {
   let agora = Date.parse('2026-10-14T20:00:00Z')
   const s = new Simulacao(FABIO, FAMILIAS.com_consulta, { relogio: () => new Date((agora += 45000)) })
-  await conversar(s, ['boa tarde, pode cancelar minha consulta, já melhorei', '#CANCELAR', 'sim pode cancelar'])
+  // Desde 16/10/2026 o pedido escrito vai direto para a confirmacao, sem o
+  // toque em Cancelar no meio.
+  await conversar(s, ['boa tarde, pode cancelar minha consulta, já melhorei', 'sim pode cancelar'])
   assert.equal(s.motivo, 'cancelou_sozinho', 'o cancelamento devia acender a conversa')
   // Abre a agenda pelo "digite 2" e desiste com um obrigado: o robo encerra o
   // agendamento (concluida), e era isso que apagava a bandeira.

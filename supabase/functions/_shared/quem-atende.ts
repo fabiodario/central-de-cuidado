@@ -56,6 +56,25 @@ export type QuemAtende = {
    * as frases de sempre ("procure o pronto-socorro mais proximo ou ligue 192").
    */
   prontoSocorro: string | null
+  /**
+   * Os sinais de alarme do otorrino (16/10/2026, painel de pacientes
+   * simulados): corpo estranho, falta de ar, surdez subita, tontura forte com
+   * vomito, nao conseguir engolir, rosto torto. Ligado, a mensagem com um deles
+   * recebe a orientacao de pronto-socorro e acende como urgencia. Ver
+   * sinalDeAlarme em atendimento.ts.
+   */
+  sinaisDeAlarme: boolean
+  /**
+   * Quem da equipe o paciente chama pelo nome ("a Dayane esta?"). A mensagem
+   * para ela vai direto para a equipe. Ver pediuAtendente em atendimento.ts.
+   */
+  equipe: string[]
+  /**
+   * Como o medico pode ser chamado, sem acento e em minusculas. Outro nome
+   * ("e do consultorio do Dr. Marcelo?") recebe a explicacao de que este e
+   * outro consultorio. Ver outroMedico em atendimento.ts.
+   */
+  nomesDoMedico: string[]
 }
 
 /** O id da clinica do Dr. Fabio Dario no banco (e no simulador). */
@@ -74,6 +93,10 @@ const DR_FABIO: QuemAtende = {
   prontoSocorro:
     'Em caso de urgência, emergência ou sangramento intenso, dirija-se imediatamente ao Pronto-Socorro mais próximo ' +
     'que atenda ao seu plano de saúde (Porto Saúde, Unimed, Santa Saúde) ou ao atendimento particular de sua preferência.',
+  sinaisDeAlarme: true,
+  equipe: ['Dayane'],
+  // O site e o Instagram assinam "Dr. Fabio Pavani Dario".
+  nomesDoMedico: ['fabio', 'dario', 'pavani'],
 }
 
 /** O robo de origem, pediatrico. So os testes do motor ("c1") rodam nele aqui. */
@@ -84,6 +107,10 @@ const DR_MARCELLO: QuemAtende = {
   publico: 'pediatria',
   alertaDeSangramento: null,
   prontoSocorro: null,
+  // Os testes do motor de origem continuam sem os modulos do otorrino.
+  sinaisDeAlarme: false,
+  equipe: [],
+  nomesDoMedico: [],
 }
 
 const PERFIS: Record<string, QuemAtende> = {

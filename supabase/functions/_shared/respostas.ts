@@ -32,6 +32,12 @@ export type RespostaPronta = {
    * muda de unidade para unidade - o valor, principalmente.
    */
   perguntarUnidade: boolean
+  /**
+   * Ligado, o robo responde e passa a conversa para a equipe (16/10/2026):
+   * assunto que a equipe confirma, como estacionamento ou guia do convenio.
+   * Ver a migration 20261016120000_resposta_pronta_chama_a_equipe.
+   */
+  chamarEquipe?: boolean
 }
 
 /** Tira acento e caixa: "Convênio" e "convenio" viram a mesma coisa. */
@@ -64,7 +70,30 @@ const CLINICO = [
   'internado', 'internar', 'urgencia', 'emergencia', 'grave', 'piorou',
   'sintoma', 'sintomas', 'tratamento', 'exame', 'resultado', 'receita',
   'posso dar', 'pode tomar', 'e normal',
+  // Otorrino (16/10/2026, painel de pacientes simulados). "Posso tomar
+  // amoxicilina pra sinusite?", "qual anti inflamatorio eu tomo? nimesulida
+  // serve?" e "posso pingar otosporin no ouvido? ta saindo pus" passavam pela
+  // trava e recebiam a propaganda do consultorio, que casava "sinusite",
+  // "garganta" e "ouvido". O pedido de remedio e a queixa de infeccao sao
+  // consulta.
+  'tomo', 'pingar', 'pingo', 'inflamatorio', 'antiinflamatorio', 'antibioticos',
+  'nimesulida', 'amoxicilina', 'azitromicina', 'cefalexina', 'prednisona', 'prednisolona',
+  'corticoide', 'otosporin', 'descongestionante', 'antialergico', 'loratadina',
+  'capsula', 'capsulas', 'comprimido', 'comprimidos', 'pomada', 'spray',
+  'pus', 'secrecao', 'catarro', 'inflamada', 'inflamado', 'inflamacao', 'infeccao',
+  'infeccionado', 'infeccionada', 'inchado', 'inchada', 'inchaco',
+  'posso tomar', 'devo tomar', 'posso usar', 'corpo quente', 'o que eu faco', 'oq eu faco',
+  'o que faco', 'o que devo fazer', 'o que pode ser', 'e perigoso',
 ]
+
+/**
+ * O que parece assunto clinico e nao e (16/10/2026, painel de pacientes
+ * simulados). "O Dr. Fabio atende bebe? E normal levar bebe no otorrino?" caiu
+ * na recusa clinica pelo "e normal", e a mae insegura ouviu "nao posso orientar
+ * sobre sintomas" em vez de "sim, atende criancas". "O que eu faco pra marcar?"
+ * e pergunta de secretaria.
+ */
+const NAO_E_CLINICO = /\be normal (levar|trazer|ir|consultar|passar|marcar|atender)\b|\b(o que|oq) (eu )?(faco|devo fazer) (pra|para) (marcar|agendar|remarcar|desmarcar|cancelar|pagar|chegar|falar)\b/g
 
 /**
  * Exame como papel, e nao como saude (15/10/2026).
@@ -79,18 +108,27 @@ const CLINICO = [
  */
 const ADMINISTRATIVO =
   /\b(convenios?|planos?|unimed|amil|bradesco|sulamerica|hapvida|notredame|seguradora|cobre|cobertura|coberto|autoriza\w*|guias?|pedidos?|solicit\w*|pede|pedir|reembolso)\b/
+// "Voces fazem audiometria?", "mas faz o exame ai ou nao?" (16/10/2026,
+// painel): pergunta sobre o consultorio, que caia na recusa clinica. So com
+// quem faz (voces, o dr) ou onde (ai, no consultorio): "ela faz exame de
+// sangue amanha" continua sendo da saude dela.
+const EXAME_NO_CONSULTORIO =
+  /\b(voces|vcs|vc|voce|dr|doutor|ele|consultorio|clinica)\s+(faz|fazem|realiza|realizam)\b|\b(faz|fazem|realiza|realizam)\b.{0,30}\b(ai|aqui|no consultorio|na clinica)\b/
 const NOME_DE_EXAME = /\bexames? d[eo] (sangue|fezes|urina)\b/g
 
 /** A mensagem fala de sintoma, remédio ou queixa? */
 export function assuntoClinico(texto: string): boolean {
-  let limpo = normalizar(texto)
-  let palavras = new Set(palavrasDe(texto))
-  if (ADMINISTRATIVO.test(limpo)) {
+  let limpo = normalizar(texto).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').replace(NAO_E_CLINICO, ' ')
+  let palavras = new Set(palavrasDe(limpo))
+  if (ADMINISTRATIVO.test(limpo) || EXAME_NO_CONSULTORIO.test(limpo)) {
     limpo = limpo.replace(NOME_DE_EXAME, 'exames')
     palavras = new Set(palavrasDe(limpo).filter((p) => p !== 'exame'))
   }
+  // Frase pela palavra inteira (16/10/2026): pelo pedaco, "e perigoso" casava
+  // dentro de "pode perigoso" e "e normal" dentro de "se normal".
+  const frase = ` ${limpo.trim()} `
   return CLINICO.some((termo) =>
-    termo.includes(' ') ? limpo.includes(termo) : palavras.has(termo),
+    termo.includes(' ') ? frase.includes(` ${termo} `) : palavras.has(termo),
   )
 }
 
@@ -141,7 +179,8 @@ export function medicamentoControlado(texto: string): boolean {
 }
 
 /**
- * Quantas palavras DA MENSAGEM o assunto explica.
+ * As palavras DA MENSAGEM que o assunto explica. Quantas forem, sao os pontos
+ * do assunto (ver acharRespostas).
  *
  * Palavra com cinco letras ou mais também vale por começo ("convenio" acha
  * "convenios", "conveniada"). Abaixo disso a comparação é exata: "fica" não
@@ -152,8 +191,15 @@ export function medicamentoControlado(texto: string): boolean {
  * um "convenio" escrito valia quatro pontos - mais que "pedido" + "exames" +
  * "convenio" de um assunto mais certeiro. Ganhar por ter cadastrado mais
  * grafias da mesma palavra nao e entender melhor a pergunta.
+ *
+ * O contrario - a palavra da mensagem sendo o comeco da chave - so vale para
+ * diferenca de ate duas letras (16/10/2026, painel de pacientes simulados):
+ * plural e erro de digitacao, como "exame" para "exames" e "higienopoli" para
+ * "higienopolis". Sem limite, "pessoa" casava com "pessoalmente" ("QUERO FALAR
+ * COM UMA PESSOA" recebeu "Como e a consulta"), e "audio" com "audiometria"
+ * ("posso mandar audio?" recebeu "O que levar").
  */
-function pontos(palavras: string[], daMensagem: Set<string>): number {
+function explicadasPor(palavras: string[], daMensagem: Set<string>): Set<string> {
   const explicadas = new Set<string>()
   for (const bruta of palavras) {
     const chave = normalizar(bruta).trim()
@@ -164,14 +210,14 @@ function pontos(palavras: string[], daMensagem: Set<string>): number {
     }
     if (chave.length >= 5) {
       for (const palavra of daMensagem) {
-        if (palavra.startsWith(chave) || (chave.startsWith(palavra) && palavra.length >= 5)) {
+        if (palavra.startsWith(chave) || (chave.startsWith(palavra) && palavra.length >= 5 && chave.length - palavra.length <= 2)) {
           explicadas.add(palavra)
           break
         }
       }
     }
   }
-  return explicadas.size
+  return explicadas
 }
 
 /**
@@ -198,28 +244,76 @@ export function acharResposta(
   respostas: RespostaPronta[],
   minimoDePontos = 1,
 ): RespostaPronta | null {
-  if (!texto.trim() || respostas.length === 0) return null
-  if (assuntoClinico(texto)) return null
+  return acharRespostas(texto, respostas, minimoDePontos, 1)[0] ?? null
+}
 
-  const daMensagem = new Set(palavrasDe(texto))
+/**
+ * Ate duas respostas, quando a pergunta tem dois assuntos (16/10/2026, painel
+ * de pacientes simulados).
+ *
+ * "Quanto tempo dura a consulta? E o retorno e cobrado a parte?" recebia so
+ * "Como e a consulta", e a paciente teve de perguntar de novo. A segunda
+ * resposta precisa explicar uma palavra que a primeira nao explica: dois
+ * assuntos que casam com a mesma palavra ("cobre", em Cirurgia e em
+ * Convenios) sao o mesmo assunto, e a segunda so repetiria a primeira.
+ */
+export function acharRespostas(
+  texto: string,
+  respostas: RespostaPronta[],
+  minimoDePontos = 1,
+  maximo = 2,
+): RespostaPronta[] {
+  if (!texto.trim() || respostas.length === 0) return []
+  if (assuntoClinico(texto)) return []
+
+  // "O quanto antes" e pressa, e nao pergunta de valor (16/10/2026): "gostaria
+  // de ser atendida o quanto antes" recebeu a resposta de valores; "quanto
+  // tempo dura?" e duracao. E "boa noite" e cumprimento: sem tirar, casaria com
+  // "atende a noite?".
+  // "Tem alguem online ai?" e quem quer saber se ha gente do outro lado, e
+  // nao pergunta de consulta por video; "consulta por chamada no whatsapp" e
+  // (16/10/2026, rodada 2 do painel).
+  // "Qnto eh?" e "qto volta?" sao "quanto" (rodada 3 do painel): a pergunta do
+  // valor da avaliacao recebeu "Como e a consulta". "Nem pelo whats?", sozinha,
+  // e a consulta por video de novo.
+  const daMensagem = new Set(
+    palavrasDe(
+      normalizar(texto)
+        .replace(/\b(qnto|qnt|qto|qt)\b/g, 'quanto')
+        .replace(/^\s*(e |nem |so |tambem )?(pelo|por|no) (whats|whatsapp|zap)\s*\??\s*$/g, ' videochamada ')
+        .replace(/\bquanto tempo\b/g, 'tempo')
+        // "Demora qto a consulta" (rodada 3 do painel) e a duracao, e nao o valor.
+        .replace(/\b(demora|dura|leva) quanto\b|\bquanto (demora|dura|leva)\b/g, 'tempo dura')
+        .replace(/\balguem (online|on line|on)\b/g, 'alguem')
+        .replace(/\b(chamada|ligacao) (de video|no whatsapp|pelo whatsapp|por video|no zap|pelo zap)\b|\bconsulta (pelo|por|no) (whatsapp|zap|celular)\b/g, ' videochamada ')
+        .replace(/\b(o )?quanto antes\b|\b(bom dia|boa tarde|boa noite)\b/g, ' '),
+    ),
+  )
   // Valor escrito em numero conta como pergunta de valor (09/10/2026): "400,00
   // a consulta, certo?" nao tem palavra-chave nenhuma, e a mae recebeu o menu
-  // inteiro em vez dos valores - que diriam a ela que o certo era outro.
-  if (/r\$\s*\d|\b\d{3}(?:[.,]00)?\s*(?:reais|a consulta|pela consulta)|\b\d{3},00\b/i.test(texto)) {
+  // inteiro em vez dos valores - que diriam a ela que o certo era outro. "Uns
+  // 300, 400?" e "uns 15 mil?" tambem (16/10/2026, rodada 2 do painel).
+  if (
+    /r\$\s*\d|\b\d{3}(?:[.,]00)?\s*(?:reais|a consulta|pela consulta)|\b\d{3},00\b/i.test(texto) ||
+    /\b(uns|umas|tipo|mais ou menos|em torno de|cerca de|uns r\$)\s*\d{2,6}\b|\b\d{1,3}\s*mil\b/i.test(normalizar(texto))
+  ) {
     daMensagem.add('valor')
   }
-  if (daMensagem.size === 0) return null
+  if (daMensagem.size === 0) return []
 
-  let melhor: RespostaPronta | null = null
-  let melhorPonto = 0
-  for (const resposta of respostas) {
-    const ponto = pontos(resposta.palavras, daMensagem)
-    if (ponto > melhorPonto) {
-      melhor = resposta
-      melhorPonto = ponto
-    }
+  // Ordem de pontos; empate fica com a que a clinica pos primeiro.
+  const pontuadas = respostas
+    .map((resposta, posicao) => ({ resposta, posicao, explica: explicadasPor(resposta.palavras, daMensagem) }))
+    .filter((p) => p.explica.size >= minimoDePontos)
+    .sort((a, b) => b.explica.size - a.explica.size || a.posicao - b.posicao)
+  const escolhidas: typeof pontuadas = []
+  for (const p of pontuadas) {
+    if (escolhidas.length >= maximo) break
+    const jaExplicadas = new Set(escolhidas.flatMap((e) => [...e.explica]))
+    if (escolhidas.length > 0 && [...p.explica].every((palavra) => jaExplicadas.has(palavra))) continue
+    escolhidas.push(p)
   }
-  return melhorPonto >= minimoDePontos ? melhor : null
+  return escolhidas.map((e) => e.resposta)
 }
 
 type Admin = {
@@ -239,6 +333,21 @@ export async function carregarRespostas(
     .order('position', { ascending: true })
 
   if (error || !data) return []
+
+  // hand_off nasceu em 16/10/2026 e vem num pedido proprio: se o banco ainda nao
+  // tem a coluna, o Postgres recusaria a consulta inteira, e o robo perderia
+  // todas as respostas prontas em vez de so o "chamar a equipe".
+  const chamaAEquipe = new Set<string>()
+  try {
+    const extra = await admin.from('bot_answers').select('id, hand_off').eq('clinic_id', clinicId).eq('is_active', true)
+    if (extra.error) throw extra.error
+    for (const linha of (extra.data ?? []) as { id: string; hand_off?: boolean | null }[]) {
+      if (linha.hand_off) chamaAEquipe.add(linha.id)
+    }
+  } catch (erro) {
+    console.warn('bot_answers sem hand_off; as respostas seguem sem chamar a equipe', erro)
+  }
+
   return (data as {
     id: string
     subject: string
@@ -252,6 +361,7 @@ export async function carregarRespostas(
       palavras: linha.keywords ?? [],
       resposta: linha.answer,
       perguntarUnidade: Boolean(linha.ask_unit),
+      chamarEquipe: chamaAEquipe.has(linha.id),
     }))
     .filter((r) => r.palavras.length > 0 && r.resposta.trim().length > 0)
 }

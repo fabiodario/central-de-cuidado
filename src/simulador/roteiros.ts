@@ -92,10 +92,13 @@ export const ROTEIROS: Roteiro[] = [
   {
     chave: 'valor',
     titulo: 'Pergunta o valor',
-    resumo: 'Pergunta escrita do jeito dela: o robô responde direto e oferece o endereço da unidade.',
+    // 16/10/2026: o valor ainda nao esta configurado, e a resposta pronta diz
+    // que a equipe passa. Agora ela tambem chama a equipe, para a promessa
+    // valer (ver hand_off em bot_answers).
+    resumo: 'O valor ainda não está no sistema: o robô explica a consulta, diz que a equipe passa o valor e já chama a Dayane.',
     familia: 'nova',
-    passos: [t('Olá! Vi o site e queria saber o valor da consulta particular.'), toque('2')],
-    espera: { marcadas: 0, motivo: null },
+    passos: [t('Olá! Vi o site e queria saber o valor da consulta particular.')],
+    espera: { marcadas: 0, motivo: 'atendente' },
   },
   {
     chave: 'convenio',
@@ -140,9 +143,11 @@ export const ROTEIROS: Roteiro[] = [
   {
     chave: 'remarcar',
     titulo: 'Paciente remarca a consulta',
-    resumo: 'Escolhe a data nova; a antiga só é cancelada depois que a nova está garantida.',
+    // 16/10/2026: o pedido escrito vai direto para a confirmacao, e a data nova
+    // sai na mesma unidade, com o mesmo convenio (ver remarcarNaMesmaUnidade).
+    resumo: 'Escolhe a data nova na mesma unidade; a antiga só é cancelada depois que a nova está garantida.',
     familia: 'com_consulta',
-    passos: [t('Oi! Preciso remarcar minha consulta.'), toque('REMARCAR'), toque('SIM'), toque('2'), toque('4'), toque('2'), toque('1')],
+    passos: [t('Oi! Preciso remarcar minha consulta.'), toque('SIM'), toque('2'), toque('1')],
     espera: { marcadas: 1, canceladas: 1, pacientes: 1, motivo: null },
   },
   {

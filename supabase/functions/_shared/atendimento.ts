@@ -18,7 +18,7 @@
  * meta-webhook, que ja tem o token e o numero em maos.
  */
 
-import { avisoDeHorario, dentroDoExpediente } from './expediente.ts'
+import { avisoDeHorario, dentroDoExpediente, EXPEDIENTE } from './expediente.ts'
 import { dataDeNascimentoIso } from './datas.ts'
 import type { adminClient } from './whatsapp.ts'
 import { cadastrarDaFicha, type ConsultaParaCadastro } from './cadastro.ts'
@@ -26,9 +26,11 @@ import { quemAtende, type QuemAtende } from './quem-atende.ts'
 import { preencherCampos, temCampo, type Lugar } from './campos-do-texto.ts'
 import {
   acharResposta,
+  acharRespostas,
   assuntoClinico,
   carregarRespostas,
   medicamentoControlado,
+  type RespostaPronta,
 } from './respostas.ts'
 
 /** Dias oferecidos de uma vez. Cabe a quinzena inteira numa mensagem so. */
@@ -218,6 +220,14 @@ function prontoSocorro(): string {
   return perfil().prontoSocorro ?? 'Se for uma emergência com risco de vida, procure o pronto-socorro mais próximo ou ligue 192.'
 }
 
+/*
+ * O 192 nao vai na mensagem padrao da urgencia do perfil 'geral' (16/10/2026,
+ * decisao do Edu depois da rodada 3 do painel): ali ele soava como se o
+ * medico nao quisesse resolver o problema. Fica so para quem diz que nao tem
+ * como ir, ou pede ambulancia: ai e a resposta ao que a pessoa perguntou (ver
+ * complementoDaUrgencia).
+ */
+
 /**
  * A saudacao para quem ja e paciente, dita a quem escreve (15/10/2026).
  *
@@ -299,9 +309,98 @@ function normalizar(texto: string) {
 export function pediuMudarConsulta(texto: string) {
   const t = normalizar(texto)
   if (t === 'cancelar') return false
+  // "Nao vou precisar mais ir na consulta", "nao vou poder ir" (16/10/2026,
+  // painel): quem nao vai e quem precisa desmarcar, e recebia o menu geral.
+  if (naoVaiPoderIr(texto)) return true
   const pedido = /\b(remarc|desmarc|cancel)\w*/.test(t) || /\b(mudar|trocar|alterar)\s+(a\s+|o\s+|de\s+)?(data|dia|horario)\b/.test(t)
   if (!pedido) return false
   return !/\bnao\b(\s+\w+){0,2}\s+(remarc|desmarc|cancel|mudar|trocar|alterar)/.test(t)
+}
+
+/**
+ * "Nao!! eu queria 16h nao 14h", "o horario ta errado" (16/10/2026, painel):
+ * no meio da ficha, e pedido de outro horario, e nao resposta da pergunta.
+ */
+function pediuOutroHorario(texto: string): boolean {
+  const t = normalizar(texto)
+  if (intencaoDaConsulta(texto) === 'remarcar') return true
+  if (/\b(horario|dia|data)\s+(esta\s+|ta\s+)?errad[oa]\b/.test(t)) return true
+  // So a hora, na pergunta do motivo (rodada 2 do painel): "16:40", logo
+  // depois de o robo marcar 16:00 para quem pediu "depois das 16h", foi gravado
+  // como a queixa da consulta.
+  if (/^(as\s+)?\d{1,2}\s*(:\s*\d{2}|h\s*\d{0,2})(\s+(entao|mesmo|ok|pode ser|por favor|pfv|blz|beleza|isso|da manha|da tarde))*\s*[.!]*$/.test(t.trim())) return true
+  const corrige = /\b(queria|quero|era|prefiro|pedi|falei|nao)\b/.test(t)
+  // "Nao, sexta da semana q vem, dia 23" (rodada 3 do painel): a data tambem,
+  // e nao so a hora. Foi lida como nome: "Nao consegui ler o nome".
+  if (corrige && (dataEscrita(texto) !== null || /\bdia\s+\d{1,2}\b|\b(semana (que|q) vem|proxima semana)\b/.test(t))) return true
+  return horaEscrita(texto) !== null && corrige
+}
+
+/**
+ * "Depois das 16h", "antes das 10", "a partir das 14h", "ate as 9h"
+ * (16/10/2026, rodada 2 do painel): limite, e nao a hora. "Seg dia 26 depois
+ * das 16h" foi marcado as 16:00 - antes do que a mae pediu.
+ */
+function limiteDaHora(texto: string): 'depois' | 'a_partir' | 'antes' | 'ate' | null {
+  const t = normalizar(texto)
+  const hora = String.raw`(\d{1,2}|uma|duas|tres|quatro|cinco|seis|sete|oito|nove|dez|onze|doze|meio)`
+  if (new RegExp(String.raw`\b(depois|apos|passado)\s+(d[aeo]s?\s+|as\s+)?${hora}`).test(t)) return 'depois'
+  if (new RegExp(String.raw`\ba partir\s+(d[aeo]s?\s+)?${hora}`).test(t)) return 'a_partir'
+  if (new RegExp(String.raw`\bantes\s+(d[aeo]s?\s+|as\s+)?${hora}`).test(t)) return 'antes'
+  if (new RegExp(String.raw`\bate\s+(as\s+|a\s+)?${hora}`).test(t)) return 'ate'
+  return null
+}
+
+/** Os horarios dentro do limite pedido (ver limiteDaHora). */
+function dentroDoLimite(
+  horarios: Horario[],
+  pedida: { hora: number; minuto: number | null },
+  limite: 'depois' | 'a_partir' | 'antes' | 'ate',
+  timezone: string,
+): Horario[] {
+  const marco = pedida.hora * 60 + (pedida.minuto ?? 0)
+  return horarios.filter((h) => {
+    const [hh, mm] = formatarHora(h.inicio, timezone).split(':').map(Number)
+    const m = hh * 60 + mm
+    return limite === 'depois' ? m > marco : limite === 'a_partir' ? m >= marco : limite === 'antes' ? m < marco : m <= marco
+  })
+}
+
+/** "Depois das 16h, neste dia, ha: 16:40 e 17:20." */
+function textoDoLimite(
+  horarios: Horario[],
+  pedida: { hora: number; minuto: number | null },
+  limite: 'depois' | 'a_partir' | 'antes' | 'ate',
+  timezone: string,
+): string {
+  const nome = { depois: 'Depois das', a_partir: 'A partir das', antes: 'Antes das', ate: 'Até as' }[limite]
+  const servem = dentroDoLimite(horarios, pedida, limite, timezone).map((h) => formatarHora(h.inicio, timezone))
+  return servem.length
+    ? `${nome} ${horaFalada(pedida)}, neste dia, há: ${emLista(servem)}. Responda com o horário ou com o número da lista.`
+    : `${nome} ${horaFalada(pedida)} não há horário livre neste dia. Escolha outro da lista, ou digite VOLTAR para ver outros dias.`
+}
+
+/** "Nao vou poder ir", "nao vou precisar mais ir na consulta" (16/10/2026). */
+function naoVaiPoderIr(texto: string): boolean {
+  const t = normalizar(texto).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ')
+  return (
+    /\bnao (vou|vai|vamos|irei|iremos) (mais )?(poder|conseguir|precisar)( mais)? (ir|comparecer|levar)\b/.test(t) ||
+    /\bnao (vou|vai|vamos) (mais )?(na|a|para a|pra) consulta\b/.test(t) ||
+    /\bnao (preciso|precisa|precisamos) mais (da|de|ir na) consulta\b/.test(t)
+  )
+}
+
+/**
+ * O que a pessoa quer da consulta marcada, quando a frase diz (16/10/2026,
+ * painel): "preciso remarcar minha consulta" recebia a consulta com os botoes
+ * Remarcar e Cancelar, como se o robo nao tivesse lido. Null quando nao da
+ * para saber: ai a consulta aparece com os botoes.
+ */
+function intencaoDaConsulta(texto: string): 'remarcar' | 'cancelar' | null {
+  const t = normalizar(texto).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ')
+  if (/\b(remarc\w*|trocar|troca|mudar|muda|alterar|outra data|outro dia|outro horario)\b/.test(t) && !/\bnao (quero |precisa )?(remarc|trocar|mudar)/.test(t)) return 'remarcar'
+  if ((/\b(cancel\w*|desmarc\w*)\b/.test(t) && !/\bnao (quero |precisa |vou )?(cancel|desmarc)/.test(t)) || naoVaiPoderIr(texto)) return 'cancelar'
+  return null
 }
 
 /**
@@ -365,6 +464,9 @@ export function pediuAgendamento(texto: string) {
   // Remarcar e desmarcar contem "marcar" e sao o oposto: quem pede isso ja tem
   // consulta, e precisa do caminho de remarcacao, nao de uma consulta nova.
   if (/\b(remarc|desmarc|cancel)/.test(t)) return false
+  // "Consulta", sozinha (rodada 3 do painel), recebeu duas vezes o mesmo
+  // "Nao entendi" com o menu inteiro.
+  if (/^(uma |a )?(consulta|consultas)( por favor| pfv| pf)?[.!?\s]*$/.test(t.trim())) return true
 
   // Palavra solta e nao frase inteira.
   //
@@ -376,9 +478,32 @@ export function pediuAgendamento(texto: string) {
   // aconteceu com a Regina, que pediu para marcar retorno e recebeu a lista de
   // documentos para levar.
   //
+  // "Qual o horario de atendimento? Atende a noite?" (16/10/2026, painel) e
+  // pergunta sobre o consultorio: abria a escolha de unidade, sem resposta. A
+  // resposta pronta de dias e horarios responde, e oferece o 2.
+  const horarioDoConsultorio =
+    /\bhorarios? de (atendimento|funcionamento)\b|\b(que horas|ate que horas|quando) (abre|fecha|funciona|atende)\b|\b(abre|fecha) (que|as)\b|\batende(m)? (a|de) noite\b|\batende(m)? (aos |no |nos )?(sabados?|domingos?|feriados?)\b/.test(t)
+  if (horarioDoConsultorio && !/\b(marcar|marcacao|agendar|agendamento)\b/.test(t)) return false
+
+  // "Preciso dessa garantia antes de marcar qualquer coisa", "nao quero marcar
+  // agora, so queria saber ate que horas o doutor atende" e "qual o ultimo
+  // horario do dia?" (16/10/2026, rodada 2 do painel): pergunta, e nao pedido.
+  // Abriam a agenda, e a pergunta ficava sem resposta. "Nao da pra marcar pra
+  // amanha?" continua sendo pedido.
+  if (/\b(antes de|sem|nao (quero|vou|preciso|precisa)( mais)?( agora)?)\s+(marcar|agendar)\b/.test(t)) return false
+  if (/\b(ultimo|ultima) (horario|consulta|vaga)\b|\bultimo da (tarde|manha)\b|\bate que horas?\b/.test(t) && !/\b(quero|gostaria|preciso|marcar|agendar|marca|marque|agende|agenda)\b/.test(t)) {
+    return false
+  }
+
   // "consulta" sozinha fica de fora de proposito: "quanto custa a consulta?" e
   // pergunta de preco, e abriria a escolha de unidade sem ninguem pedir.
   if (/\b(marcar|marcacao|agendar|agendamento|horarios?)\b/.test(t)) return true
+
+  // "Queria consulta semana q vem pela unimed santos" (16/10/2026, painel): o
+  // pedido sem o verbo marcar recebia so a resposta de convenios. Querer, precisar
+  // ou gostaria de uma consulta e pedido; "quanto custa a consulta" continua
+  // sendo pergunta de preco, porque nao tem nenhum desses.
+  if (/\b(quero|queria|qria|qro|gostaria( de)?|preciso( de)?|precisava( de)?|procuro|quer)\s+(uma\s+|de\s+uma\s+|um\s+)?(consulta|horario|atendimento|encaixe)\b/.test(t)) return true
 
   // Verbo conjugado (25/09/2026): "Marca consulta pra minha filha de dois
   // anos" nao tinha "marcar" e ficou so com a resposta de valores. Remarcar e
@@ -390,10 +515,23 @@ export function pediuAgendamento(texto: string) {
 
   // Pedido de vaga sem o verbo (24/09/2026): "Consigo para amanha com o dr
   // Marcelo" recebeu "Nao entendi". Vaga e dia pedidos juntos sao agendamento.
+  // "Consigo pedir reembolso da consulta?" (16/10/2026, painel) e pergunta de
+  // pagamento, e abria a agenda.
   return (
     /\b(tem|teria|ha|existe)\s+(uma\s+)?vagas?\b/.test(t) ||
-    /\bconsigo\b.*\b(amanha|hoje|semana|segunda|terca|quarta|quinta|sexta|sabado|dia|consulta)\b/.test(t)
+    (/\bconsigo\b.*\b(amanha|hoje|semana|segunda|terca|quarta|quinta|sexta|sabado|dia|consulta)\b/.test(t) &&
+      !/\b(reembolso|recibo|nota|pagar|pagamento|parcelar|desconto|valor|carteirinha|guia)\b/.test(t))
   )
+}
+
+/**
+ * Pedido de marcar com o verbo: "quero marcar", "pode agendar", "queria uma
+ * consulta". Mais estreito que pediuAgendamento (16/10/2026, rodada 2 do
+ * painel): "tem horario dps das 19h? so posso a noite" e pergunta da agenda, e
+ * a resposta e que nao ha horario a noite, e nao so a lista de unidades.
+ */
+function pediuParaMarcar(texto: string): boolean {
+  return pediuAgendamento(texto) && /\b(marcar|marca|marque|agendar|agenda|agende|quero|queria|gostaria|preciso|precisava)\b/.test(normalizar(texto))
 }
 
 /**
@@ -404,7 +542,8 @@ export function pediuAgendamento(texto: string) {
 export function parecePergunta(texto: string): boolean {
   if (texto.includes('?')) return true
   const t = normalizar(texto)
-  return /\b(qual|quais|quanto|quanta|quantos|como|onde|quando|aceita|aceitam|atende|atendem|tem|teria|pode|posso|faz|fazem|precisa|preciso de|e particular)\b/.test(t)
+  // "Qto", "qnto", "qdo" (rodada 3 do painel) tambem.
+  return /\b(qual|quais|quanto|quanta|quantos|qto|qnto|qnt|como|onde|quando|qdo|qnd|aceita|aceitam|atende|atendem|tem|teria|pode|posso|faz|fazem|precisa|preciso de|e particular)\b/.test(t)
 }
 
 /**
@@ -412,6 +551,9 @@ export function parecePergunta(texto: string): boolean {
  * fila da equipe. Toda palavra da frase precisa ser de cortesia.
  */
 export function soAgradecimento(texto: string): boolean {
+  // "Obrigada, e o retorno?" e pergunta (rodada 3): com "retorno" e "o" na
+  // lista da cortesia, a pergunta passaria por agradecimento.
+  if (texto.includes('?')) return false
   const t = normalizar(texto).replace(/[^a-z\s]/g, ' ').trim()
   if (!t) return /^(?:\s|👍|🙏|😊|🙂|❤️|💙|👏|✅|!|\.)+$/u.test(texto.trim())
   const cortesia = new Set([
@@ -419,6 +561,14 @@ export function soAgradecimento(texto: string): boolean {
     'grato', 'grata', 'certo', 'combinado', 'perfeito', 'entendi', 'ta', 'bom', 'otimo', 'muito',
     'pela', 'atencao', 'sim', 'tudo', 'bem', 'ate', 'mais', 'amanha', 'boa', 'noite', 'tarde', 'dia',
     'deus', 'abencoe', 'e', 'o', 'a', 'de', 'nada', 'show', 'maravilha', 'agradeco', 'mt', 'mto', 'td',
+    // A despedida inteira (16/10/2026, rodada 2 do painel): "Muito obrigado,
+    // tenham um otimo dia!" recebeu "Nao consegui entender" e foi para a fila.
+    'tenha', 'tenham', 'um', 'uma', 'otima', 'excelente', 'semana', 'fim', 'final', 'abraco', 'abracos',
+    'beijo', 'beijos', 'gentileza', 'ajuda', 'paciencia', 'voces', 'vcs', 'vc', 'voce', 'equipe', 'pelo',
+    'feliz', 'fiquem', 'fique', 'com', 'saude', 'certinho', 'resolvido', 'ajudou', 'demais', 'pra', 'para',
+    // "Ok, obrigada, fico no aguardo do contato" (rodada 2): recado de espera.
+    'fico', 'no', 'aguardo', 'aguardando', 'entao', 'esperando', 'espero', 'contato', 'retorno', 'resposta',
+    'noticias', 'seu', 'sua', 'vosso', 'vossa', 'do', 'da',
   ])
   const palavras = t.split(/\s+/)
   // Precisa de UM agradecimento ou "ok" de verdade (25/09/2026): so com a
@@ -445,6 +595,133 @@ export function soCumprimento(texto: string): boolean {
     'e', 'ai', 'vc', 'voce', 'voces', 'td', 'pessoal', 'doutor', 'dr', 'ate', 'amanha', 'mais', 'logo',
   ])
   return t.split(/\s+/).every((palavra) => cumprimento.has(palavra))
+}
+
+/**
+ * "Alo", "alguem ai?", "??" (16/10/2026, painel de pacientes simulados): quem
+ * quer saber se tem alguem do outro lado. Recebia "Nao entendi. Responda com o
+ * numero da opcao" e o menu inteiro, duas vezes seguidas. "Oi?" sozinho
+ * continua sendo cumprimento (ver soCumprimento).
+ */
+export function chamandoAlguem(texto: string): boolean {
+  if (/^\s*\?+\s*$/.test(texto)) return true
+  const f = normalizar(texto).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim()
+  // "Ei", "opa", "psiu" (rodada 3 do painel) tambem chamam alguem.
+  return /^((oi|ola|bom dia|boa tarde|boa noite) )?(e+i+|opa|psiu|alo( alo)*|alguem( ai)?( online)?|tem alguem( ai)?( online)?( ai)?( ainda)?|alguem (pode )?me (ajuda|ajudar|responde|atende)|tem alguem pra (me )?(ajudar|atender|responder))$/.test(f)
+}
+
+/**
+ * Outro medico citado pelo nome (16/10/2026, painel de pacientes simulados).
+ *
+ * "E do consultorio do Dr. Marcelo? Quero remarcar com ele." recebeu a
+ * saudacao do Dr. Fabio e o menu, sem ninguem dizer que ali e outro
+ * consultorio; "preciso remarca minha consulta c dr marcelo", o mesmo. Devolve
+ * o nome como titulo ("Dr. Marcelo", "Dra. Ana"), ou null. So com quem atende
+ * ou com quem e a consulta ("consultorio do", "com o", "e o"): "o dr Joao me
+ * encaminhou para o Dr. Fabio" nao conta.
+ */
+const NAO_E_NOME = new Set([
+  'ele', 'ela', 'pode', 'que', 'me', 'ja', 'esta', 'ta', 'vai', 'atende', 'pediu', 'falou', 'disse', 'mandou',
+  'consegue', 'tem', 'faz', 'responde', 'nao', 'sim', 'aqui', 'ai', 'hoje', 'amanha', 'otorrino', 'medico',
+  'medica', 'queria', 'quero', 'gostaria', 'preciso', 'precisava', 'mas', 'porque', 'pois', 'para', 'pra',
+  'por', 'sobre', 'agora', 'ainda', 'tambem', 'entao', 'mesmo', 'consulta', 'marcar', 'saber', 'falar',
+  'passar', 'ver', 'tudo', 'bem', 'boa', 'bom', 'obrigada', 'obrigado', 'sera', 'seria', 'poderia', 'teria',
+  'ou', 'e', 'de', 'do', 'da', 'em', 'no', 'na', 'se', 'so', 'meu', 'minha', 'dele', 'dela', 'mais', 'menos',
+  'tenho', 'estou', 'to', 'sou', 'fiz', 'ja', 'acho', 'sei', 'quer', 'queremos', 'consigo', 'gosto', 'precisa',
+  // "queria passar com o dr pela unimed santos" virou "O Dr. Pela nao atende
+  // aqui" (rodada 2 do painel): preposicao, artigo, plano e cidade nao sao nome.
+  'pela', 'pelo', 'pelas', 'pelos', 'num', 'numa', 'nesse', 'nessa', 'neste', 'nesta', 'esse', 'essa', 'este',
+  'isso', 'aquele', 'aquela', 'ate', 'apos', 'depois', 'antes', 'logo', 'semana', 'mes', 'ano', 'dia', 'unimed',
+  'porto', 'santa', 'santos', 'sao', 'paulo', 'convenio', 'plano', 'particular', 'especialista', 'otorrinolaringologista',
+  'sobre', 'tambem', 'tbm', 'tb', 'ainda', 'sempre', 'nunca', 'quando', 'onde', 'como', 'qual', 'quem', 'porque',
+  'pois', 'entao', 'tipo', 'novo', 'nova', 'mesmo', 'mesma', 'aqui', 'la', 'ali', 'atendeu', 'atendia', 'marcou',
+])
+
+export function outroMedico(texto: string): string | null {
+  const nomesDoMedico = perfil().nomesDoMedico
+  if (nomesDoMedico.length === 0) return null
+  // Frase por frase: "queria marcar com o doutor. tenho zumbido" nao tem medico
+  // chamado Tenho. O ponto do "Dr." nao separa frase.
+  const frases = normalizar(texto)
+    .replace(/\b(dr|dra|drs)\.\s*/g, '$1 ')
+    .split(/[.!?;,\n]+/)
+    .map((f) => f.replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+  const padroes = [
+    /\b(consultorio|clinica) d[oa] (dr|dra|doutor|doutora) ([a-z]+)\b/,
+    /\b(com|c|pro|pra|para o|para a) (o |a )?(dr|dra|doutor|doutora) ([a-z]+)\b/,
+    /^(e|eh|aqui e|ai e) (o |a )?(dr|dra|doutor|doutora) ([a-z]+)\b/,
+  ]
+  for (const padrao of padroes) {
+    const m = frases.map((f) => f.match(padrao)).find(Boolean)
+    if (!m) continue
+    const nome = m[m.length - 1]
+    const titulo = m[m.length - 2]
+    if (nome.length < 3 || nomesDoMedico.includes(nome) || NAO_E_NOME.has(nome)) continue
+    // Verbo logo depois do "dr" ("pode passar com o dr? queria marcar",
+    // "o dr falou", "com o dr marcar"): nao e nome.
+    if (/(ou|eu|iu|ndo|ram|rem|riam|ar|er|ir)$/.test(nome) && nome !== 'cesar') continue
+    return `${/^d(ra|outora)$/.test(titulo) ? 'Dra.' : 'Dr.'} ${nome.charAt(0).toUpperCase()}${nome.slice(1)}`
+  }
+  return null
+}
+
+/**
+ * Mensagem em ingles (16/10/2026, rodada 2 do painel). Uma palavra forte basta
+ * em mensagem curta ("appointment", "English?"); em frase, as palavras de
+ * ingles precisam ser maioria clara sobre as de portugues: "consulta do dr"
+ * nao vira ingles pelo "do".
+ */
+const INGLES = new Set([
+  'hello', 'hi', 'hey', 'please', 'appointment', 'appointments', 'schedule', 'booking', 'book', 'doctor', 'english',
+  'speak', 'available', 'insurance', 'price', 'cost', 'how', 'much', 'can', 'could', 'would', 'like', 'need', 'want',
+  'the', 'is', 'are', 'you', 'your', 'i', 'my', 'an', 'for', 'with', 'there', 'anyone', 'someone', 'office', 'thanks',
+  'thank', 'sorry', 'help', 'when', 'where', 'what', 'ear', 'throat', 'nose', 'morning', 'afternoon', 'tomorrow', 'today',
+])
+const PORTUGUES = new Set([
+  'o', 'a', 'os', 'as', 'de', 'do', 'da', 'que', 'e', 'eu', 'voce', 'vc', 'para', 'pra', 'com', 'uma', 'um', 'nao', 'sim',
+  'quero', 'queria', 'tem', 'bom', 'boa', 'dia', 'tarde', 'noite', 'oi', 'ola', 'obrigado', 'obrigada', 'consulta',
+  'marcar', 'por', 'favor', 'mais', 'como', 'qual', 'quanto', 'onde', 'quando', 'meu', 'minha', 'ele', 'ela', 'esta', 'ta',
+])
+const INGLES_FORTE = ['appointment', 'english', 'hello', 'doctor', 'please', 'schedule', 'booking', 'speak']
+
+export function escreveuEmIngles(texto: string): boolean {
+  const palavras = normalizar(texto).replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean)
+  if (palavras.length === 0) return false
+  if (palavras.length <= 3 && palavras.some((p) => INGLES_FORTE.includes(p))) return true
+  const ingles = palavras.filter((p) => INGLES.has(p)).length
+  const portugues = palavras.filter((p) => PORTUGUES.has(p)).length
+  return ingles >= 3 && ingles > portugues * 2
+}
+
+/** O que o robo mandou nesta conversa na ultima meia hora, do mais novo ao mais velho. */
+async function mensagensRecentesDoRobo(admin: Admin, conversationId: string): Promise<string[]> {
+  try {
+    const { data, error } = await admin
+      .from('whatsapp_messages')
+      .select('body')
+      .eq('conversation_id', conversationId)
+      .eq('direction', 'outbound')
+      .eq('automatic', true)
+      .gte('created_at', new Date((relogioEmFoco ?? new Date()).getTime() - JANELA_SEM_REPETIR_MS).toISOString())
+      .order('created_at', { ascending: false })
+      .limit(5)
+    if (error) throw error
+    return ((data ?? []) as { body?: string | null }[]).map((m) => String(m.body ?? ''))
+  } catch (erro) {
+    console.warn('Nao consegui ler as mensagens recentes do robo', erro)
+    return []
+  }
+}
+
+/**
+ * "Obrigada, mas nao respondeu", "nao tem nada sobre estacionamento ai em
+ * cima" (16/10/2026, painel de pacientes simulados): a resposta pronta nao
+ * serviu, e mais uma resposta pronta seria pior. Vai para a equipe.
+ */
+export function naoFoiRespondida(texto: string): boolean {
+  const f = normalizar(texto).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim()
+  return /\b(nao (me )?(respondeu|responderam)|nao era isso|nao e isso que|nao foi isso|nao (foi|e) o que (eu )?perguntei|nao perguntei isso|nao perguntei (de|do|da|sobre)|nao tem nada (sobre|de|disso)|nao (fala|falou|diz|disse) (nada )?(sobre|de)|(voce|vc) nao entendeu|nao entendeu (a |minha )?pergunta|nao ajudou|nao resolveu|nao serviu)\b/.test(f)
 }
 
 /**
@@ -492,26 +769,92 @@ function pediuVoltar(texto: string) {
 }
 
 /**
+ * "Quero ver outra unidade" no meio dos dias ou dos horarios (16/10/2026,
+ * painel): recebia os enderecos ("unidade"), com "responda com o numero do
+ * horario" embaixo. E a lista de unidades de novo.
+ */
+function pediuOutraUnidade(texto: string): boolean {
+  const t = normalizar(texto).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ')
+  return /\b(outra|outras) (unidade|unidades|clinica|clinicas|local|lugar|endereco)\b|\b(trocar|mudar) (de |a )?(unidade|local|lugar)\b|\bver as unidades\b/.test(t)
+}
+
+/**
+ * O dia da semana citado que nenhuma unidade tem livre (16/10/2026, painel):
+ * "queria marcar sabado de manha" recebia a lista de unidades, e a paciente
+ * foi procurar o sabado em cada uma. Vazio quando nao ha dia citado, ou quando
+ * alguma unidade tem.
+ */
+async function semDiaDaSemana(admin: Admin, clinicId: string, texto: string): Promise<string> {
+  const t = normalizar(texto)
+  const citado = DIAS_DA_SEMANA.find((d) => new RegExp(`\\b${d}s?\\b`).test(t))
+  if (!citado) return ''
+  const fuso = await fusoDaClinica(admin, clinicId)
+  const semana = DIAS_DA_SEMANA.indexOf(citado)
+  const todas = await primeirosHorarios(admin, clinicId)
+  const tem = todas.some((c) => c.horarios.some((h) => new Date(`${chaveDoDia(h.inicio, fuso)}T12:00:00Z`).getUTCDay() === semana))
+  if (tem) return ''
+  const nome = { domingo: 'no domingo', segunda: 'na segunda', terca: 'na terça', quarta: 'na quarta', quinta: 'na quinta', sexta: 'na sexta', sabado: 'no sábado' }[citado]
+  return `Não temos horário livre ${nome} em nenhuma unidade.`
+}
+
+/**
  * Chamar a equipe por palavra, e nao por numero.
  *
  * A palavra continua valendo para quem digita, mas deixou de ser o caminho
  * anunciado: hoje o *9* faz o mesmo em qualquer etapa, e pedir uma palavra a
  * quem esta respondendo numeros era trocar de idioma no meio da conversa.
  */
-function pediuAtendente(texto: string) {
+export function pediuAtendente(
+  texto: string,
+  /** Falso nas perguntas de nome da ficha: "Dayane Souza" ali e o nome do paciente. */
+  nomeDaEquipeVale = true,
+) {
   const t = normalizar(texto)
   // O 9 vale em qualquer etapa porque nenhuma lista passa de oito opcoes. E a
   // primeira coisa conferida a cada mensagem, entao ele nunca e confundido com
   // a escolha de um dia ou de um horario.
   if (t === '9') return true
-  return (
-    t === 'atendente' ||
-    t === 'secretaria' ||
-    t === 'equipe' ||
-    t === 'falar com atendente' ||
-    t === 'falar com a equipe' ||
-    t === 'ajuda'
-  )
+  // Sem pontuacao e dentro de frase (16/10/2026, painel de pacientes
+  // simulados). So valia a palavra exata: "ATENDENTE!!!" recebeu "Nao entendi"
+  // e o menu pela segunda vez; "NINGUEM ME RESPONDE, QUERO FALAR COM UMA
+  // PESSOA" recebeu o texto "Como e a consulta"; "Queria falar com a Dayane, e
+  // sobre um pedido de exame" e "dayane?", o menu e "Nao entendi".
+  const f = t.replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()
+  if (['atendente', 'secretaria', 'equipe', 'falar com atendente', 'falar com a equipe', 'ajuda', 'humano', 'pessoa', 'uma pessoa', 'recepcao'].includes(f)) return true
+  if (/\b(falar|conversar|fala|falo) com (a |o |uma |um |alguem d[ao] )?(atendente|pessoa|humano|gente|secretaria|recepcao|recepcionista|equipe|moca|alguem|responsavel|dr|doutor|doutora|medico)\b/.test(f)) return true
+  if (/\b(quero|queria|preciso|cade|chama|chamar|tem|me passa|passa pra|passa para) (a |o |uma |um )?(atendente|pessoa de verdade|humano|secretaria|recepcionista|alguem da equipe)\b/.test(f)) return true
+  if (/\bninguem (me )?(responde|atende|respondeu|atendeu)\b/.test(f)) return true
+  if (/\bnao (quero|aguento|gosto de) (falar com |conversar com )?(robo|maquina|bot)\b/.test(f)) return true
+  // "A atendente falou pra eu marcar por aqui" e pedido de marcar.
+  if (/\b(atendente|atendimento humano)\b/.test(f) && f.split(' ').length <= 10 && !/\b(marcar|agendar|marca|agenda|remarcar)\b/.test(f)) return true
+  // O nome de quem e da equipe: no comeco ("dayane?", "bom dia dayane, aqui e
+  // a Sonia...") ou com "com a", "pra", "a" na frente ("a Dayane esta?"). Quem
+  // se apresenta com o mesmo nome ("aqui e a Dayane") e paciente.
+  if (nomeDaEquipeVale) {
+    const palavras = f.split(' ')
+    // "Daiane" e a Dayane (rodada 3 do painel): o nome como se fala (ver
+    // nomeFalado), e nao letra por letra.
+    const faladas = palavras.map((p) => nomeFalado(p))
+    for (const nome of perfil().equipe.map((n) => nomeFalado(n))) {
+      const i = faladas.indexOf(nome)
+      if (i < 0) continue
+      const antes = palavras.slice(Math.max(0, i - 3), i).join(' ')
+      if (/\b(sou|aqui e|eu sou|me chamo|meu nome e|chamo)( a| o)?$/.test(antes)) continue
+      if (i < 4 || /\b(com a|com|pra|para a|para|a|da)$/.test(antes)) return true
+    }
+  }
+  return false
+}
+
+/**
+ * Quem pede gente reclamando da demora ouve um pedido de desculpas primeiro
+ * (16/10/2026): "CADE A ATENDENTE??? TO TENTANDO FAZ 2 DIAS".
+ */
+function reclamouDaDemora(texto: string): boolean {
+  const f = normalizar(texto).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()
+  const letras = texto.replace(/[^\p{L}]/gu, '')
+  const gritando = letras.length >= 8 && letras === letras.toUpperCase()
+  return gritando || /\b(ninguem|demora|demorando|cade|faz \d+ dias|desde ontem|ate agora|tentando)\b/.test(f)
 }
 
 /** "Urgente", "é urgência", ou a linha URGENCIA tocada na lista. */
@@ -520,8 +863,30 @@ function pediuUrgencia(texto: string) {
   // "Nao e urgencia" (06/10/2026): a Patricia tocou "E urgencia" por engano,
   // escreveu "Nao e urgencia. Gostaria de informacoes sobre o valor..." e
   // recebeu de novo "Avisei a nossa equipe de que e urgente".
-  if (/\b(nao|nem) (e|eh|era|foi|tem|ha|sou|estou)? ?(nada )?(de )?urgen/.test(t) || /\bsem urgen/.test(t)) return false
-  return /urgen/.test(t)
+  if (/\b(nao|nem) (e|eh|era|foi|tem|ha|sou|estou)? ?(nada )?(de )?(urgen|emergen)/.test(t) || /\bsem (urgen|emergen)/.test(t)) return false
+  // "Socorro" e "e emergencia" (16/10/2026, painel de pacientes simulados): a
+  // paciente com tontura e vomito escreveu os dois e ouviu silencio e "Nao
+  // entendi". So "urgen" valia. "Pronto-socorro" tambem entra: quem pergunta
+  // se vai para o pronto-socorro precisa da orientacao, e nao do menu.
+  if (geral() && urgenciaDeAgenda(texto)) return false
+  return /urgen|emergen|\bsocorro\b/.test(t)
+}
+
+/**
+ * "Quero consulta urgente, o primeiro horario que tiver" (16/10/2026, rodada
+ * 2 do painel): pressa para marcar, e nao emergencia. Virava transferencia de
+ * urgencia, com notificacao no celular do Dr. Fabio, e a paciente precisou
+ * escrever "nao e emergencia" e digitar "menu" para conseguir marcar. Com
+ * sintoma, sangramento ou sinal de alarme na frase, continua urgencia.
+ */
+function urgenciaDeAgenda(texto: string): boolean {
+  const t = normalizar(texto).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ')
+  if (/\b(emergen\w*|socorro)\b/.test(t)) return false
+  if (assuntoClinico(texto) || falouDeSangramento(texto) || sinalDeAlarme(texto)) return false
+  return (
+    /\b(consulta|horario|encaixe|agendamento|vaga|marcar|agendar|retorno)\b( \w+){0,3} (urgente|urgencia)\b/.test(t) ||
+    /\b(urgente|com urgencia)\b( \w+){0,3} (consulta|horario|encaixe|vaga|marcar|agendar)\b/.test(t)
+  )
 }
 
 /**
@@ -540,9 +905,13 @@ function pediuUrgencia(texto: string) {
  * pelo pedido de 2a via. "Nao para de sangrar" NAO e negacao: e o pior caso,
  * e o "para de" no meio impede a leitura como "nao sangrou".
  */
-const SANGRAMENTO = /\b(sangr\w*|sangue|sanguinolent\w*|hemorrag\w*|epistax\w*)\b/
+// Coagulo tambem (16/10/2026, rodada 3 do painel): "to operado do septo, ta
+// saindo coagulo pelo nariz e to cuspindo vermelho" recebeu "e uma avaliacao
+// para a consulta", sem alerta. O vermelho que sai pela boca ou pelo nariz
+// conta como sangue (ver falouDeSangramento).
+const SANGRAMENTO = /\b(sangr\w*|sangue|sanguinolent\w*|hemorrag\w*|epistax\w*|coagul\w*)\b/
 const SANGRAMENTO_NEGADO = new RegExp(
-  '\\b(sem|nenhum|nenhuma)\\s+(nenhum\\s+|nenhuma\\s+|qualquer\\s+)?(sangr\\w*|sangue|hemorrag\\w*|epistax\\w*)' +
+  '\\b(sem|nenhum|nenhuma)\\s+(nenhum\\s+|nenhuma\\s+|qualquer\\s+)?(sangr\\w*|sangue|hemorrag\\w*|epistax\\w*|coagul\\w*)' +
     '|\\b(nao|nunca|nem)\\s+(tem\\s+|teve\\s+|tive\\s+|tenho\\s+|ha\\s+|houve\\s+|apresenta\\s+|apresentou\\s+)?' +
     '(nenhum\\s+|nenhuma\\s+)?(sangr\\w*|sangue|hemorrag\\w*|epistax\\w*)',
   'g',
@@ -551,7 +920,230 @@ const SANGUE_DE_EXAME = /\b(exames?|coleta|coletar|colher|tirar|doar|doacao|doad
 
 export function falouDeSangramento(texto: string): boolean {
   const t = normalizar(texto).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ')
-  return SANGRAMENTO.test(t.replace(SANGUE_DE_EXAME, ' ').replace(SANGRAMENTO_NEGADO, ' '))
+  return (
+    SANGRAMENTO.test(t.replace(SANGUE_DE_EXAME, ' ').replace(SANGRAMENTO_NEGADO, ' ')) ||
+    /\b(cusp\w*|escarr\w*|vomit\w*|saindo|saiu|sai|escorr\w*|pingand\w*)( \w+){0,2} vermelh\w*\b/.test(t)
+  )
+}
+
+/**
+ * Sangramento que nao parou, forte ou depois de cirurgia (16/10/2026, rodada
+ * 2 do painel). "Meu nariz ta jorrando sangue faz uns 20 min e nao para" e
+ * "operei o septo e esta saindo sangue pela boca" ouviam "alguem da equipe
+ * fala com voce o mais rapido possivel", com o pronto-socorro so como
+ * condicao, e um paciente perguntou "espero ele me ligar?". Nesses, a primeira
+ * frase manda ir, sem condicional. "As vezes sangra o nariz", contado ao
+ * marcar consulta, continua com o aviso de sempre.
+ */
+export function sangramentoAtivo(texto: string): boolean {
+  if (!falouDeSangramento(texto)) return false
+  const t = normalizar(texto).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ')
+  return (
+    falouDePosOperatorio(texto) ||
+    /\bnao (para|parou|estanca|estancou|passa|passou)\b/.test(t) ||
+    /\b(jorr\w*|golfad\w*|coagul\w*|escorr\w*|pingando|sem parar)\b/.test(t) ||
+    /\b(ta|esta|continua|ainda) (saindo|escorrendo|pingando|descendo) (sangue|vermelho)\b|\bainda (ta |esta )?(sangr\w*|saindo)\b/.test(t) ||
+    /\b(muito|bastante|monte de|cheio de) sangue\b/.test(t) ||
+    /\bsangr\w* (muito|demais|bastante|forte)\b/.test(t) ||
+    /\b(ha|faz|uns|mais de|quase) \d+ ?(min|minutos)\b|\b\d+ minutos\b|\bmeia hora\b|\buma hora\b/.test(t) ||
+    /\b(pela boca|pela garganta|engolindo sangue|gosto de sangue|cuspindo sangue|vomit\w* sangue)\b/.test(t)
+  )
+}
+
+/**
+ * Sinal de alarme do otorrino na mensagem (16/10/2026, painel de pacientes
+ * simulados).
+ *
+ * No painel, "meu filho de 4 anos enfiou um feijao no nariz", "engoli uma
+ * espinha de peixe e esta doendo muito para engolir", "acordei sem ouvir nada
+ * do ouvido direito", "tontura mto forte vomitando nao consigo fica de pe" e
+ * "meu bebe de 8 meses esta com um barulho estranho pra respirar" receberam a
+ * propaganda "Respirar bem e viver melhor" (a resposta pronta casou "nariz",
+ * "ouvido", "respirar") ou "e uma avaliacao para a consulta", com o convite
+ * para marcar. Urgencia so era reconhecida pela palavra "urgente" e pelo
+ * sangramento. Sao os sinais que o otorrino manda ao pronto-socorro na hora.
+ *
+ * Como no sangramento, errar para o lado de avisar e o certo: um aviso a mais
+ * custa uma olhada da equipe; um a menos pode custar o paciente. Fica de fora
+ * de proposito a queixa de sempre do consultorio, que parece alarme e nao e:
+ * "nao consigo respirar pelo nariz" (entupimento), "chiado no ouvido"
+ * (zumbido), "espinha no nariz" (acne), "durmo muito mal" (ronco).
+ *
+ * Devolve o tipo do sinal (a resposta muda um pouco com ele) ou null.
+ */
+export type SinalDeAlarme =
+  | 'corpo_estranho'
+  | 'respiracao'
+  | 'surdez'
+  | 'tontura'
+  | 'engolir'
+  | 'rosto'
+  | 'pos_operatorio'
+  | 'bebe'
+  | 'mal_estar'
+
+const OBJETO_ESTRANHO =
+  '(feijao|feijoes|graos?|milho|pipoca|ervilhas?|sementes?|carocos?|pedrinhas?|micangas?|bolinhas?|pilhas?|baterias?|' +
+  'botao|brinquedos?|pecinhas?|insetos?|bichos?|bichinhos?|baratas?|formigas?|mosquitos?|besouros?|moedas?|brincos?|tampinhas?|imas?)'
+const OBJETO_COMUM = '(objeto|coisa|peca|pedaco|papel|borracha|algodao|cotonete|tampa|plastico)'
+const LUGAR_DO_OBJETO = '(nariz|narina|narinas|ouvido|ouvidos|orelha|garganta)'
+const PUS_PRA_DENTRO = '(enfiou|enfiei|enfiaram|colocou|coloquei|colocaram|botou|botei|meteu|meti|entrou|caiu|ficou|engoliu|engoli)'
+const NAO_CONSEGUE = '(nao|mal) (consigo|consegue|consegui|conseguiu|conseguimos|to conseguindo|estou conseguindo|esta conseguindo|ta conseguindo)'
+const TONTURA = /\b(tontura|tonteira|tont[oa]|vertigem|vertigens|labirintite|(tudo|mundo|casa|cabeca) (rodando|girando|gira|roda)|(rodando|girando) tudo)\b/
+const TONTURA_FORTE = new RegExp(
+  `\\b(vomit\\w*|${NAO_CONSEGUE} (ficar de pe|ficar em pe|parar em pe|levanta\\w*|me levantar|andar|abrir os olhos)|cai|caiu|desmai\\w*|` +
+    'forte|fortissima|horrivel|insuportavel|passando mal|nao para|sem parar)\\b',
+)
+// Perto da falta de ar, e o nariz entupido de sempre ou o ronco da noite, que
+// sao consulta: "nao consigo respirar pelo nariz", "nao respira direito a
+// noite, ronca muito", "faz barulho pra respirar quando dorme".
+const QUEIXA_DE_SEMPRE = /\b(pelo nariz|pela narina|pelas narinas|pelo lado|nariz entupido|entupid[oa]|a noite|de noite|dormindo|quando dorme|pra dormir|para dormir|ronc\w*)\b/
+
+export function sinalDeAlarme(texto: string): SinalDeAlarme | null {
+  const t = normalizar(texto).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!t) return null
+  const tem = (padrao: RegExp | string) => (typeof padrao === 'string' ? new RegExp(padrao) : padrao).test(t)
+  /** O padrao casa longe da queixa de sempre (ver QUEIXA_DE_SEMPRE). */
+  const semSerOEntupido = (padrao: RegExp) => {
+    const achado = new RegExp(padrao.source, 'g')
+    for (let m = achado.exec(t); m; m = achado.exec(t)) {
+      const volta = t.slice(Math.max(0, m.index - 30), m.index + m[0].length + 30)
+      if (!QUEIXA_DE_SEMPRE.test(volta)) return true
+    }
+    return false
+  }
+
+  // Corpo estranho: no nariz, no ouvido, na garganta, ou engolido.
+  if (
+    tem(`\\b${OBJETO_ESTRANHO}\\b.{0,40}\\b${LUGAR_DO_OBJETO}\\b`) ||
+    tem(`\\b${LUGAR_DO_OBJETO}\\b.{0,40}\\b${OBJETO_ESTRANHO}\\b`) ||
+    tem(`\\b${PUS_PRA_DENTRO}\\b.{0,25}\\b${OBJETO_COMUM}\\b.{0,30}\\b${LUGAR_DO_OBJETO}\\b`) ||
+    tem(/\bcorpo estranho\b/) ||
+    tem(/\bespinha de peixe\b/) ||
+    // "Espinha" sozinha tambem e acne: so conta com garganta ou engolir perto.
+    tem(/\bespinhas?\b.{0,50}\b(garganta|engol\w*|engul\w*|ental\w*|pres[oa]|atravessad\w*|engasg\w*|espetad\w*|espetando)\b/) ||
+    tem(/\b(garganta|engoli|engoliu|engasguei|engasgou|entalou|entalei)\b.{0,50}\bespinhas?\b/) ||
+    tem(/\bossos?\b.{0,40}\b(garganta|ental\w*|atravessad\w*|engasg\w*)\b/) ||
+    tem(/\b(engoli|engoliu|engoliram)\b.{0,30}\b(ossos?|pilhas?|baterias?|moedas?|imas?|alfinetes?|pregos?|parafusos?|tampinhas?|botao|brinquedos?|pecinhas?|objeto)\b/) ||
+    tem(/\b(entalad[oa]|entalou|entalei|preso|presa|atravessad[oa])\b.{0,30}\bgarganta\b/) ||
+    tem(/\bgarganta\b.{0,30}\b(entalad[oa]|entalou|preso|presa|atravessad[oa])\b/)
+  ) {
+    return 'corpo_estranho'
+  }
+
+  // Respiracao. "Chiado no ouvido" e zumbido, e nao falta de ar.
+  if (
+    semSerOEntupido(/\b(falta de ar|sem ar)\b/) ||
+    tem(/\b(sufoc\w*|asfixi\w*|cianose|ofegante|arroxead[oa]|engasgad[oa]|engasgando)\b/) ||
+    tem(/\b(labio|labios|boca|rosto)\b.{0,15}\b(roxo|roxa|roxos|roxas|roxinho|roxinha)\b/) ||
+    tem(/\b(ficou|ficando|esta|ta|fica) (roxo|roxa|roxinho|roxinha)\b/) ||
+    // "Chiadinho no peito" (rodada 3 do painel): o diminutivo tambem.
+    (tem(/\b(chiad\w*|chiand\w*|chia|chiadeira|estridor)\b/) && !tem(/\b(ouvido|ouvidos|orelha|orelhas|cabeca)\b/)) ||
+    semSerOEntupido(new RegExp(`\\b${NAO_CONSEGUE}( mais)?( direito)? respirar\\b`)) ||
+    semSerOEntupido(/\b(dificuldade|dificil|esforco) (pra|para|de|ao|em) respirar\b/) ||
+    semSerOEntupido(/\brespira(ndo)? com (muita )?dificuldade\b/) ||
+    semSerOEntupido(/\b(barulho|ruido|som)( \w+){0,2} (pra|para|ao|quando) respira\w*\b/) ||
+    semSerOEntupido(/\brespira(ndo)? (mal|rapid\w*|muito rapid\w*|depressa|estranh\w*|esquisit\w*|diferente|pesad\w*|com barulho)\b|\brespiracao (rapida|acelerada|curta|estranha|esquisita|diferente|pesada|ofegante|dificil)\b/) ||
+    // "Respiracao estranha, fazendo um barulhinho" (rodada 2 do painel): o
+    // barulho no diminutivo, longe do verbo, na mesma frase da respiracao.
+    (tem(/\b(barulh\w*|ruid\w*|chiad\w*|gemid\w*)\b/) && tem(/\b(respira\w*|respiracao|folego)\b/) && !tem(/\b(ronc\w*|dormindo|quando dorme|a noite|de noite|nariz entupido)\b/)) ||
+    // A barriga ou as costelas afundando ao respirar (tiragem), dita como se fala.
+    tem(/\b(barriga|barriguinha|costela|costelas|costelinha|peito|pescoco)\b.{0,15}\b(afund\w*|puxand\w*)\b|\bafundando (a |as )?(barriga|barriguinha|costela|costelas)\b/) ||
+    tem(/\b(puxando|puxa) (o )?ar\b/) ||
+    tem(/\b(garganta|lingua) (fechando|inchando|inchada)\b|\bfechando a garganta\b/)
+  ) {
+    return 'respiracao'
+  }
+
+  // Bebe molinho, que nao mama, que nao acorda (rodada 2 do painel): no bebe,
+  // isso e sinal de alarme mesmo sem a palavra respiracao.
+  if (
+    tem(/\b(bebe|bebezinho|bb|nenem|neném|recem nascido|recem nascida|\d{1,2} (meses|mes))\b/) &&
+    tem(/\b(molinh[oa]|mole|largad\w*|sem forca|nao (quer )?mam\w*|parou de mamar|nao acorda|cansad[oa]|cansadinh[oa]|abatid[oa]|prostrad[oa]|gemend\w*|roxinh[oa]|desidratad\w*)\b/)
+  ) {
+    return 'bebe'
+  }
+
+  // Surdez subita: o "de repente" (ou "acordei", "desde ontem") e o que separa
+  // da perda de audicao de anos, que e consulta comum.
+  // "To escutando quase nada" e "tampou do nada" (rodada 3 do painel) tambem.
+  const SEM_OUVIR = '(sem (ouvir|escutar)|surd[oa]|nao (ouco|ouvia|ouve|ouvindo|escuto|escuta|escutava|escutando|estou ouvindo|to ouvindo|estou escutando|to escutando)|(escutando|ouvindo|escuto|ouco|escuta|ouve) (quase )?nada|(escutando|ouvindo) (muito )?pouco|perdi a audicao|perdeu a audicao|(ouvido|orelha)( [a-z]+){0,3} (tampou|tapou|entupiu|fechou|abafou|travou))'
+  const DE_REPENTE = '(de repente|do nada|subitamente|repentinamente|de uma hora (pra|para) outra)'
+  if (
+    tem(/\b(surdez|perda auditiva|perda (de|da) audicao) (subita|repentina|aguda|de repente)\b/) ||
+    tem(/\b(parei|parou) de (ouvir|escutar)\b/) ||
+    tem(new RegExp(`\\b(acordei|acordou|amanheci|amanheceu)\\b.{0,40}\\b(${SEM_OUVIR}|tampad[oa]|abafad[oa])`)) ||
+    tem(new RegExp(`\\b${DE_REPENTE}\\b.{0,50}\\b${SEM_OUVIR}`)) ||
+    tem(new RegExp(`\\b${SEM_OUVIR}.{0,50}\\b${DE_REPENTE}\\b`)) ||
+    tem(new RegExp(`\\b${SEM_OUVIR}.{0,40}\\b(desde|hoje|ontem|de manha|ha (\\d+|um|dois|tres) dias?|faz (\\d+|um|dois|tres) dias?)\\b`)) ||
+    tem(new RegExp(`\\b(desde ontem|desde hoje|hoje cedo|de ontem pra hoje)\\b.{0,40}\\b${SEM_OUVIR}`))
+  ) {
+    return 'surdez'
+  }
+
+  // Tontura que derruba: com vomito, sem conseguir ficar de pe, ou "forte".
+  if ((tem(TONTURA) && tem(TONTURA_FORTE)) || tem(/\bnao (paro|para|parei|parou) de vomit\w*\b/)) return 'tontura'
+
+  // Nao conseguir engolir, ou dor forte para engolir.
+  if (
+    tem(new RegExp(`\\b${NAO_CONSEGUE}( nem)?( mais)? (engolir|engulir|engole|abrir a boca|tomar agua|beber agua|beber)\\b`)) ||
+    tem(/\bnao desce( nem)?( mais)?( agua| comida| nada| saliva)?\b/) ||
+    ((tem(/\b(dor|doi|doe|doendo)\b.{0,25}\b(engolir|engulir|engole)\b/) || tem(/\b(engolir|engulir)\b.{0,25}\b(doi|doe|doendo|dor)\b/)) &&
+      tem(/\b(muito|mto|demais|forte|insuportavel|horrivel|bastante|ate a saliva|nem a saliva)\b/)) ||
+    (tem(/\bbaban\w*\b/) && tem(/\b(garganta|engolir|engulir|febre|dor)\b/)) ||
+    tem(/\b(pescoco|garganta) (inchad[oa]|duro|dura)\b|\binchaco no pescoco\b|\bvoz abafada\b/)
+  ) {
+    return 'engolir'
+  }
+
+  // Rosto torto ou fala enrolada: paralisia facial, ou coisa pior.
+  if (
+    tem(/\b(boca|rosto|cara) (tort[oa]|caid[oa]|paralisad[oa])\b/) ||
+    tem(/\bparalisia (facial|do rosto|da face)\b/) ||
+    tem(/\b(metade|lado) do rosto\b.{0,30}\b(paralisad\w*|caid\w*|nao mexe|parad[oa]|dormente)\b/) ||
+    tem(/\bnao (consigo|consegue) (fechar|mexer) o olho\b/) ||
+    tem(/\bfala enrolada\b/)
+  ) {
+    return 'rosto'
+  }
+
+  // Pos-operatorio com febre, pus, inchaco ou dor forte. Pergunta sobre a
+  // cirurgia que ainda vai acontecer ("a cirurgia doi?") nao entra: so o
+  // passado ("operei", "depois da cirurgia").
+  if (
+    tem(/\b(operei|operou|operado|operada|fiz a cirurgia|fez a cirurgia|depois da cirurgia|desde a cirurgia|pos operatorio|pos op|posoperatorio)\b/) &&
+    tem(new RegExp(`\\b(febre|pus|inchad[oa]|inchaco|dor (muito )?forte|muita dor|${NAO_CONSEGUE} (engolir|respirar|beber))\\b`))
+  ) {
+    return 'pos_operatorio'
+  }
+
+  // Mal-estar forte. "Durmo muito mal" e queixa de ronco: o "mal" so conta
+  // com quem esta mal agora.
+  //
+  // (O pos-operatorio sem sinal de alarme tambem vai para a equipe, mas como
+  // recado: ver falouDePosOperatorio.)
+  if (
+    tem(/\b(passando mal|desmai\w*|convuls\w*|inconsciente|desacordad[oa])\b/) ||
+    tem(/\b(to|estou|esta|ta|fiquei|ficou|me sinto|sentindo) (muito |mto |bem )?mal\b/)
+  ) {
+    return 'mal_estar'
+  }
+  return null
+}
+
+/**
+ * Paciente operado escrevendo (16/10/2026, painel de pacientes simulados).
+ *
+ * "Oi bom dia, operei o septo com o dr fabio semana passada" recebeu a
+ * propaganda do consultorio ("Respirar bem e viver melhor", casou "septo"):
+ * quem acabou de operar e esta escrevendo quer falar do pos-operatorio, e
+ * quem acompanha e a equipe. So o passado: "vou operar o septo, quanto custa?"
+ * e pergunta de quem ainda nao operou.
+ */
+export function falouDePosOperatorio(texto: string): boolean {
+  const t = normalizar(texto).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ')
+  // "To operado do septo" (rodada 3 do painel) tambem.
+  return /\b(operei|operou|fui operad[oa]|foi operad[oa]|(to|tou|estou|ta|esta|sou|recem|ja) operad[oa]|operad[oa] (do|da|de|ha|faz)|fiz a cirurgia|fez a cirurgia|fiz cirurgia|fez cirurgia|depois da cirurgia|desde a cirurgia|pos operatorio|pos op|posoperatorio|pos cirurgia|pos cirurgico)\b/.test(t)
 }
 
 /**
@@ -586,26 +1178,115 @@ function desistiu(texto: string) {
  * convencido de que tinha marcado as 10:00. Errar calado e pior do que nao
  * entender.
  */
-function horaEscrita(texto: string): { hora: number; minuto: number | null } | null {
-  const t = normalizar(texto)
+const HORA_POR_EXTENSO: Record<string, number> = {
+  uma: 1, duas: 2, tres: 3, quatro: 4, cinco: 5, seis: 6, sete: 7, oito: 8, nove: 9, dez: 10, onze: 11, doze: 12,
+}
+const MINUTO_POR_EXTENSO: Record<string, number> = { dez: 10, quinze: 15, vinte: 20, trinta: 30, quarenta: 40, cinquenta: 50 }
+
+export function horaEscrita(texto: string): { hora: number; minuto: number | null } | null {
+  let t = normalizar(texto)
+  // Por extenso e com o periodo (16/10/2026, painel de pacientes simulados): o
+  // senhor de 70 anos escreveu "as duas horas da tarde" e "2 da tarde" e ouviu
+  // dois "Nao entendi"; "nove e vinte", "4 da tarde" e "2pm", o mesmo. O
+  // numero solto continua sendo item da lista: so vira hora com "horas",
+  // "da tarde", "e vinte" ou "em ponto" junto.
+  t = t.replace(/\bmeio[ -]?dia e meia\b/g, '12:30').replace(/\bmeio[ -]?dia\b/g, '12h')
+  t = t.replace(
+    /\b(uma|duas|tres|quatro|cinco|seis|sete|oito|nove|dez|onze|doze)\b(?=\s+(e\s+(dez|quinze|vinte|trinta|quarenta|cinquenta|meia)\b|horas?\b|hrs?\b|hs?\b|da (manha|tarde|noite)\b|em ponto\b))/g,
+    (n) => String(HORA_POR_EXTENSO[n]),
+  )
+  t = t.replace(/\b(\d{1,2})\s+e\s+(dez|quinze|vinte|trinta|quarenta|cinquenta)\b/g, (_, h: string, m: string) => `${h}:${MINUTO_POR_EXTENSO[m]}`)
+  // "As oito", "pode ser as 8" (rodada 2 do painel): com o "as" na frente e
+  // nada depois, e hora. "As duas unidades" e "as 2 primeiras" nao sao.
+  const fimDaHora = String.raw`(?=\s*($|[,.!?;]|entao\b|mesmo\b|pode\b|por favor\b|serve\b|fica\b|ta\b|ok\b|beleza\b|blz\b|tem\b|tambem\b|de (segunda|terca|quarta|quinta|sexta)\b|da (segunda|terca|quarta|quinta|sexta)\b))`
+  // "Qual das duas tem horario antes?" (rodada 3 do painel) e "das duas
+  // unidades", e nao as 14h.
+  t = t.replace(/\b(qual|quais|uma|nenhuma|alguma|entre|cada) (d?as) (uma|duas|tres)\b/g, '$1 $2 _$3')
+  t = t.replace(
+    new RegExp(String.raw`\b(d?as) (uma|duas|tres|quatro|cinco|seis|sete|oito|nove|dez|onze|doze)\b${fimDaHora}`, 'g'),
+    (_, as: string, n: string) => `${as} ${HORA_POR_EXTENSO[n]}h`,
+  )
+  t = t.replace(new RegExp(String.raw`\b(d?as) (\d{1,2})\b(?!\s*[:h/])${fimDaHora}`, 'g'), '$1 $2h')
+  const daTarde = /\b(da tarde|a tarde|de tarde|da noite|a noite|de noite)\b|\d\s*pm\b/.test(t)
+  const daManha = /\b(da manha|de manha|pela manha|manha|madrugada)\b|\d\s*am\b/.test(t)
+  const noPeriodo = (r: { hora: number; minuto: number | null } | null) => {
+    if (!r) return r
+    if (daTarde && r.hora >= 1 && r.hora <= 11) return { ...r, hora: r.hora + 12 }
+    // "As duas", "4h" (rodada 2): no consultorio, de tarde. Ninguem marca
+    // consulta as 4 da madrugada.
+    if (!daManha && r.hora >= 1 && r.hora <= 6) return { ...r, hora: r.hora + 12 }
+    return r
+  }
+
   // "9 e 20", "10 e meia", "8 em ponto" (painel, 14/10/2026): sem "h" nem ":"
   // nada disso era lido como hora.
   const falada = t.match(/\b(\d{1,2})\s+e\s+(\d{2}|meia)\b/)
   if (falada) {
     const hora = Number(falada[1])
     const minuto = falada[2] === 'meia' ? 30 : Number(falada[2])
-    return hora <= 23 && minuto <= 59 ? { hora, minuto } : null
+    return hora <= 23 && minuto <= 59 ? noPeriodo({ hora, minuto }) : null
   }
-  const emPonto = t.match(/\b(\d{1,2})\s*(?:h|hs|horas)?\s+em ponto\b/)
-  if (emPonto && Number(emPonto[1]) <= 23) return { hora: Number(emPonto[1]), minuto: 0 }
+  const emPonto = t.match(/\b(\d{1,2})\s*(?:h|hs|hrs?|horas)?\s+em ponto\b/)
+  if (emPonto && Number(emPonto[1]) <= 23) return noPeriodo({ hora: Number(emPonto[1]), minuto: 0 })
+  // "Dia 20 de manha" e o dia 20 (rodada 3 do painel), e nao as 20h: numero
+  // maior que 12, sem "h", junto do periodo, e dia do mes.
+  const comPeriodo = t.match(/\b(?<!dia )(\d{1,2})\s*(h|hs|hrs?|horas?)?\s*(da manha|da tarde|da noite|de manha|de tarde|pm|am)\b/)
+  if (comPeriodo && Number(comPeriodo[1]) <= 23 && (comPeriodo[2] || Number(comPeriodo[1]) <= 12)) {
+    return noPeriodo({ hora: Number(comPeriodo[1]), minuto: null })
+  }
   if (!/[h:]/.test(t)) return null
-  const m = t.match(/(\d{1,2})\s*[:h]\s*(\d{2})?/)
+  // O "h" da hora nao e o comeco de outra palavra (rodada 2 do painel): "tomo
+  // 1 hj e pronto?" era lido como 13h, e a pergunta do remedio virou agenda.
+  // "8 hrs" (rodada 3 do painel) tambem.
+  const m = t.match(/(\d{1,2})\s*(?::\s*(\d{2})|h(?:rs?|s|oras?)?(?![a-z])\s*(\d{2})?)/)
   if (!m) return null
   const hora = Number(m[1])
-  const minuto = m[2] === undefined ? null : Number(m[2])
+  const minutos = m[2] ?? m[3]
+  const minuto = minutos === undefined ? null : Number(minutos)
   if (hora > 23) return null
   if (minuto !== null && minuto > 59) return null
-  return { hora, minuto }
+  return noPeriodo({ hora, minuto })
+}
+
+/** "De manha", "a tarde" (16/10/2026). "Boa tarde" e cumprimento, nao periodo. */
+function periodoEscrito(texto: string): 'manha' | 'tarde' | null {
+  // "Ja ta tarde ne" (rodada 3 do painel) e a hora, e nao o periodo.
+  const t = normalizar(texto).replace(/\b(bom dia|boa tarde|boa noite)\b|\b(ja|ta|esta|muito|meio|bem|tao|ficou|ficando) tarde\b|\btarde demais\b/g, ' ')
+  if (/\b(de manha|da manha|pela manha|manha|cedinho|bem cedo)\b/.test(t)) return 'manha'
+  if (/\b(a tarde|de tarde|da tarde|pela tarde|tarde|tardinha)\b/.test(t)) return 'tarde'
+  return null
+}
+
+/**
+ * Pergunta sobre a data, e nao escolha (16/10/2026, painel): "So dia 20? Nao
+ * tem nada antes?" abria os horarios do dia 20; "hj nao da? to mto mal" e
+ * "qual tem pra hj?" recebiam "Nao entendi".
+ */
+function perguntouMaisCedo(texto: string): 'hoje' | 'antes' | null {
+  const t = normalizar(texto).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ')
+  if (/\b(hoje|hj)\b/.test(t) && !/\b(amanha|amnh)\b/.test(t)) return 'hoje'
+  // "Antes" so com o que vem antes de uma data: "antes de marcar, quanto
+  // custa?" nao e pedido de horario mais cedo.
+  // Sem "mais perto": "a mais perto de casa" e lugar, e nao data.
+  if (
+    // "E urgente" na agenda e pressa (ver urgenciaDeAgenda): com sintoma, a
+    // mensagem ja foi para a equipe antes de chegar aqui.
+    /\b((nada|algo|nenhum|nenhuma|tem|teria|algum|alguma|mais) antes|antes (disso|desse|dessa|do dia|de (segunda|terca|quarta|quinta|sexta)|da (segunda|terca|quarta|quinta|sexta))|mais cedo|quanto antes|mais rapido|primeiro horario|primeira vaga|primeiro dia|primeiro disponivel|primeira data|urgente|com urgencia|(horario|data|vaga|dia) mais proxim[oa]|(horario|vaga|data) antes)\b/.test(t)
+  ) {
+    return 'antes'
+  }
+  return null
+}
+
+/**
+ * Pressa explicita no pedido de marcar (16/10/2026): "o quanto antes", "pra
+ * hoje", "tanto faz a unidade". Mais estreita que perguntouMaisCedo: no
+ * primeiro pedido, um "hoje" solto ("hoje acordei com o nariz entupido") e
+ * historia, e nao pedido de horario.
+ */
+function comPressa(texto: string): boolean {
+  const t = normalizar(texto).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ')
+  return /\b(pra hoje|para hoje|hoje mesmo|ainda hoje|quanto antes|mais cedo|mais rapido|primeiro horario|primeira vaga|primeiro disponivel|qualquer unidade|tanto faz|urgente|com urgencia|(horario|data|vaga|dia) mais proxim[oa])\b/.test(t)
 }
 
 /**
@@ -752,6 +1433,20 @@ const OPCOES = [
 // colide com a lista porque indice de opcao comeca em 1. So nao estava escrito
 // em lugar nenhum, e o que nao se anuncia nao existe para quem le.
 const VOLTA = 'Digite *0* a qualquer momento para voltar ao início.'
+
+/**
+ * Quando o robo nao entende, ele pergunta em vez de adivinhar (16/10/2026,
+ * pedido do Edu depois do painel de pacientes simulados): a regra de texto nao
+ * le todo jeito de escrever uma urgencia ("chiadinho no peito", "to operado"),
+ * e um toque em Urgencia chega ao pronto-socorro e ao celular da equipe do
+ * mesmo jeito. Duvida deixa a mensagem com a equipe, sem alarme. O "URGENCIA"
+ * chega como texto e cai em pediuUrgencia; o "E_DUVIDA" tem o bloco proprio.
+ */
+const BOTOES_URGENCIA_OU_DUVIDA = [
+  { id: 'URGENCIA', titulo: '🚨 Urgência' },
+  { id: 'E_DUVIDA', titulo: '💬 Dúvida' },
+]
+const PERGUNTA_URGENCIA_OU_DUVIDA = 'É uma *urgência* ou uma *dúvida*? Toque abaixo.'
 const SAIDAS = 'Digite *9* para falar com a nossa equipe, ou *0* para voltar ao início.'
 
 /**
@@ -1405,11 +2100,15 @@ async function jaMandada(admin: Admin, conversationId: string, resposta: string)
  * no "marcar" da frase e recebia convenios de novo e o botao da agenda.
  */
 export function despedida(texto: string): boolean {
-  if (parecePergunta(texto)) return false
+  // O "quando" de "fica pra quando eu for pra SP" nao faz da frase uma
+  // pergunta (rodada 2 do painel): a despedida ficava sem resposta, na fila.
+  if (parecePergunta(texto.replace(/\b(pra|para) quando\b.*$/i, ''))) return false
   const t = normalizar(texto).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim()
   const agradece = /\b(ok|okay|obrigad[oa]|obg|valeu|grat[oa]|beleza|blz|combinado|certo|entendi|agradeco)\b/.test(t)
+  // "Fica pra quando eu for pra SP", "deixa pra depois" (16/10/2026, rodada 2
+  // do painel): recebiam "Nao consegui entender" e iam para a fila.
   const depois =
-    /\b(vou (tentar|ver|pensar|verificar|conversar|falar|olhar|analisar|decidir|avaliar|procurar)|volto (a falar|depois|mais tarde|pra|para|aqui|a entrar|a chamar)|retorno (depois|mais tarde|em breve)|(entro|entramos) em contato|qualquer coisa (eu )?(volto|chamo|falo|aviso|entro)|depois (eu )?(volto|chamo|falo|marco|vejo|aviso))\b/.test(t)
+    /\b(vou (tentar|ver|pensar|verificar|conversar|falar|olhar|analisar|decidir|avaliar|procurar|aguardar|esperar)|nao vai dar( pra mim)?|nao da pra mim|nao serve pra mim|nao vai rolar|volto (a falar|depois|mais tarde|pra|para|aqui|a entrar|a chamar)|retorno (depois|mais tarde|em breve)|(entro|entramos) em contato|qualquer coisa (eu )?(volto|chamo|falo|aviso|entro)|depois (eu )?(volto|chamo|falo|marco|vejo|aviso)|fica (pra|para) (depois|quando|outra|outro|a proxima)|(deixa|deixo|vou deixar) (pra|para) (depois|outra|outro|quando|a proxima)|quando eu (for|puder|voltar|tiver|estiver))\b/.test(t)
   return agradece && depois
 }
 
@@ -1440,6 +2139,105 @@ async function naoEntendiSeguidos(admin: Admin, conversationId: string): Promise
   }
 }
 
+/**
+ * A duvida que veio junto do pedido de marcar (16/10/2026, painel de pacientes
+ * simulados).
+ *
+ * "Oi precisa de encaminhamento do clinico pra passar ai pela unimed santos?
+ * queria marcar tbm" abriu a agenda, e a pergunta do encaminhamento ficou sem
+ * resposta; "o Dr. atende bebe? queria marcar mas nao sei se e cedo demais",
+ * o mesmo. A resposta pronta vem em cima da agenda. Se ela e de assunto que a
+ * equipe confirma, a conversa acende para a equipe sem sair do agendamento:
+ * a pessoa continua marcando, e alguem responde a duvida.
+ */
+async function respostaJunto(
+  admin: Admin,
+  clinicId: string,
+  conversationId: string,
+  texto: string,
+): Promise<{ texto: string; chamarEquipe: boolean } | null> {
+  if (!parecePergunta(texto) || assuntoClinico(texto)) return null
+  // "Qualquer unidade, pode ser?" e "na unidade de Higienopolis, teria
+  // terca?" (rodada 2 do painel) nao sao pergunta de endereco: traziam a lista
+  // de enderecos em cima da agenda. A unidade ja vai na agenda.
+  let duvida = texto.replace(/\b(em |na |de )?(qualquer|tanto faz( a)?) (unidade|uma|lugar)\b/gi, ' ')
+  duvida = normalizar(duvida).replace(/\b(na |da |em |a )?unidades?( de| do| da)?\b/g, ' ')
+  for (const u of await opcoesDeAtendimento(admin, clinicId)) {
+    for (const palavra of normalizar(u.name).replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length >= 4)) {
+      duvida = duvida.replace(new RegExp(`\\b${palavra}\\b`, 'g'), ' ')
+    }
+  }
+  const achadas = respostasDaMensagem(duvida, await carregarRespostas(admin, clinicId))
+  const novas: typeof achadas = []
+  for (const a of achadas) if (!(await jaMandada(admin, conversationId, a.resposta))) novas.push(a)
+  if (novas.length === 0) return null
+  const chamarEquipe = novas.some((a) => a.chamarEquipe)
+  return {
+    texto:
+      novas.map((a) => semConviteDoDois(a.resposta)).join('\n\n') +
+      (chamarEquipe ? '\n\n🙋 Sobre a sua dúvida, a nossa equipe confirma por aqui. Enquanto isso, já dá para escolher o horário:' : ''),
+    chamarEquipe,
+  }
+}
+
+/**
+ * A resposta pronta sem o convite do "digite 2" (16/10/2026, rodada 2 do
+ * painel): no meio do agendamento, "Digite 2 para ver os horarios" saiu logo
+ * acima da lista de unidades, em que o 2 e Santos. Ali a pessoa ja esta
+ * marcando, e o convite so confunde.
+ */
+function semConviteDoDois(texto: string): string {
+  return texto
+    .replace(/\s*Para [^.\n]*,\s*digite \*2\*[^.\n]*\./g, '')
+    .replace(/[:,]\s*digite \*2\*[^.\n]*\./gi, '.')
+    .replace(/(^|\s)Digite \*2\*[^.\n]*\./g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+/** A frase pede alguma coisa: pergunta, ou "me passa o endereco". */
+function pareceDuvida(frase: string): boolean {
+  return parecePergunta(frase) || /\b(me passa|me manda|manda|passa|quero saber|gostaria de saber|queria saber|me diz|me fala|me informa)\b/.test(normalizar(frase))
+}
+
+/**
+ * As respostas prontas da mensagem: uma, ou duas quando ela traz duas duvidas
+ * (16/10/2026, painel de pacientes simulados).
+ *
+ * "Quanto tempo dura a consulta? E o retorno e cobrado a parte?" recebia so
+ * "Como e a consulta", e "da pra parar o carro no predio? me passa o endereco"
+ * so os enderecos. A mensagem e lida frase por frase: duas frases que sao
+ * duvida, cada uma com a sua resposta, recebem as duas. "Quanto custa em
+ * Santos?" e uma pergunta so, e os enderecos embaixo do valor seriam ruido;
+ * "Tenho Unimed. Preciso de guia?" tambem, porque a primeira frase conta, e
+ * nao pergunta.
+ */
+function respostasDaMensagem(texto: string, prontas: RespostaPronta[]): RespostaPronta[] {
+  const inteira = acharRespostas(texto, prontas, 1, 1)
+  if (inteira.length === 0) return []
+  const frases = (texto.replace(/\b(dr|dra|sr|sra)\./gi, '$1').match(/[^?!.\n]+[?!.\n]*/g) ?? [])
+    .map((f) => f.trim())
+    .filter((f) => f.split(/\s+/).length >= 2 && (f.endsWith('?') || pareceDuvida(f)))
+  const porFrase: RespostaPronta[] = []
+  for (const frase of frases) {
+    // Empate com a resposta que outra frase ja trouxe (rodada 3 do painel):
+    // "Qual e o endereco de Santos? E tem estacionamento no local?" casava
+    // "local" com Enderecos, e o estacionamento ficava sem resposta. A
+    // segunda candidata da frase entra no lugar.
+    const candidatas = acharRespostas(frase, prontas, 1, 2)
+    const daFrase = candidatas.find((r) => !porFrase.some((p) => p.id === r.id))
+    if (daFrase) porFrase.push(daFrase)
+  }
+  if (porFrase.length >= 2) return porFrase.slice(0, 2)
+  // Uma pergunta so, no meio de frases que contam a historia (rodada 2 do
+  // painel): "Tenho desvio de septo. Meu plano e Porto Saude. A cirurgia de
+  // septo e coberta pelo convenio?" recebeu Convenios, que somava mais
+  // palavras na mensagem inteira. A pergunta manda: Cirurgia.
+  if (frases.length === 1 && porFrase.length === 1) return porFrase
+  return inteira
+}
+
 async function responderPergunta(
   admin: Admin,
   clinicId: string,
@@ -1447,25 +2245,92 @@ async function responderPergunta(
   texto: string,
   textoGeral: string,
 ): Promise<Resultado | null> {
-  const achada = acharResposta(texto, await carregarRespostas(admin, clinicId))
-  if (!achada) return null
+  const prontas = await carregarRespostas(admin, clinicId)
+  const [primeira, segunda] = respostasDaMensagem(texto, prontas)
+  if (!primeira) return null
+  // A segunda que acabou de sair nao volta; a primeira segue as regras de baixo.
+  const outra = segunda && !(await jaMandada(admin, conversationId, segunda.resposta)) ? segunda : null
+  const achada = outra
+    ? {
+        ...primeira,
+        resposta: `${primeira.resposta}\n\n${outra.resposta}`,
+        chamarEquipe: Boolean(primeira.chamarEquipe || outra.chamarEquipe),
+        // Duas respostas juntas nao perguntam a unidade: a pergunta seria de uma so.
+        perguntarUnidade: false,
+      }
+    : primeira
 
-  // A mesma resposta acabou de sair: aponta para ela em vez de repetir o
-  // paragrafo inteiro (ver jaMandada), com as mesmas saidas e a mesma lista.
-  const repetida = await jaMandada(admin, conversationId, achada.resposta)
+  // "A Amil nao" em cima do texto da clinica. Ver avisoDoPlano.
+  const aviso = await avisoDoPlano(admin, clinicId, texto)
+  const lista = {
+    rotulo: 'Ver opções',
+    linhas: [
+      { id: '2', titulo: 'Marcar uma consulta', descricao: 'Consulta nova ou retorno · unidade, dia e horário' },
+      { id: '9', titulo: 'Falar com a equipe', descricao: 'Alguém do consultório responde' },
+      { id: '0', titulo: 'Voltar ao menu' },
+    ],
+  }
+
+  // A mesma resposta pedida de novo vai para a equipe (16/10/2026, painel de
+  // pacientes simulados). Ate aqui o robo apontava "Essa informacao esta logo
+  // acima" - e quem pergunta de novo e quem nao achou a resposta ali. "Entao o
+  // Porto cobre a cirurgia, e isso?" recebeu "esta logo acima", apontando para
+  // os convenios da CONSULTA: soou como um sim. "Nao tem nada sobre
+  // estacionamento ai em cima" recebeu o mesmo "logo acima", duas vezes.
+  // A excecao e o plano que nao e atendido: "mas a Amil nao cobre?" depois dos
+  // convenios ouve o "nao" que faltava, e nao a fila.
+  if (await jaMandada(admin, conversationId, achada.resposta)) {
+    if (aviso && !(await jaMandada(admin, conversationId, aviso))) {
+      await salvarEstado(admin, conversationId, { booking_state: 'menu', booking_options: null, booking_unit_id: null })
+      return { resposta: `${aviso}\n\n${SAIDAS}`, lista }
+    }
+    registrar('duvida_para_equipe')
+    const chamada = await chamarEquipe(admin, conversationId)
+    return {
+      ...chamada,
+      resposta:
+        '🙋 Para não repetir a mesma resposta, passei sua pergunta para a nossa equipe, que responde por aqui.\n\n' +
+        avisoDeHorario(relogioEmFoco ?? new Date()) + '\n\n' + VOLTA,
+    }
+  }
+  const resposta = aviso ? `${aviso}\n\n${achada.resposta}` : achada.resposta
+
+  // Assunto que a equipe confirma (16/10/2026): responde e acende a conversa
+  // para a equipe. Vem antes da pergunta da unidade: a equipe responde do
+  // lugar certo. A conversa NAO vai para a fila: quem perguntou o valor e logo
+  // depois escreveu "queria marcar em Higienopolis terca a tarde" ficava preso
+  // na fila, com o robo calado, ate alguem da equipe aparecer. Acesa, a equipe
+  // ve a pergunta; no menu, a pessoa continua marcando se quiser.
+  if (achada.chamarEquipe) {
+    registrar('duvida_para_equipe')
+    await salvarEstado(admin, conversationId, {
+      booking_state: 'menu',
+      booking_options: null,
+      booking_unit_id: null,
+      menu_sent_at: new Date().toISOString(),
+    })
+    return {
+      resposta:
+        `${resposta}\n\n🙋 Já passei sua pergunta para a nossa equipe, que responde por aqui. ` +
+        `${avisoDeHorario(relogioEmFoco ?? new Date())}\n\n` +
+        'Enquanto isso, se quiser marcar, digite *2*.',
+      atencao: 'atendente',
+      lista,
+    }
+  }
 
   // "Quanto custa?" nao tem resposta unica: depende de onde. O assunto marcado
   // para perguntar a unidade cai na mesma pergunta da opcao 1 do menu, e a
   // resposta e o texto de informacoes do lugar escolhido. Com um lugar so, a
   // pergunta nao existe e vale o texto da propria resposta.
-  if (achada.perguntarUnidade && !repetida) {
+  if (achada.perguntarUnidade) {
     const lugares = await opcoesDeAtendimento(admin, clinicId)
     if (lugares.length > 1) {
       // A resposta vem junto da pergunta (09/10/2026). A Bianca perguntou o
       // valor duas vezes, recebeu duas vezes "para qual atendimento?" e foi
       // embora sem o preco. A resposta cadastrada ja traz o valor de cada
       // lugar; a escolha da unidade fica para quem quer o endereco e o resto.
-      return await perguntarLocalDasInformacoes(admin, clinicId, conversationId, textoGeral, achada.resposta)
+      return await perguntarLocalDasInformacoes(admin, clinicId, conversationId, textoGeral, resposta)
     }
   }
 
@@ -1476,19 +2341,7 @@ async function responderPergunta(
     menu_sent_at: new Date().toISOString(),
   })
 
-  return {
-    resposta: repetida
-      ? `👆 Essa informação está logo acima. Se ficou alguma dúvida, é só perguntar à nossa equipe.\n\n${SAIDAS}`
-      : `${achada.resposta}\n\n${SAIDAS}`,
-    lista: {
-      rotulo: 'Ver opções',
-      linhas: [
-        { id: '2', titulo: 'Marcar uma consulta', descricao: 'Consulta nova ou retorno · unidade, dia e horário' },
-        { id: '9', titulo: 'Falar com a equipe', descricao: 'Alguém do consultório responde' },
-        { id: '0', titulo: 'Voltar ao menu' },
-      ],
-    },
-  }
+  return { resposta: `${resposta}\n\n${SAIDAS}`, lista }
 }
 
 /**
@@ -1574,6 +2427,46 @@ function fraseClinica(clinicId: string) {
   )
 }
 
+/**
+ * Sintoma ou remedio fora de etapa: a frase clinica com o menu, ou uma curta,
+ * quando ela acabou de sair (16/10/2026, painel de pacientes simulados).
+ *
+ * "Entendo, mas e so pra hoje. Uma capsula de 500 nao faz mal, ne?" recebia a
+ * mesma frase e o menu inteiro de novo, logo abaixo do primeiro. Quem insiste
+ * ja leu o menu: precisa ouvir, curto, por que nao e o robo quem responde, e
+ * o que fazer.
+ */
+async function responderAssuntoClinico(
+  admin: Admin,
+  clinicId: string,
+  conversationId: string,
+  saudacao: string,
+): Promise<Resultado> {
+  const frase = fraseClinica(clinicId)
+  if (await jaMandada(admin, conversationId, frase)) {
+    await salvarEstado(admin, conversationId, { booking_state: 'menu', booking_options: null, booking_unit_id: null })
+    return {
+      resposta:
+        `🙏 Entendo a pressa, mas remédio e sintoma só ${perfil().o} pode orientar, depois de examinar. ` +
+        'Se piorar ou for urgente, digite *URGÊNCIA*.\n\n' + SAIDAS,
+      lista: {
+        rotulo: 'Ver opções',
+        linhas: [
+          { id: '2', titulo: 'Marcar uma consulta', descricao: 'Consulta nova ou retorno · unidade, dia e horário' },
+          { id: '9', titulo: 'Falar com a equipe', descricao: 'Alguém do consultório responde' },
+          { id: '0', titulo: 'Voltar ao menu' },
+        ],
+      },
+    }
+  }
+  return await mostrarMenu(
+    admin,
+    conversationId,
+    saudacao,
+    frase + ' Digite *2* para marcar uma consulta ou *3* para falar com a equipe, ou escolha:',
+  )
+}
+
 async function naoEntendi(
   admin: Admin,
   clinicId: string,
@@ -1589,11 +2482,52 @@ async function naoEntendi(
       pergunta
     )
   }
+  // "Nao, perguntei se tem alguem atendendo agora" no meio da agenda (16/10/2026,
+  // rodada 2 do painel) recebia "Nao entendi qual unidade".
+  if (perguntouSeTemAlguem(texto)) return `${presenca(relogioEmFoco ?? new Date())}\n\n${pergunta}`
+  // "E o ultimo da tarde e que horas?" na lista de unidades (rodada 2): a
+  // agenda responde, e a pergunta da etapa continua embaixo.
+  const agenda = await respostaDaAgenda(admin, clinicId, texto)
+  if (agenda) return `${agenda}\n\n${pergunta}`
   const achada = acharResposta(texto, await carregarRespostas(admin, clinicId))
+  // Assunto que a equipe confirma, no meio do agendamento (rodada 2 do painel):
+  // "antes de escolher, quanto custa a consulta?" ouvia que a equipe passa o
+  // valor, e ninguem era chamado - a conversa fechava como resolvida. O evento
+  // faz tratarConversa acender a conversa, e o agendamento segue de pe.
+  if (achada?.chamarEquipe) registrar('chamar_equipe_junto')
   // O texto curto da propria resposta, e nao a pergunta "Santos, SP ou
   // telemedicina?" dos assuntos marcados: fazer outra pergunta a quem ja esta
-  // respondendo uma seria trocar uma confusao por outra.
-  return achada ? `${achada.resposta}\n\n${pergunta}` : `Não entendi. ${pergunta}`
+  // respondendo uma seria trocar uma confusao por outra. Sem o "digite 2": ver
+  // semConviteDoDois.
+  return achada
+    ? `${semConviteDoDois(achada.resposta)}${achada.chamarEquipe ? '\n\n🙋 Sobre isso, a nossa equipe confirma por aqui.' : ''}\n\n${pergunta}`
+    : `Não entendi. ${pergunta}`
+}
+
+/**
+ * "Tem alguem ai?", "alguem online?", "perguntei se tem alguem atendendo" no
+ * meio da frase (16/10/2026, rodada 2 do painel). Ver chamandoAlguem, que e a
+ * mensagem que so pergunta isso.
+ */
+export function perguntouSeTemAlguem(texto: string): boolean {
+  const f = normalizar(texto).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ')
+  return (
+    chamandoAlguem(texto) ||
+    /\b(tem|ha) (alguem|gente|uma pessoa) (ai|online|on line|atendendo|ai agora|por ai|acordad[oa]|pra (me )?(atender|responder))\b/.test(f) ||
+    /\balguem (ai|online|on line|atendendo|ta ai|esta ai)\b/.test(f) ||
+    // "Vcs tao respondendo agora ou e robo?" (rodada 3 do painel).
+    /\b(e|eh|e um|eh um|voce e|vc e|vc eh|falando com|isso e um) (robo|bot|maquina)\b|\b(robo|bot)\b.{0,3}$|\b(tao|estao|ta|esta) (respondendo|atendendo)( agora| ainda)?\b/.test(f) ||
+    /\bperguntei se tem alguem\b/.test(f)
+  )
+}
+
+/** "Estou aqui", com a hora da equipe quando ela nao esta. */
+function presenca(agora: Date): string {
+  return (
+    '👋 Estou aqui! Sou o atendimento automático do consultório: já posso ajudar por aqui, ' +
+    'e para falar com alguém da nossa equipe é só digitar *9*.' +
+    (dentroDoExpediente(agora) ? '' : `\n\n${avisoDeHorario(agora)}`)
+  )
 }
 
 async function perguntarLocalDasInformacoes(
@@ -1746,6 +2680,20 @@ async function chamarEquipe(admin: Admin, conversationId: string): Promise<Resul
   }
 }
 
+/** O operado vai para a equipe, com o pronto-socorro a mao. Ver falouDePosOperatorio. */
+async function recadoDoPosOperatorio(admin: Admin, conversationId: string): Promise<Resultado> {
+  registrar('pos_operatorio')
+  const chamada = await chamarEquipe(admin, conversationId)
+  return {
+    ...chamada,
+    resposta:
+      `💙 Obrigado por escrever! Já passei sua mensagem para a equipe ${perfil().o.replace(/^o /, 'do ')}, ` +
+      'que acompanha o pós-operatório e responde por aqui. Pode já contar o que está acontecendo.\n\n' +
+      `*${prontoSocorro()}*\n\n` +
+      avisoDeHorario(relogioEmFoco ?? new Date()) + '\n\n' + VOLTA,
+  }
+}
+
 /**
  * Pedido de nota fiscal ou recibo de consulta ja feita.
  *
@@ -1790,6 +2738,24 @@ export function pediuOsDoisDocumentos(texto: string): boolean {
 
 export function pediuNotaFiscal(texto: string): boolean {
   const t = normalizar(texto)
+  // Pergunta sobre o consultorio, e nao pedido (16/10/2026, painel): "Tenho
+  // Bradesco. Consigo pedir reembolso? Voces dao recibo ou nota fiscal?" ouviu
+  // "Anotei o pedido de nota fiscal... escreva o nome do paciente e a data da
+  // consulta" - e ele nunca tinha consultado. Com consulta feita na frase
+  // ("da consulta de ontem", "que fiz"), continua sendo pedido.
+  // "Meu plano e Bradesco" nao e consulta feita (rodada 2): so o que fala da
+  // consulta que ja aconteceu desfaz a pergunta.
+  if (
+    parecePergunta(texto) &&
+    // "Da nota fiscal? quero pedir reembolso no bradesco" (rodada 3 do painel),
+    // sem o "voces" na frente, e a mesma pergunta.
+    (/\b(voces|vcs|vc|voce|consultorio|clinica|dr|doutor)\s+(da|dao|emite|emitem|fornece|fornecem|faz|fazem|tem|manda|mandam)\b/.test(t) ||
+      /^(e |mas |ai )?(da|dao|emite|emitem|fornece|fornecem|faz|fazem|tem|aceita)\s+(nota|nf|recibo)\b/.test(t) ||
+      /\breembols\w*\b/.test(t)) &&
+    !/\b(minha consulta|da consulta (de|do|que)|ultima consulta|ontem|semana passada|mes passado|que fiz|que tive|ja fiz|estive|esteve|fomos|fui)\b/.test(t)
+  ) {
+    return false
+  }
   if (/(^|[^a-z])(nf|nfe|nfs|nfse|nfs-e|nota fiscal|notinha)([^a-z]|$)/.test(t)) return true
   return (
     /(preciso|precisava|gostaria|quero|queria|mandar|manda|enviar|envia|solicitar|pedir|nao recebi)[^.?!]{0,30}recibo/.test(t) ||
@@ -1889,6 +2855,57 @@ async function mostrarMinhaConsulta(
         })),
       ),
     },
+  }
+}
+
+/**
+ * A remarcacao na mesma unidade, com o mesmo convenio (16/10/2026, painel de
+ * pacientes simulados).
+ *
+ * Quem remarcava respondia SIM e recebia de novo "em qual unidade?" e
+ * "convenio ou particular?", que a consulta antiga ja dizia: onze mensagens
+ * para trocar a data. Agora vao direto os dias da mesma unidade, e VOLTAR
+ * troca a unidade. Telemedicina, unidade fora do ar ou sem horario: o caminho
+ * de sempre (null).
+ */
+async function remarcarNaMesmaUnidade(
+  admin: Admin,
+  clinicId: string,
+  conversationId: string,
+  appointmentId: string,
+  /**
+   * A frase da pessoa, quando ja diz o dia (16/10/2026, rodada 3 do painel):
+   * "sim, pode ser sexta dia 23 de manha" aceitava o sim e mostrava a lista
+   * inteira, e ele teve de escrever o dia de novo. Ver diasOuHorario.
+   */
+  pedido = '',
+): Promise<Resultado | null> {
+  const { data } = await admin.from('appointments').select('unit_id,patient_id,modality').eq('id', appointmentId).maybeSingle()
+  const antiga = data as { unit_id?: string | null; patient_id?: string | null; modality?: string | null } | null
+  if (!antiga?.unit_id || antiga.modality === 'telemedicina') return null
+  const unidade = (await opcoesDeAtendimento(admin, clinicId)).find((u) => u.id === antiga.unit_id)
+  if (!unidade || (await horariosLivres(admin, clinicId, unidade.id)).horarios.length === 0) return null
+  // O convenio vem num pedido proprio: coluna nova, ver COLUNAS_RECENTES_DA_CONSULTA.
+  let convenio = ''
+  try {
+    const extra = await admin.from('appointments').select('insurance').eq('id', appointmentId).maybeSingle()
+    if (!extra.error) convenio = String((extra.data as { insurance?: string | null } | null)?.insurance ?? '')
+  } catch (erro) {
+    console.warn('Nao consegui ler o convenio da consulta a remarcar', erro)
+  }
+  // O plano antigo que a unidade nao atende mais nao vai junto.
+  if (convenio && !planosDaUnidade(unidade).includes(convenio)) convenio = ''
+  await salvarEstado(admin, conversationId, {
+    booking_patient_id: antiga.patient_id ?? null,
+    booking_insurance: convenio,
+    booking_modality: 'presencial',
+  })
+  const dias = await diasOuHorario(admin, clinicId, conversationId, unidade, pedido)
+  return {
+    ...dias,
+    resposta:
+      `🔄 Vamos achar outra data em *${unidade.name}*${convenio ? `, pela *${convenio}*` : ''}. Para outra unidade, digite VOLTAR.\n\n` +
+      (dias?.resposta ?? ''),
   }
 }
 
@@ -1993,6 +3010,171 @@ async function perguntarPaciente(
 }
 
 /**
+ * O primeiro nome como se fala (16/10/2026, painel de pacientes simulados):
+ * "teo" e o Theo, "elena" e a Helena. Sem acento, sem h mudo, sem letra
+ * dobrada, y como i.
+ */
+function nomeFalado(nome: string): string {
+  return normalizar(nome)
+    .replace(/[^a-z]/g, '')
+    .replace(/^h/, '')
+    .replace(/th/g, 't')
+    .replace(/ph/g, 'f')
+    .replace(/y/g, 'i')
+    .replace(/w/g, 'v')
+    .replace(/(.)\1+/g, '$1')
+}
+
+/** O paciente do telefone citado pelo primeiro nome na frase, quando ha um so. */
+function pacienteCitado(pacientes: Paciente[], texto: string): Paciente | null {
+  const palavras = new Set(normalizar(texto).replace(/[^a-z\s]/g, ' ').split(/\s+/).filter((p) => p.length >= 2).map(nomeFalado))
+  const citados = pacientes.filter((p) => {
+    const primeiro = nomeFalado(p.name.trim().split(/\s+/)[0] ?? '')
+    return primeiro.length >= 2 && palavras.has(primeiro)
+  })
+  return citados.length === 1 ? citados[0] : null
+}
+
+/**
+ * A unidade e o convenio que o pedido de marcar ja diz (16/10/2026, painel de
+ * pacientes simulados).
+ *
+ * "Bom dia! Meu nome e Ana Paula, tenho Unimed Santos. Queria marcar uma
+ * consulta" recebeu a lista das tres unidades - com as duas de Sao Paulo, so
+ * particular, em cima - e depois "convenio ou particular?", com a Unimed que
+ * ela ja tinha dito. O plano diz a unidade (a Unimed Santos so vale em
+ * Santos); a unidade citada pula a lista; o plano que nao e atendido, ou que
+ * nao vale na unidade pedida, e dito antes de qualquer lista. Na duvida, a
+ * lista de sempre: "VOLTAR" troca a unidade em qualquer caso.
+ */
+async function unidadeDoPedido(admin: Admin, clinicId: string, conversationId: string, pedido: string): Promise<Resultado> {
+  // "Sabado de manha": o dia sem horario em nenhuma unidade e dito antes de
+  // qualquer lista (ver semDiaDaSemana).
+  const semODia = await semDiaDaSemana(admin, clinicId, pedido)
+  const resultado = await unidadeDoPedidoSemAviso(admin, clinicId, conversationId, pedido)
+  return semODia && resultado ? { ...resultado, resposta: `${semODia}\n\n${resultado.resposta}` } : resultado
+}
+
+/**
+ * Os dias da unidade, ou ja os horarios do dia que o pedido diz ("terca a
+ * tarde", "sexta dia 23"), quando ele esta na agenda (16/10/2026).
+ */
+async function diasOuHorario(admin: Admin, clinicId: string, conversationId: string, unidade: Unidade, pedido: string): Promise<Resultado> {
+  const t = normalizar(pedido)
+  const citaDia = /\bdia\s+\d{1,2}\b/.test(t) || /\bamanha\b/.test(t) || DIAS_DA_SEMANA.some((d) => new RegExp(`\\b${d}\\b`).test(t))
+  if (citaDia && !/\bsegunda via\b/.test(t)) {
+    const fuso = await fusoDaClinica(admin, clinicId)
+    const { horarios } = await horariosLivres(admin, clinicId, unidade.id)
+    const dias = agruparPorDia(horarios, fuso).map((d) => d.chave)
+    const qual = diaPeloNome(pedido, dias, relogioEmFoco ?? new Date())
+    if (qual >= 0) return await perguntarHorario(admin, clinicId, conversationId, unidade.id, dias[qual], periodoEscrito(pedido))
+  }
+  const lista = await perguntarDia(admin, clinicId, conversationId, unidade)
+  const semana = await avisoDaSemana(admin, clinicId, unidade, pedido)
+  return semana && lista ? { ...lista, resposta: `${semana}\n\n${lista.resposta}` } : lista
+}
+
+/**
+ * "Semana que vem de manha" no pedido (16/10/2026, rodada 2 do painel): a
+ * lista de dias vinha inteira, e a paciente escolheu sozinha entre oito. A
+ * linha de cima diz quais dias da lista sao da semana que vem, e do turno
+ * pedido. Vazio quando o pedido nao fala da semana que vem.
+ */
+async function avisoDaSemana(admin: Admin, clinicId: string, unidade: Unidade, pedido: string): Promise<string> {
+  if (!/\b(semana (que|q) vem|proxima semana|semana seguinte)\b/.test(normalizar(pedido))) return ''
+  const timezone = await fusoDaClinica(admin, clinicId)
+  const { horarios } = await horariosLivres(admin, clinicId, unidade.id)
+  // Os mesmos dias, na mesma ordem, da lista de perguntarDia.
+  const dias = agruparPorDia(horarios, timezone).slice(0, unidade.id === TELE_ID ? MAX_DIAS - 1 : MAX_DIAS)
+  const hoje = new Date(`${(relogioEmFoco ?? new Date()).toLocaleDateString('en-CA', { timeZone: timezone })}T12:00:00Z`)
+  const inicio = new Date(hoje)
+  inicio.setUTCDate(hoje.getUTCDate() + ((8 - hoje.getUTCDay()) % 7 || 7))
+  const fim = new Date(inicio)
+  fim.setUTCDate(inicio.getUTCDate() + 6)
+  const [de, ate] = [inicio, fim].map((d) => d.toISOString().slice(0, 10))
+  const turno = periodoEscrito(pedido)
+  const servem = dias
+    .map((dia, i) => ({ dia, i }))
+    .filter(({ dia }) =>
+      dia.chave >= de && dia.chave <= ate &&
+      (!turno || dia.horarios.some((h) => (formatarHora(h.inicio, timezone) < '12:00') === (turno === 'manha'))),
+    )
+  const quando = `Na semana que vem${turno === 'manha' ? ', de manhã' : turno === 'tarde' ? ', à tarde' : ''}`
+  if (servem.length === 0) return `${quando} não há horário livre nesta unidade. Os próximos dias estão abaixo.`
+  return `${quando}: ${emLista(servem.map(({ dia, i }) => `*${i + 1}* ${formatarDia(dia.horarios[0].inicio, timezone)}`))}.`
+}
+
+async function unidadeDoPedidoSemAviso(admin: Admin, clinicId: string, conversationId: string, pedido: string): Promise<Resultado> {
+  const unidades = await opcoesDeAtendimento(admin, clinicId)
+  if (unidades.length <= 1) return await perguntarUnidade(admin, clinicId, conversationId)
+  const citada = unidadeCitada(unidades, pedido)
+  const comPlano = unidades.filter((u) => planosDaUnidade(u).length > 0)
+  const aceitos = [...new Set(comPlano.flatMap((u) => planosDaUnidade(u)))]
+  const fora = aceitos.length > 0 ? planoNaoAceito(pedido, aceitos) : null
+  const comAviso = async (aviso: string, resultado: Resultado | Promise<Resultado>) => {
+    const r = await resultado
+    return r ? { ...r, resposta: `${aviso}\n\n${r.resposta}` } : r
+  }
+
+  if (fora) {
+    const aviso =
+      `O plano *${fora}* não está entre os convênios atendidos ${perfil().o.replace(/^o /, 'pelo ')}. ` +
+      'A consulta pode ser particular, com recibo para você pedir reembolso ao seu plano.'
+    return await comAviso(aviso, citada ? perguntarConvenioOuDia(admin, clinicId, conversationId, citada) : perguntarUnidade(admin, clinicId, conversationId))
+  }
+
+  // O plano citado, e onde ele vale. O nome das unidades ("santos") nao
+  // identifica plano aqui: e a cidade (ver o ignorar de planoEscolhido).
+  const daCidade = unidades.flatMap((u) => normalizar(u.name).replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)).filter((w) => w.length >= 3)
+  let plano: { nome: string; unidade: Unidade } | null = null
+  for (const u of comPlano) {
+    const planos = planosDaUnidade(u)
+    const qual = planoEscolhido(pedido, planos, daCidade)
+    if (qual !== null && qual < planos.length) {
+      plano = { nome: planos[qual], unidade: u }
+      break
+    }
+  }
+  const particular = /\b(particular|sem convenio|sem plano)\b/.test(normalizar(pedido))
+  // So segue direto se a unidade tem horario: sem, a lista de sempre diz isso.
+  const comHorario = async (u: Unidade) => (await horariosLivres(admin, clinicId, u.id)).horarios.length > 0
+
+  if (plano && citada && citada.id !== plano.unidade.id) {
+    // "Mas Unimed nao e tudo a mesma coisa?" (rodada 3 do painel) recebeu o
+    // mesmo aviso, palavra por palavra. A pergunta tem resposta.
+    const tudoIgual = /\b(tudo igual|mesma coisa|tudo a mesma|nao e tudo|qualquer unimed|todas as unimed)\b/.test(normalizar(pedido)) && /unimed/i.test(plano.nome)
+    const aviso =
+      (tudoIgual ? 'Cada Unimed é uma cooperativa diferente, com rede própria. ' : '') +
+      `Em *${citada.name}* a consulta é particular, com recibo para você pedir reembolso ao seu plano. ` +
+      `A *${plano.nome}* é atendida em *${plano.unidade.name}*.`
+    return await comAviso(aviso, perguntarUnidade(admin, clinicId, conversationId))
+  }
+  if (plano && (await comHorario(plano.unidade))) {
+    await salvarEstado(admin, conversationId, { booking_insurance: plano.nome, booking_modality: 'presencial' })
+    const aviso = citada
+      ? `📍 *${plano.unidade.name}*, pela *${plano.nome}* 👇`
+      : `Pela *${plano.nome}*, ${perfil().o} atende em *${plano.unidade.name}*. Separei a agenda de lá 👇`
+    return await comAviso(aviso, diasOuHorario(admin, clinicId, conversationId, plano.unidade, pedido))
+  }
+  if (citada && particular && (await comHorario(citada))) {
+    await salvarEstado(admin, conversationId, { booking_insurance: '', booking_modality: 'presencial' })
+    return await comAviso(`📍 *${citada.name}*, particular 👇`, diasOuHorario(admin, clinicId, conversationId, citada, pedido))
+  }
+  if (citada && (await comHorario(citada))) {
+    // Unidade so particular: nao ha convenio a perguntar, e o dia do pedido vale.
+    if (planosDaUnidade(citada).length === 0) {
+      await salvarEstado(admin, conversationId, { booking_insurance: '', booking_modality: 'presencial' })
+      return await diasOuHorario(admin, clinicId, conversationId, citada, pedido)
+    }
+    return await perguntarConvenioOuDia(admin, clinicId, conversationId, citada)
+  }
+  // "Preciso de uma consulta o quanto antes": a unidade do primeiro horario.
+  const cedo = await unidadeMaisCedo(admin, clinicId, conversationId, pedido, relogioEmFoco ?? new Date(), 'pedido')
+  if (cedo) return cedo
+  return await perguntarUnidade(admin, clinicId, conversationId)
+}
+
+/**
  * Entrada do agendamento. Pergunta o paciente antes de tudo quando ha mais de
  * um no mesmo telefone; caso contrario segue direto para a unidade.
  */
@@ -2005,6 +3187,12 @@ async function iniciarAgendamento(
   jaAvisouDaOutra = false,
   /** "Marcar mais uma": pergunta para quem, com "Outra criança" (ver OUTRA_CRIANCA). */
   maisUma = false,
+  /**
+   * A frase do pedido, quando ele veio escrito (16/10/2026): o paciente, a
+   * unidade e o convenio que ela ja diz nao sao perguntados de novo. Ver
+   * pacienteCitado e unidadeDoPedido.
+   */
+  pedido = '',
 ): Promise<Resultado> {
   // Ja existe consulta futura para este telefone. Seguir direto para as datas
   // produziria uma segunda consulta em silencio - e na maioria das vezes a
@@ -2040,14 +3228,18 @@ async function iniciarAgendamento(
   }
 
   // "Marcar mais uma" pergunta para quem, mesmo com um paciente so: a outra
-  // consulta quase sempre e de outro filho (ver OUTRA_CRIANCA).
+  // consulta quase sempre e de outro filho (ver OUTRA_CRIANCA). Quem ja disse
+  // o nome no pedido ("queria marcar pro teo") nao e perguntado.
   if (pacientes.length > 1 || (maisUma && pacientes.length === 1)) {
-    return await perguntarPaciente(admin, conversationId, pacientes, maisUma)
+    const citado = pedido ? pacienteCitado(pacientes, pedido) : null
+    if (!citado) return await perguntarPaciente(admin, conversationId, pacientes, maisUma)
+    await salvarEstado(admin, conversationId, { booking_patient_id: citado.id })
+  } else {
+    await salvarEstado(admin, conversationId, {
+      booking_patient_id: pacientes[0]?.id ?? null,
+    })
   }
-  await salvarEstado(admin, conversationId, {
-    booking_patient_id: pacientes[0]?.id ?? null,
-  })
-  return await perguntarUnidade(admin, clinicId, conversationId)
+  return pedido ? await unidadeDoPedido(admin, clinicId, conversationId, pedido) : await perguntarUnidade(admin, clinicId, conversationId)
 }
 
 /**
@@ -2061,6 +3253,16 @@ async function iniciarAgendamento(
  */
 const DIAS_DA_SEMANA = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado']
 
+/** "Sesta feira", "tersa" (rodada 3 do painel): o dia como se escreve. */
+function semErroNosDias(t: string): string {
+  return t
+    .replace(/\bsesta\b/g, 'sexta')
+    .replace(/\btersa\b/g, 'terca')
+    .replace(/\bqinta\b/g, 'quinta')
+    .replace(/\bsabdo\b/g, 'sabado')
+    .replace(/\bsegunda feira\b/g, 'segunda')
+}
+
 /**
  * O dia pelo nome: "sexta pela manha", "quarta", "amanha", "dia 14"
  * (09/10/2026).
@@ -2071,9 +3273,23 @@ const DIAS_DA_SEMANA = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sext
  * continua ali. Devolve o indice na lista, ou -1.
  */
 export function diaPeloNome(texto: string, dias: string[], agora = new Date()): number {
-  const t = normalizar(texto)
+  const t = semErroNosDias(normalizar(texto))
   const semana = (chave: string) => new Date(`${chave}T12:00:00Z`).getUTCDay()
   const citados = DIAS_DA_SEMANA.filter((d) => new RegExp(`\\b${d}\\b`).test(t))
+  // O dia do mes vence o da semana (16/10/2026, painel): "sexta dia 23" abria
+  // a primeira sexta da lista, a 16, e um toque remarcaria para o dia errado.
+  // "Quinta 22" (sem o "dia") vale igual; "quinta 14h" e hora, e fica de fora.
+  // Dia da semana e do mes que nao batem ("sexta dia 22", numa quinta): nenhum,
+  // e a lista volta - chutar um dos dois erraria metade das vezes.
+  const doMes =
+    t.match(/\bdia\s+(\d{1,2})\b/) ??
+    t.match(new RegExp(`\\b(?:${DIAS_DA_SEMANA.join('|')})\\b(?:\\s*feira)?[\\s,]+(?:dia\\s+)?(\\d{1,2})\\b(?!\\s*(?:h\\b|hs\\b|horas|:|\\/))`))
+  if (doMes) {
+    const doDia = dias.filter((chave) => Number(chave.slice(8, 10)) === Number(doMes[1]))
+    if (doDia.length !== 1) return -1
+    if (citados.length === 1 && semana(doDia[0]) !== DIAS_DA_SEMANA.indexOf(citados[0])) return -1
+    return dias.indexOf(doDia[0])
+  }
   if (citados.length === 1) {
     const alvo = DIAS_DA_SEMANA.indexOf(citados[0])
     return dias.findIndex((chave) => semana(chave) === alvo)
@@ -2140,12 +3356,90 @@ function unidadeCitada(unidades: Unidade[], texto: string): Unidade | null {
   // "nao quero santos", "santos nao da" (segunda rodada do painel): a unidade
   // negada nao e escolhida. Sem isso, "nao precisa ser em santos" abria as
   // datas de Santos. Basta um "nao" ate quatro palavras antes, ou logo depois.
+  // So as palavras de quem recusa podem ficar entre o "nao" e a unidade
+  // (rodada 3 do painel): "nao aceita no Tatuape mesmo?" e pergunta, e o
+  // "nao" de "aceita" tirava o Tatuape da frase.
   const negada = (p: string) => {
     const palavras = t.trim().split(' ')
-    return palavras.some((w, i) => w === p && (palavras.slice(Math.max(0, i - 4), i).includes('nao') || palavras[i + 1] === 'nao'))
+    return palavras.some((w, i) => {
+      if (w !== p) return false
+      if (palavras[i + 1] === 'nao') return true
+      const antes = palavras.slice(Math.max(0, i - 4), i)
+      const j = antes.lastIndexOf('nao')
+      return j >= 0 && antes.slice(j + 1).every((x) => PODE_FICAR_NA_RECUSA.has(x))
+    })
   }
   const citadas = unidades.filter((u) => palavrasDe(u).some((p) => quantas.get(p) === 1 && t.includes(` ${p} `) && !negada(p)) || apelido(u))
-  return citadas.length === 1 ? citadas[0] : null
+  if (citadas.length > 0) return citadas.length === 1 ? citadas[0] : null
+
+  // Erro de digitacao no nome (16/10/2026, painel): "higienopoli" mandava os
+  // enderecos e tirava a lista. Uma ou duas letras de diferenca no fim, ou uma
+  // letra trocada em palavra comprida, ainda e a mesma unidade. So quando
+  // nenhum nome exato apareceu: "santos" e Santos, e nao Santo Andre.
+  const daMensagem = t.trim().split(' ')
+  const parecida = (p: string) =>
+    daMensagem.some(
+      (w) =>
+        w !== p &&
+        w.length >= 5 &&
+        !negada(w) &&
+        ((p.startsWith(w) && p.length - w.length <= 2) || (w.startsWith(p) && w.length - p.length <= 2) || (w.length >= 6 && umaLetraDeDiferenca(w, p))),
+    )
+  const parecidas = unidades.filter((u) => palavrasDe(u).some((p) => quantas.get(p) === 1 && parecida(p)))
+  return parecidas.length === 1 ? parecidas[0] : null
+}
+
+/** Entre o "nao" e a unidade recusada ("nao quero ir em Santos"). Ver unidadeCitada. */
+const PODE_FICAR_NA_RECUSA = new Set([
+  'quero', 'queria', 'prefiro', 'vou', 'precisa', 'preciso', 'ser', 'ir', 'em', 'no', 'na', 'pra', 'para', 'o', 'a',
+  'la', 'de', 'do', 'da', 'e', 'eh', 'mais', 'mesmo', 'marcar', 'consulta', 'posso', 'consigo',
+])
+
+/**
+ * A unidade em andamento recusada ("nao quero em Santos, e longe", "Santos nao
+ * da") (16/10/2026, rodada 3 do painel). Ver unidadeCitada.
+ */
+function negouAUnidade(texto: string, unidade: Unidade): boolean {
+  const t = ` ${normalizar(texto).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()} `
+  const palavras = t.trim().split(' ')
+  const daUnidade = normalizar(unidade.name).replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((p) => p.length >= 4 && !PALAVRAS_GENERICAS_DE_UNIDADE.has(p))
+  return palavras.some((w, i) => {
+    // "Unimed Santos" e o plano, e nao a unidade.
+    if (!daUnidade.includes(w) || palavras[i - 1] === 'unimed') return false
+    if (palavras[i + 1] === 'nao') return true
+    const antes = palavras.slice(Math.max(0, i - 4), i)
+    const j = antes.lastIndexOf('nao')
+    return j >= 0 && antes.slice(j + 1).every((x) => PODE_FICAR_NA_RECUSA.has(x))
+  })
+}
+
+/** As duas palavras diferem em uma letra so (trocada, a mais ou a menos). */
+function umaLetraDeDiferenca(a: string, b: string): boolean {
+  if (Math.abs(a.length - b.length) > 1) return false
+  let i = 0
+  while (i < a.length && i < b.length && a[i] === b[i]) i++
+  if (a.length === b.length) return a.slice(i + 1) === b.slice(i + 1)
+  return a.length > b.length ? a.slice(i + 1) === b.slice(i) : a.slice(i) === b.slice(i + 1)
+}
+
+/**
+ * Troca de unidade no meio dos dias ou dos horarios (16/10/2026, painel): "nao,
+ * higienopolis", com a lista de Santos na tela, recebia os enderecos. O nome
+ * exato continua valendo (ver unidadePeloNome); o "nao" do comeco e correcao,
+ * e nao negacao da unidade que vem depois.
+ */
+async function trocaDeUnidade(admin: Admin, clinicId: string, texto: string): Promise<Unidade | null> {
+  const exata = await unidadePeloNome(admin, clinicId, texto)
+  if (exata) return exata
+  const resto = normalizar(texto)
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^(nao|errei|opa|ops)\s+/, '')
+    .replace(/^(eu )?(quero|queria|prefiro|melhor|pode ser|seria|era)\s+/, '')
+    .replace(/^(em|no|na|pra|para|a|o|unidade|unidade de|de)\s+/, '')
+  if (!resto || resto.split(' ').length > 3) return null
+  return unidadeCitada(await opcoesDeAtendimento(admin, clinicId), resto)
 }
 
 /**
@@ -2196,6 +3490,44 @@ export function desistiuComCerteza(texto: string): boolean {
   )
 }
 
+/**
+ * Recusa do horario ou do dia citado (16/10/2026, painel de pacientes
+ * simulados): "17:20 nao da pra mim, deixa. vlw" saiu marcado as 17:20. A hora
+ * estava na frase, e o "nao da" nao era lido.
+ *
+ * Devolve o que vem depois da recusa, a partir da virgula ou do "so", "mas",
+ * "prefiro": em "14h nao posso, so 16h" o pedido e as 16h. Sem nada depois, a
+ * pessoa so recusou. Pergunta nao e recusa: "as 14h nao da?" pede as 14h.
+ */
+export function recusaDeEscolha(texto: string): { depois: string } | null {
+  if (texto.includes('?')) return null
+  const t = normalizar(texto)
+  const m = t.match(/\b(nao|nem)\s+(da|serve|posso|consigo|rola|vai dar|fica bom|e bom|me serve|da certo|tenho como|vou conseguir|vou poder|funciona)\b/)
+  if (!m) return null
+  const resto = t.slice((m.index ?? 0) + m[0].length)
+  const separador = resto.search(/[,;.!]|\s(mas|so|somente|apenas|prefiro|pode ser|melhor|quero|queria|entao|tem)\s/)
+  return { depois: separador >= 0 ? resto.slice(separador) : '' }
+}
+
+/**
+ * "Nao quero marcar, cancela isso" no meio da ficha (16/10/2026, painel): a
+ * pessoa desistiu da consulta que acabou de marcar. Estreita de proposito: na
+ * ficha, "nao sei" e "deixa pra la" sao pular a pergunta, e nao desmarcar.
+ */
+function desistiuDaConsultaNaFicha(texto: string): boolean {
+  const t = normalizar(texto).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim()
+  return (
+    /\b(cancela|cancele|cancelar|desmarca|desmarque|desmarcar)( (isso|tudo|essa|esta|a|o|consulta|agendamento|marcacao|horario|por favor|pf|pfv))*$/.test(t) ||
+    /\bnao (quero|vou|preciso) (mais )?(marcar|agendar|a consulta|essa consulta|consulta)\b/.test(t) ||
+    /\b(desisti|desisto)\b/.test(t)
+  )
+}
+
+/** "deixa", "vlw", "obrigada" junto da recusa: a pessoa encerrou. */
+function encerrouComARecusa(texto: string): boolean {
+  return desistiuDoAgendamento(texto) || /\b(deixa|deixe|esquece|vlw|valeu|obrigad|agradec)/.test(normalizar(texto))
+}
+
 async function sairDoAgendamento(
   admin: Admin,
   conversationId: string,
@@ -2215,6 +3547,338 @@ async function sairDoAgendamento(
     }
   }
   return { resposta: 'Tudo bem, não marquei nada. Quando quiser, é só escrever por aqui. 💙', concluida: true }
+}
+
+/** O primeiro horario livre de cada unidade fisica, do mais cedo para o mais tarde. */
+async function primeirosHorarios(admin: Admin, clinicId: string): Promise<{ unidade: Unidade; horarios: Horario[] }[]> {
+  const unidades = (await opcoesDeAtendimento(admin, clinicId)).filter((u) => u.id !== TELE_ID)
+  const com = await Promise.all(unidades.map(async (u) => ({ unidade: u, horarios: (await horariosLivres(admin, clinicId, u.id)).horarios })))
+  return com.filter((c) => c.horarios.length > 0).sort((a, b) => a.horarios[0].inicio.localeCompare(b.horarios[0].inicio))
+}
+
+/** "a, b e c". */
+function emLista(itens: string[]): string {
+  return itens.length > 1 ? `${itens.slice(0, -1).join(', ')} e ${itens.at(-1)}` : (itens[0] ?? '')
+}
+
+/** "8h" ou "08:20", como a pessoa pediu. */
+function horaFalada(pedida: { hora: number; minuto: number | null }): string {
+  return pedida.minuto === null ? `${pedida.hora}h` : `${String(pedida.hora).padStart(2, '0')}:${String(pedida.minuto).padStart(2, '0')}`
+}
+
+/** Os horarios na hora pedida; sem os minutos, a hora inteira (8h = 08:00 e 08:40). */
+function naHoraPedida(horarios: Horario[], pedida: { hora: number; minuto: number | null }, timezone: string): Horario[] {
+  return horarios.filter((h) => {
+    const [hh, mm] = formatarHora(h.inicio, timezone).split(':').map(Number)
+    return hh === pedida.hora && (pedida.minuto === null || mm === pedida.minuto)
+  })
+}
+
+/**
+ * O primeiro horario livre na hora pedida, em cada unidade, do mais cedo para
+ * o mais tarde (16/10/2026, rodada 2 do painel). "E as 8 da manha tem?" foi
+ * para a equipe como "nao entendi", e "qualquer uma que tenha as 8h" abriu a
+ * unidade que so atende a tarde, porque era a de horario mais cedo.
+ */
+async function ondeTemNaHora(
+  admin: Admin,
+  clinicId: string,
+  pedida: { hora: number; minuto: number | null },
+): Promise<{ unidade: Unidade; horario: Horario }[]> {
+  const timezone = await fusoDaClinica(admin, clinicId)
+  return (await primeirosHorarios(admin, clinicId))
+    .map((c) => ({ unidade: c.unidade, horario: naHoraPedida(c.horarios, pedida, timezone)[0] }))
+    .filter((c): c is { unidade: Unidade; horario: Horario } => Boolean(c.horario))
+    .sort((a, b) => a.horario.inicio.localeCompare(b.horario.inicio))
+}
+
+/**
+ * Hora ou turno pedido no passo do dia, sem o dia (16/10/2026, rodada 2 do
+ * painel): "nao, quero de manha as 8h" no Tatuape, que so atende a tarde,
+ * ouviu "Nao entendi". Diz os dias da lista que tem; sem nenhum, as unidades
+ * que tem.
+ */
+async function diasComAHora(
+  admin: Admin,
+  clinicId: string,
+  unidadeId: string,
+  dias: string[],
+  pedida: { hora: number; minuto: number | null } | null,
+  turno: 'manha' | 'tarde' | null,
+): Promise<Resultado | null> {
+  // Entendeu so metade (a hora, e nao o dia): com a equipe conversando, cala
+  // como um nao entendi (ver tratarConversa). A hora pode ser para a secretaria.
+  registrar('nao_entendi', 'hora_sem_dia')
+  const timezone = await fusoDaClinica(admin, clinicId)
+  const serve = (h: Horario) =>
+    pedida ? naHoraPedida([h], pedida, timezone).length > 0 : (formatarHora(h.inicio, timezone) < '12:00') === (turno === 'manha')
+  const { horarios } = await horariosLivres(admin, clinicId, unidadeId)
+  const doPedido = horarios.filter(serve)
+  const nome = pedida ? `Às ${horaFalada(pedida)}` : turno === 'manha' ? 'De manhã' : 'À tarde'
+  const naLista = dias
+    .map((chave, i) => ({ chave, i }))
+    .filter(({ chave }) => doPedido.some((h) => chaveDoDia(h.inicio, timezone) === chave))
+  if (naLista.length === dias.length && dias.length > 0) {
+    return { resposta: `${nome} há horário em todos os dias da lista acima. Responda com o número do dia.` }
+  }
+  if (naLista.length > 0) {
+    const rotulos = naLista.map(({ chave, i }) => `*${i + 1}* ${formatarDia(`${chave}T12:00:00Z`, 'UTC')}`)
+    return { resposta: `${nome}, nesta unidade, há horário nestes dias: ${emLista(rotulos)}.\n\nResponda com o número do dia.` }
+  }
+  const unidade = (await opcoesDeAtendimento(admin, clinicId)).find((u) => u.id === unidadeId)
+  const outras = (await primeirosHorarios(admin, clinicId))
+    .filter((c) => c.unidade.id !== unidadeId)
+    .map((c) => ({ unidade: c.unidade, horario: c.horarios.find(serve) }))
+    .filter((c): c is { unidade: Unidade; horario: Horario } => Boolean(c.horario))
+    .sort((a, b) => a.horario.inicio.localeCompare(b.horario.inicio))
+  const aqui = `Em *${unidade?.name ?? 'esta unidade'}* não há horário livre ${pedida ? `às ${horaFalada(pedida)}` : turno === 'manha' ? 'de manhã' : 'à tarde'}.`
+  return {
+    resposta: outras.length
+      ? `${aqui} ${nome} há em ${descreverOndeTem(outras, timezone)}.\n\n` +
+        'Digite VOLTAR para escolher outra unidade, ou responda com o número de um dia da lista acima.'
+      : `${aqui} Nas outras unidades também não há.\n\n` +
+        'Responda com o número de um dia da lista acima, ou digite *9* para falar com a nossa equipe.',
+    botoes: [
+      { id: 'VOLTAR', titulo: 'Outra unidade' },
+      { id: '9', titulo: 'Falar com a equipe' },
+      { id: '0', titulo: 'Voltar ao menu' },
+    ],
+  }
+}
+
+/** "*Santos · Boqueirao* (sexta, 16/10 as 08:00) e *Higienopolis* (terca, 20/10 as 08:00)". */
+function descreverOndeTem(lista: { unidade: Unidade; horario: Horario }[], timezone: string): string {
+  return emLista(lista.map((c) => `*${c.unidade.name}* (${formatarData(c.horario.inicio, timezone)})`))
+}
+
+/**
+ * Os dias e horarios de cada unidade, lidos dos horarios livres (16/10/2026,
+ * rodada 2 do painel). "E qual o ultimo horario do dia? So saio do trabalho as
+ * 18h", "ate que horas o doutor atende?" e "e em SP ele atende que dia?"
+ * ouviram "nao entendi" ou o texto geral "de segunda a sexta, conforme a
+ * unidade". Vem da agenda aberta, entao diz o que da para marcar, e nao o que
+ * um texto fixo prometeu. Vazio sem horario livre nenhum.
+ */
+async function resumoDaAgenda(admin: Admin, clinicId: string): Promise<string> {
+  const timezone = await fusoDaClinica(admin, clinicId)
+  const todas = await primeirosHorarios(admin, clinicId)
+  if (todas.length === 0) return ''
+  const NOMES = ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado']
+  const diaDaSemana = (h: Horario) => new Date(`${chaveDoDia(h.inicio, timezone)}T12:00:00Z`).getUTCDay()
+  let ultimo = ''
+  const linhas = todas.map(({ unidade, horarios }) => {
+    const porDia = new Map<number, string[]>()
+    for (const h of horarios) porDia.set(diaDaSemana(h), [...(porDia.get(diaDaSemana(h)) ?? []), formatarHora(h.inicio, timezone)])
+    const partes = [...porDia.entries()]
+      // Segunda primeiro: a semana do consultorio.
+      .sort((a, b) => ((a[0] + 6) % 7) - ((b[0] + 6) % 7))
+      .map(([dia, horas]) => {
+        const ordem = [...new Set(horas)].sort()
+        const primeiro = ordem[0]
+        const fim = ordem[ordem.length - 1]
+        if (fim > ultimo) ultimo = fim
+        const turno = fim < '12:00' ? 'de manhã' : primeiro >= '12:00' ? 'à tarde' : 'de manhã e à tarde'
+        return `${NOMES[dia]} ${turno}, das ${primeiro} às ${fim}`
+      })
+    return `• *${unidade.name}*: ${emLista(partes)}`
+  })
+  const fimDeSemana = todas.some((c) => c.horarios.some((h) => [0, 6].includes(diaDaSemana(h))))
+  return (
+    '🕐 *Dias e horários com vaga*\n\n' +
+    `${linhas.join('\n')}\n\n` +
+    `O horário é o começo da consulta: a última do dia começa às ${ultimo}.` +
+    (ultimo <= '18:00' ? (fimDeSemana ? ' Não há atendimento à noite.' : ' Não há atendimento à noite nem aos fins de semana.') : '') +
+    // O horario da equipe tambem (rodada 3 do painel): quem perguntou do
+    // atendimento nao soube quando alguem responde por aqui.
+    `\n\nA nossa equipe responde por aqui de ${EXPEDIENTE.texto}.`
+  )
+}
+
+/**
+ * Pergunta sobre a agenda, e nao pedido de marcar (16/10/2026, rodada 2): "qual
+ * o ultimo horario do dia?", "ate que horas o doutor atende?", "em sp ele
+ * atende que dia?", "voces abrem sabado?". "Qual o primeiro horario" fica com
+ * perguntouMaisCedo: ali a resposta e a vaga, e nao o resumo.
+ */
+function perguntouDaAgenda(texto: string): boolean {
+  // "Ate q horas" (rodada 3 do painel): o "q" e "que".
+  const t = normalizar(texto).replace(/[^a-z0-9\s]/g, ' ').replace(/\bq\b/g, 'que').replace(/\s+/g, ' ')
+  return (
+    /\b(ultimo|ultima) (horario|consulta|vaga|atendimento)\b/.test(t) ||
+    /\bultimo da (tarde|manha)\b/.test(t) ||
+    /\bate que (horas|hora|horario)\b/.test(t) ||
+    /\b(que|quais|qual|em que) (dia|dias)\b( \w+){0,5} (atende|atendem|tem|ha|abre|abrem|funciona|funcionam|fica)\b/.test(t) ||
+    /\b(atende|atendem|abre|abrem|funciona|funcionam)\b( \w+){0,4} (que|quais|qual) (dia|dias|horario|horarios)\b/.test(t) ||
+    /\b(que|qual) (horas|horario) (ele |o dr |o doutor |o medico |voces |vcs )?(atende|atendem|comeca|abre|abrem|fecha|fecham|termina)\b/.test(t) ||
+    /\b(abre|abrem|atende|atendem|funciona|funcionam)\b( \w+){0,3} (sabado|sabados|domingo|fim de semana|final de semana|a noite|de noite)\b/.test(t)
+  )
+}
+
+/**
+ * A resposta a pergunta de agenda, ou vazio quando nao e pergunta de agenda:
+ * a hora pedida ("tem as 8h?") ou o resumo dos dias. Ver resumoDaAgenda.
+ */
+async function respostaDaAgenda(
+  admin: Admin,
+  clinicId: string,
+  texto: string,
+  /** O resumo ja saiu ha pouco: nao vai de novo, logo abaixo do primeiro. */
+  jaTemResumo = false,
+): Promise<string> {
+  // Remedio e sintoma ficam com a trava clinica, mesmo com hora na frase.
+  if (assuntoClinico(texto)) return ''
+  const t = normalizar(texto).replace(/\bq\b/g, 'que')
+  // "E aqui no whats voces respondem ate que horas?" (rodada 3 do painel): e o
+  // horario da equipe, e nao o da agenda. Recebeu a saudacao e o menu.
+  if (/\b(respond\w*|whats\w*|zap|por aqui|conversa|chat)\b/.test(t) && /\b(ate que horas?|que horas?|horario)\b/.test(t) && !/\b(consulta|doutor|dr|medico|atende)\b/.test(t)) {
+    return `A nossa equipe responde por aqui de ${EXPEDIENTE.texto}. Fora desse horário, o atendimento automático marca consultas e tira dúvidas.`
+  }
+  const resumo = async () => (jaTemResumo ? '' : await resumoDaAgenda(admin, clinicId))
+  const comResumo = async (frase: string) => {
+    const r = await resumo()
+    return r ? `${frase}\n\n${r}` : frase
+  }
+  const pedida = horaEscrita(texto)
+  // "E qual o ultimo horario do dia? So saio do trabalho as 18h" (rodada 2):
+  // a pergunta e o ultimo horario, e o 18h e contexto.
+  if (perguntouDaAgenda(texto) && /\b(ultimo|ultima)\b|\bate que horas?\b/.test(t)) {
+    const timezone = await fusoDaClinica(admin, clinicId)
+    const horas = (await primeirosHorarios(admin, clinicId)).flatMap((c) => c.horarios.map((h) => formatarHora(h.inicio, timezone))).sort()
+    const ultimo = horas[horas.length - 1]
+    if (ultimo) {
+      const [hh, mm] = ultimo.split(':').map(Number)
+      const depoisDoUltimo = pedida && pedida.hora * 60 + (pedida.minuto ?? 0) > hh * 60 + mm
+      const aviso = depoisDoUltimo ? `Às ${horaFalada(pedida)} já não há horário. ` : ''
+      const r = await resumo()
+      // O resumo ja diz a ultima do dia; sem ele, a frase diz.
+      if (r) return aviso ? `${aviso.trim()}\n\n${r}` : r
+      return `${aviso}A última consulta do dia começa às ${ultimo}. Os dias de cada unidade estão logo acima 👆`
+    }
+  }
+  if (pedida && (parecePergunta(texto) || /\b(tem|teria|ha|existe)\b/.test(t)) && !pediuParaMarcar(texto)) {
+    const timezone = await fusoDaClinica(admin, clinicId)
+    const onde = await ondeTemNaHora(admin, clinicId, pedida)
+    if (onde.length > 0) return `Tem, sim 🙂 Às ${horaFalada(pedida)}, o primeiro horário livre de cada unidade é: ${descreverOndeTem(onde, timezone)}.`
+    return await comResumo(`Às ${horaFalada(pedida)} não há horário em nenhuma unidade.`)
+  }
+  // "Mas e sabado? Tem ou nao?" (rodada 2 do painel): sim ou nao, e nao o
+  // texto geral de novo.
+  if (/\b(sabados?|domingos?|fim de semana|final de semana)\b/.test(t) && parecePergunta(texto)) {
+    const timezone = await fusoDaClinica(admin, clinicId)
+    const noFim = (await primeirosHorarios(admin, clinicId)).flatMap((c) => {
+      const h = c.horarios.find((x) => [0, 6].includes(new Date(`${chaveDoDia(x.inicio, timezone)}T12:00:00Z`).getUTCDay()))
+      return h ? [{ unidade: c.unidade, horario: h }] : []
+    })
+    if (noFim.length > 0) return `Tem, sim 🙂 No fim de semana, o primeiro horário livre é: ${descreverOndeTem(noFim, timezone)}.`
+    return await comResumo('Não. Aos sábados e domingos não há atendimento em nenhuma unidade.')
+  }
+  if (!perguntouDaAgenda(texto)) return ''
+  const r = await resumo()
+  if (r) return r
+  return 'Os dias e horários estão logo acima 👆'
+}
+
+/**
+ * "Nao tem antes?", "hj nao da?" no meio da agenda (16/10/2026, painel de
+ * pacientes simulados). "So dia 20? Nao tem nada antes? Li que perda de
+ * audicao repentina precisa ser vista logo" abriu os horarios do dia 20, e o
+ * Tatuape tinha horario na quinta. A resposta diz o primeiro horario desta
+ * unidade e, quando outra tem antes, qual e quando. Vazio quando nao ha nada a
+ * dizer.
+ */
+async function informarMaisCedo(
+  admin: Admin,
+  clinicId: string,
+  unidadeId: string,
+  quando: 'hoje' | 'antes',
+  agora: Date,
+): Promise<string> {
+  const timezone = await fusoDaClinica(admin, clinicId)
+  const todas = await primeirosHorarios(admin, clinicId)
+  const desta = todas.find((c) => c.unidade.id === unidadeId)
+  const hoje = agora.toLocaleDateString('en-CA', { timeZone: timezone })
+  const partes: string[] = []
+  if (quando === 'hoje') {
+    const comHoje = todas.filter((c) => c.horarios.some((h) => chaveDoDia(h.inicio, timezone) === hoje))
+    partes.push(comHoje.length === 0 ? 'Hoje não temos horário livre em nenhuma unidade.' : `Hoje há horário em *${comHoje.map((c) => c.unidade.name).join('* e *')}*.`)
+  }
+  if (desta) partes.push(`O primeiro horário em *${desta.unidade.name}* é ${formatarData(desta.horarios[0].inicio, timezone)}.`)
+  const antes = todas.find((c) => c.unidade.id !== unidadeId && (!desta || c.horarios[0].inicio < desta.horarios[0].inicio))
+  if (antes) {
+    partes.push(
+      `Em *${antes.unidade.name}* há antes: ${formatarData(antes.horarios[0].inicio, timezone)}` +
+        `${planosDaUnidade(antes.unidade).length ? '' : ' (particular)'}. Para ir para lá, digite VOLTAR e escolha a unidade.`,
+    )
+  }
+  return partes.join(' ')
+}
+
+/**
+ * "Qual tem horario mais cedo?", "tanto faz, a q tiver mais cedo", "o
+ * primeiro horario disponivel", "a q tiver amanha" (16/10/2026, painel): na
+ * escolha da unidade, isso recebia "Nao entendi qual unidade". Escolhe a
+ * unidade do primeiro horario (de amanha, se a pessoa disse amanha) e diz qual
+ * e quando. Null quando a frase nao e isso, ou quando nao ha horario.
+ */
+async function unidadeMaisCedo(
+  admin: Admin,
+  clinicId: string,
+  conversationId: string,
+  texto: string,
+  agora: Date,
+  /** 'pedido' = a primeira mensagem, que so conta com pressa explicita (ver comPressa). */
+  onde: 'unidade' | 'pedido' = 'unidade',
+): Promise<Resultado | null> {
+  const t = normalizar(texto).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ')
+  // Na lista de unidades, "a primeira" pode ser a unidade 1: so conta
+  // "primeiro horario", "a que tiver", "qual tem pra hoje".
+  const pressa =
+    onde === 'pedido'
+      ? comPressa(texto)
+      : perguntouMaisCedo(texto) !== null ||
+        /\b(qualquer|qlq|tanto faz|o que tiver|a que tiver|a q tiver|o que der|primeiro que tiver|primeira que tiver|o mais rapido|primeiro horario|primeira vaga|primeiro disponivel)\b/.test(t) ||
+        /\bqual tem\b.*\b(horario|vaga|pra|para|hoje|hj|amanha|antes|cedo)\b/.test(t)
+  if (!pressa) return null
+  const timezone = await fusoDaClinica(admin, clinicId)
+  // "Qual o horario mais proximo, Higienopolis ou Tatuape?" (rodada 3 do
+  // painel) recebeu a lista das tres: so as citadas, quando sao duas ou mais.
+  const citadas = (await opcoesDeAtendimento(admin, clinicId)).filter((u) => u.id !== TELE_ID && unidadeCitada([u], texto))
+  const todas = (await primeirosHorarios(admin, clinicId)).filter((c) => citadas.length < 2 || citadas.some((u) => u.id === c.unidade.id))
+  if (todas.length === 0) return null
+  const hoje = agora.toLocaleDateString('en-CA', { timeZone: timezone })
+  const amanha = (() => {
+    const d = new Date(`${hoje}T12:00:00Z`)
+    d.setUTCDate(d.getUTCDate() + 1)
+    return d.toISOString().slice(0, 10)
+  })()
+  const pedido = /\bamanha\b/.test(t) ? amanha : perguntouMaisCedo(texto) === 'hoje' ? hoje : null
+  // "Qualquer uma que tenha as 8h" (rodada 2 do painel): a hora pedida manda.
+  // Sem ela, abria o Tatuape, que so atende a tarde, por ter o horario mais
+  // cedo de todos.
+  const hora = horaEscrita(texto)
+  // O primeiro horario de cada unidade no dia pedido (ou o primeiro de todos).
+  const candidatas = todas
+    .map((c) => {
+      const lista = hora ? naHoraPedida(c.horarios, hora, timezone) : c.horarios
+      return { ...c, primeiro: pedido ? lista.find((h) => chaveDoDia(h.inicio, timezone) === pedido) : lista[0] }
+    })
+    .filter((c): c is typeof c & { primeiro: Horario } => Boolean(c.primeiro))
+    .sort((a, b) => a.primeiro.inicio.localeCompare(b.primeiro.inicio))
+  const quando = pedido ? (pedido === hoje ? 'hoje' : 'amanhã') : ''
+  const aviso =
+    candidatas.length > 0 ? ''
+      : hora ? `Às ${horaFalada(hora)}${quando ? ` de ${quando}` : ''} não temos horário livre em nenhuma unidade. `
+        : pedido ? `${quando === 'hoje' ? 'Hoje' : 'Amanhã'} não temos horário livre em nenhuma unidade. `
+          : ''
+  const escolhida = candidatas[0] ?? { ...todas[0], primeiro: todas[0].horarios[0] }
+  const resultado = await perguntarConvenioOuDia(admin, clinicId, conversationId, escolhida.unidade)
+  return {
+    ...resultado,
+    resposta:
+      `${aviso}${hora && candidatas.length > 0 ? `O primeiro horário às ${horaFalada(hora)} é` : 'O horário mais cedo é'} ` +
+      `em *${escolhida.unidade.name}*: ${formatarData(escolhida.primeiro.inicio, timezone)}. ` +
+      `Para outra unidade, digite VOLTAR.\n\n${resultado?.resposta ?? ''}`,
+  }
 }
 
 async function perguntarUnidade(
@@ -2302,12 +3966,16 @@ async function perguntarUnidade(
     // Reaparecer a pergunta "em qual unidade?" e o momento certo de esquecer:
     // ninguem escolheu nada ainda.
     booking_modality: null,
+    // O convenio tambem (16/10/2026): ele vale numa unidade e nao na outra.
+    // Quem escolhia Santos pela Unimed, dava VOLTAR e escolhia o Tatuape, so
+    // particular, saia com a consulta do Tatuape gravada pela Unimed.
+    booking_insurance: null,
   })
 
   return {
     resposta:
       `📍 *Vamos agendar!* Em qual unidade você prefere ser atendido?\n\n${linhas}\n\n` +
-      `Responda com o número. ${SAIDAS}`,
+      `Responda com o número da unidade. ${SAIDAS}`,
     lista: {
       rotulo: 'Escolher unidade',
       linhas: comVoltar(comAgenda.map((u, i) => ({
@@ -2358,12 +4026,71 @@ const PALAVRAS_GENERICAS_DE_PLANO = new Set(['saude', 'plano', 'planos', 'conven
  * um plano tem ("unimed", "porto", "santa"). Plano e particular citados na
  * mesma frase nao escolhem nada: perguntar de novo e melhor do que chutar.
  */
-function planoEscolhido(texto: string, planos: string[]): number | null {
+/**
+ * A Unimed de outra cidade (16/10/2026, painel de pacientes simulados).
+ *
+ * A Unimed e uma cooperativa por cidade, e o Dr. Fabio atende a Unimed Santos.
+ * "Tenho Unimed Paulistana" casava com "unimed" e escolhia a Unimed Santos: a
+ * consulta saia gravada num convenio que a pessoa nao tem, e a recepcao so
+ * descobriria na chegada. Devolve o nome da outra Unimed ("Unimed
+ * Paulistana"), ou null quando a frase nao cita outra cidade ("unimed e tudo
+ * igual?", "aceita unimed?").
+ */
+const NAO_E_CIDADE = new Set([
+  'e', 'eh', 'ou', 'aceita', 'aceitam', 'vale', 'cobre', 'cobrem', 'tem', 'da', 'de', 'do', 'das', 'dos', 'nao',
+  'sim', 'mesmo', 'msm', 'ai', 'aqui', 'pode', 'serve', 'funciona', 'tambem', 'tb', 'tbm', 'so', 'atende',
+  'atendem', 'plano', 'convenio', 'saude', 'tudo', 'igual', 'ne', 'que', 'pra', 'para', 'por', 'pelo', 'pela',
+  'com', 'agora', 'hoje', 'consulta', 'isso', 'esse', 'essa', 'qualquer', 'vcs', 'voces', 'ja', 'normal',
+])
+
+// As cooperativas e cidades que aparecem depois de "Unimed" (rodada 2 do
+// painel): so a lista de palavras que nao sao cidade deixava passar "Unimed
+// Em" ("pela Unimed, em Santos") e "Unimed Precisa" ("pela unimed precisa de
+// pedido?"). Fora desta lista, so vale o nome escrito com maiuscula.
+const CIDADES_DA_UNIMED = new Set([
+  'paulistana', 'nacional', 'seguros', 'fesp', 'central', 'campinas', 'abc', 'rio', 'bh', 'guarulhos', 'sorocaba',
+  'jundiai', 'ribeirao', 'osasco', 'mogi', 'piracicaba', 'bauru', 'franca', 'araraquara', 'litoral', 'intercambio',
+  'federacao', 'sjc', 'curitiba', 'vitoria', 'fortaleza', 'recife', 'salvador', 'goiania', 'brasilia', 'cuiaba',
+  'londrina', 'maringa', 'joinville', 'blumenau', 'florianopolis', 'belem', 'manaus', 'natal', 'maceio', 'teresina',
+  'aracaju', 'uberlandia', 'contagem', 'santista', 'baixada', 'grande', 'vale', 'norte', 'sul', 'leste', 'oeste',
+])
+const CIDADES_DE_DUAS = [/\bunimed (sao paulo|sao jose|santo andre|porto alegre|belo horizonte|volta redonda|juiz de fora|rio preto)\b/]
+
+function outraUnimed(texto: string, planos: string[]): string | null {
+  const t = normalizar(texto).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ')
+  const aceita = planos.find((p) => /\bunimed\b/.test(normalizar(p)))
+  const daAceita = aceita ? normalizar(aceita).split(/\s+/) : []
+  const titulo = (s: string) => s.split(' ').map((p) => `${p.charAt(0).toUpperCase()}${p.slice(1)}`).join(' ')
+  for (const padrao of CIDADES_DE_DUAS) {
+    const duas = t.match(padrao)
+    if (duas) return `Unimed ${titulo(duas[1])}`
+  }
+  const m = t.match(/\bunimed\s+([a-z]+)/)
+  if (!m || NAO_E_CIDADE.has(m[1]) || daAceita.includes(m[1])) return null
+  if (CIDADES_DA_UNIMED.has(m[1])) return `Unimed ${titulo(m[1])}`
+  // Nome proprio escrito com maiuscula ("Unimed Taubate"), que a lista nao tem.
+  const original = texto.match(/\bUnimed\s+(\p{Lu}\p{Ll}+)/u)
+  return original && normalizar(original[1]) === m[1] ? `Unimed ${original[1]}` : null
+}
+
+function planoEscolhido(
+  texto: string,
+  planos: string[],
+  /**
+   * Palavras que nao identificam plano nesta frase (16/10/2026): no pedido de
+   * marcar, o nome da cidade. "Pelo porto em santos" citava a Unimed Santos
+   * pelo "santos" e empatava com a Porto Saude. O nome inteiro ("unimed
+   * santos") continua valendo.
+   */
+  ignorar: string[] = [],
+): number | null {
   const indice = escolha(texto, planos.length + 1)
   if (indice !== null) return indice
+  // Outra Unimed nao escolhe a Unimed daqui. Ver outraUnimed.
+  if (outraUnimed(texto, planos)) return null
   const t = ` ${normalizar(texto).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()} `
   const palavrasDe = (p: string) =>
-    normalizar(p).replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length >= 3 && !PALAVRAS_GENERICAS_DE_PLANO.has(w))
+    normalizar(p).replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length >= 3 && !PALAVRAS_GENERICAS_DE_PLANO.has(w) && !ignorar.includes(w))
   const quantas = new Map<string, number>()
   for (const p of planos) for (const w of new Set(palavrasDe(p))) quantas.set(w, (quantas.get(w) ?? 0) + 1)
   const citados = planos
@@ -2404,6 +4131,8 @@ const PLANOS_CONHECIDOS: [RegExp, string][] = [
  * plano, e da para ser particular. E o caso que a Dayane mais explica.
  */
 function planoNaoAceito(texto: string, planos: string[]): string | null {
+  const outra = outraUnimed(texto, planos)
+  if (outra) return outra
   const t = ` ${normalizar(texto).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()} `
   const aceitos = planos.map((p) => normalizar(p))
   for (const [padrao, nome] of PLANOS_CONHECIDOS) {
@@ -2413,6 +4142,29 @@ function planoNaoAceito(texto: string, planos: string[]): string | null {
     return nome
   }
   return null
+}
+
+/**
+ * O plano citado que o consultorio nao atende, numa pergunta (16/10/2026,
+ * painel de pacientes simulados).
+ *
+ * "Aceita amil?" recebia o texto geral de convenios, sem um "a Amil nao"; a
+ * paciente perguntou de novo e ouviu "esta logo acima". O texto da clinica
+ * lista o que ela atende; o robo diz o que nao atende, com o nome que a pessoa
+ * escreveu. Vazio quando nao ha plano citado, ou quando ele e atendido.
+ */
+async function avisoDoPlano(admin: Admin, clinicId: string, texto: string): Promise<string> {
+  const t = ` ${normalizar(texto).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()} `
+  if (!PLANOS_CONHECIDOS.some(([padrao]) => padrao.test(t))) return ''
+  const unidades = await opcoesDeAtendimento(admin, clinicId)
+  const aceitos = [...new Set(unidades.flatMap((u) => planosDaUnidade(u)))]
+  if (aceitos.length === 0) return ''
+  const fora = planoNaoAceito(texto, aceitos)
+  if (!fora) return ''
+  return (
+    `O plano *${fora}* não está entre os convênios atendidos ${perfil().o.replace(/^o /, 'pelo ')}. ` +
+    'A consulta pode ser particular, com recibo para você pedir reembolso ao seu plano.'
+  )
 }
 
 /** Primeira etapa da agenda: em que dia. */
@@ -2434,7 +4186,12 @@ async function perguntarConvenioOuDia(
   unidade: Unidade,
 ): Promise<Resultado> {
   const plano = (unidade.accepts_insurance ?? '').trim()
-  if (!plano) return await perguntarDia(admin, clinicId, conversationId, unidade)
+  if (!plano) {
+    // Unidade so particular: nenhum convenio de antes pode ir junto (ver o
+    // booking_insurance de perguntarUnidade).
+    await salvarEstado(admin, conversationId, { booking_insurance: '' })
+    return await perguntarDia(admin, clinicId, conversationId, unidade)
+  }
 
   await salvarEstado(admin, conversationId, {
     booking_state: 'aguardando_convenio',
@@ -2504,10 +4261,20 @@ async function perguntarDia(
   // Na telemedicina uma das oito linhas e a urgencia, entao cabem sete dias.
   const mostrados = dias.slice(0, tele ? MAX_DIAS - 1 : MAX_DIAS)
 
+  // Manha ou tarde em cada dia (16/10/2026, painel de pacientes simulados): a
+  // paciente que queria "semana que vem de manha" escolheu a segunda de Santos,
+  // que so tem tarde, e so descobriu na lista de horarios.
+  const periodoDoDia = (d: { horarios: Horario[] }) => {
+    const horas = d.horarios.map((h) => Number(formatarHora(h.inicio, timezone).slice(0, 2)))
+    const manha = horas.some((h) => h < 12)
+    const tarde = horas.some((h) => h >= 12)
+    return manha && tarde ? 'manhã e tarde' : manha ? 'manhã' : 'tarde'
+  }
+
   const linhas = mostrados
     .map((d, i) => {
       const quantos = d.horarios.length
-      return `*${i + 1}* ${formatarDia(d.horarios[0].inicio, timezone)} (${quantos} ${
+      return `*${i + 1}* ${formatarDia(d.horarios[0].inicio, timezone)} (${periodoDoDia(d)} · ${quantos} ${
         quantos === 1 ? 'horário' : 'horários'
       })`
     })
@@ -2524,9 +4291,12 @@ async function perguntarDia(
 
   // Sem agenda alem da quinzena nao adianta prometer: quem precisa de data
   // distante fala com a equipe, que enxerga o calendario inteiro.
+  // O 9 da lista para tocar e "Falar com a equipe" (rodada 3 do painel): o
+  // texto diz o mesmo, e a data distante e um dos motivos.
+  const nove = geral() ? '*9* para falar com a nossa equipe (para uma data mais distante, por exemplo)' : '*9* se precisar de uma data mais distante'
   const rodape = podeTrocarUnidade
-    ? 'Digite VOLTAR para escolher outra unidade, *9* se precisar de uma data mais distante, ou *0* para o início.'
-    : 'Digite *9* se precisar de uma data mais distante, ou *0* para o início.'
+    ? `Digite VOLTAR para escolher outra unidade, ${nove}, ou *0* para o início.`
+    : `Digite ${nove}, ou *0* para o início.`
 
   // Na telemedicina existe a saida de urgencia: quem nao pode esperar um
   // horario da lista fala com a equipe agora, e a conversa sobe na fila.
@@ -2537,7 +4307,7 @@ async function perguntarDia(
   const linhasDaLista = mostrados.map((d, i) => ({
     id: String(i + 1),
     titulo: formatarDia(d.horarios[0].inicio, timezone),
-    descricao: `${d.horarios.length} horário${d.horarios.length === 1 ? '' : 's'}`,
+    descricao: `${periodoDoDia(d)} · ${d.horarios.length} horário${d.horarios.length === 1 ? '' : 's'}`,
   }))
 
   return {
@@ -2648,13 +4418,15 @@ async function transferirUrgencia(admin: Admin, conversationId: string, agora: D
   if (!dentroDoExpediente(agora)) {
     return { resposta: urgenciaForaDoExpediente(agora), atencao: 'urgencia' }
   }
+  // A primeira frase diz o que fazer (16/10/2026, rodada 2 do painel): "estou
+  // transferindo, a equipe entra em contato com urgencia" deixava a mae do
+  // bebe com a respiracao estranha esperando a mensagem da equipe.
   if (geral()) {
     return {
       resposta:
-        '🚨 Entendi que é urgência. Estou transferindo você para alguém da equipe do ' +
-        'consultório, que vai entrar em contato com urgência por aqui.\n\n' +
-        'Se puder, já escreva o que está acontecendo: a pessoa que assumir o atendimento ' +
-        'lê tudo antes de responder.\n\n' +
+        '🚨 *Entendi que é urgência. Se alguém está passando mal agora, procure atendimento sem esperar a nossa resposta.* ' +
+        'Já avisei a nossa equipe, que fala com você por aqui o mais rápido possível.\n\n' +
+        'Se puder, escreva o que está acontecendo: quem atender lê tudo antes de responder.\n\n' +
         `*${prontoSocorro()}*`,
       atencao: 'urgencia',
     }
@@ -2718,9 +4490,22 @@ function avisoDeSangramento(
    * cairia na pergunta do CPF como "CPF que nao confere".
    */
   convidaAContar = true,
+  /** Sangramento que nao parou, forte ou de pos-operatorio. Ver sangramentoAtivo. */
+  ativo = false,
+  /** A mensagem, para o lembrete dizer o que falta (ver complementoDaUrgencia). */
+  texto = '',
 ): string {
   const quem = perfil().alertaDeSangramento ?? 'a nossa equipe'
-  if (repetido) return `🚨 O alerta já está com ${quem}.\n\n*${prontoSocorro()}*`
+  // "Nao espere" tambem na repeticao (16/10/2026): quem escreve de novo e quem
+  // esta em duvida entre esperar a ligacao e ir (ver lembreteDeUrgencia).
+  if (repetido) return lembreteDeUrgencia('sangramento', texto)
+  if (ativo) {
+    return (
+      `🚨 *Pelo que você contou, procure o pronto-socorro agora, sem esperar a nossa resposta.* Já avisei ${quem} no celular.\n\n` +
+      (dentroDoExpediente(agora) ? '' : avisoDeHorario(agora) + '\n\n') +
+      `*${prontoSocorro()}*`
+    )
+  }
   if (!dentroDoExpediente(agora)) {
     return (
       `🚨 *Já avisei ${quem} no celular.*\n\n` +
@@ -2728,18 +4513,49 @@ function avisoDeSangramento(
       `*Não espere a nossa resposta. ${prontoSocorro()}*`
     )
   }
+  // A regra de decisao vem antes do texto do consultorio (rodada 2 do painel):
+  // so "em caso de urgencia" deixava a pessoa em duvida se o caso dela era.
   return (
     `🚨 *Já avisei ${quem} no celular.* Alguém da equipe fala com você por aqui o mais rápido possível.\n\n` +
-    `*${prontoSocorro()}*` +
+    `*Se o sangramento não parou ou é forte, não espere a nossa resposta. ${prontoSocorro()}*` +
     (convidaAContar ? '\n\nSe puder, escreva aqui o que está acontecendo: quem atender lê tudo antes de responder.' : '')
   )
 }
 
 /**
- * Sangramento em qualquer etapa (15/10/2026). Ver falouDeSangramento.
+ * O que o paciente le quando a mensagem traz um sinal de alarme (16/10/2026).
+ * Ver sinalDeAlarme.
  *
- * A conversa acende com 'sangramento' toda vez: e isso que manda a
- * notificacao para o celular do Dr. Fabio e da Dayane, inclusive na segunda
+ * A primeira frase diz o que fazer, sem condicional: no painel, a orientacao
+ * so com "em caso de urgencia" e "alguem fala com voce o mais rapido
+ * possivel" deixou a paciente em duvida entre esperar e ir. Nenhuma
+ * orientacao de cuidado ("tente tirar", "incline a cabeca"), pelo mesmo
+ * motivo do sangramento: quem orienta e o medico. O 192 so entra para quem
+ * diz que nao tem como ir (ver complementoDaUrgencia).
+ */
+function avisoDeAlarme(tipo: SinalDeAlarme, agora: Date, repetido: boolean, texto = ''): string {
+  // Quem nao consegue ir ("como vou sozinho?") recebe o 192 pelo complemento,
+  // na resposta ao que disse (ver complementoDaUrgencia e LEIA-ME).
+  void tipo
+  // A repeticao e o lembrete da fila de urgencia (ver lembreteDeUrgencia).
+  if (repetido) return lembreteDeUrgencia('urgencia', texto)
+  const primeira = '🚨 *Pelo que você contou, procure atendimento agora, sem esperar pela consulta.*'
+  if (!dentroDoExpediente(agora)) {
+    return (
+      `${primeira} Já deixei avisado para a nossa equipe.\n\n` +
+      avisoDeHorario(agora) + '\n\n' +
+      `*Não espere a nossa resposta. ${prontoSocorro()}*`
+    )
+  }
+  return `${primeira} Já avisei a nossa equipe, que também fala com você por aqui.\n\n*${prontoSocorro()}*`
+}
+
+/**
+ * Sangramento ou sinal de alarme, em qualquer etapa (15/10/2026; o alarme
+ * entrou em 16/10/2026). Ver falouDeSangramento e sinalDeAlarme.
+ *
+ * A conversa acende toda vez, com 'sangramento' ou 'urgencia': e isso que manda
+ * a notificacao para o celular do Dr. Fabio e da Dayane, inclusive na segunda
  * mensagem, que reavisa com o texto novo. O texto para o paciente e que
  * encurta na repeticao: o pronto-socorro inteiro de novo, logo abaixo do
  * primeiro, pareceria que o robo nao leu nada.
@@ -2750,7 +4566,7 @@ function avisoDeSangramento(
  * continua marcando. E na pergunta do motivo da consulta a frase E a
  * resposta: fica guardada, e a ficha segue dali.
  */
-async function alertarSangramento(
+async function alertar(
   admin: Admin,
   clinicId: string,
   conversationId: string,
@@ -2760,14 +4576,25 @@ async function alertarSangramento(
   pacienteDaConsulta: Paciente | null,
   texto: string,
   agora: Date,
+  /** Null = sangramento. */
+  alarme: SinalDeAlarme | null = null,
 ): Promise<Resultado> {
-  registrar('alerta_sangramento')
+  registrar(alarme ? 'sinal_de_alarme' : 'alerta_sangramento', alarme ?? undefined)
+  const atencao = alarme ? 'urgencia' : 'sangramento'
   const emFluxo = Boolean(estadoAtual) && estadoAtual !== 'menu' && estadoAtual !== 'atendente'
-  const completo = avisoDeSangramento(agora, false, !emFluxo)
-  const aviso = (await jaMandada(admin, conversationId, completo)) ? avisoDeSangramento(agora, true) : completo
+  const ativo = !alarme && sangramentoAtivo(texto)
+  const completo = alarme ? avisoDeAlarme(alarme, agora, false) : avisoDeSangramento(agora, false, !emFluxo, ativo)
+  // As duas formas do aviso de sangramento contam: "esta sangrando" e depois
+  // "nao para" recebe o lembrete curto, e nao um segundo aviso inteiro.
+  const jaAvisou =
+    (await jaMandada(admin, conversationId, completo)) ||
+    (!alarme && (await jaMandada(admin, conversationId, avisoDeSangramento(agora, false, !emFluxo, !ativo))))
+  const aviso = jaAvisou
+    ? alarme ? avisoDeAlarme(alarme, agora, true, texto) : avisoDeSangramento(agora, true, true, false, texto)
+    : completo
 
   const pergunta = perguntas().find((p) => p.estado === estadoAtual)
-  if (pergunta?.chave === 'motivo' && (consultaEmCadastro || pacienteDaConsulta)) {
+  if (pergunta?.chave === 'motivo' && (consultaEmCadastro || pacienteDaConsulta) && !ativo) {
     const valor = pergunta.ler(texto)
     if (valor) await guardarDado(admin, consultaEmCadastro, pergunta, valor, pacienteDaConsulta)
     const { faltam, manual } = filaDaFicha(opcoesAtuais)
@@ -2778,16 +4605,27 @@ async function alertarSangramento(
     return {
       ...seguinte,
       resposta: restantes.length ? (seguinte?.resposta ?? aviso) : `${aviso}\n\n${seguinte?.resposta ?? ''}`.trim(),
-      atencao: 'sangramento',
+      atencao,
       // A ficha pode ter terminado aqui, mas a conversa nao: o alerta espera gente.
       concluida: false,
     }
   }
 
-  if (emFluxo) {
+  // Sangramento que nao para, contado no meio da marcacao (rodada 3 do
+  // painel): "para continuar de onde paramos, responda a pergunta acima" ia
+  // embaixo do "procure o pronto-socorro agora", duas vezes. Quem precisa ir
+  // agora sai da etapa e fica com a equipe; quem conta um sangramento antigo
+  // continua marcando.
+  if (emFluxo && !ativo) {
     return {
-      resposta: `${aviso}\n\nPara continuar de onde paramos, é só responder a pergunta acima 👆`,
-      atencao: 'sangramento',
+      resposta:
+        `${aviso}\n\n` +
+        // No alarme, a consulta e para depois: "continuar de onde paramos"
+        // soaria como "termine de marcar antes de ir".
+        (alarme
+          ? 'Se ainda quiser marcar uma consulta para depois, é só responder a pergunta acima 👆'
+          : 'Para continuar de onde paramos, é só responder a pergunta acima 👆'),
+      atencao,
     }
   }
 
@@ -2797,7 +4635,108 @@ async function alertarSangramento(
     booking_unit_id: null,
     auto_replies_while_waiting: 0,
   })
-  return { resposta: aviso, atencao: 'sangramento' }
+  return { resposta: aviso, atencao }
+}
+
+/**
+ * Nova mensagem numa conversa que ja esta na fila por sangramento ou
+ * urgencia (16/10/2026, painel de pacientes simulados).
+ *
+ * "Vou para o pronto-socorro ou espero o Dr. Fabio me ligar?" ficava sem
+ * resposta (a fila so respondia resposta pronta), e "Vou para o pronto-socorro
+ * do hospital onde operei?" recebeu os enderecos do consultorio ("onde") com
+ * "sua conversa continua na fila". Numa conversa assim a resposta e uma so, e
+ * sem condicional: nao espere.
+ */
+function lembreteDeUrgencia(motivo: 'sangramento' | 'urgencia', texto = ''): string {
+  const quem = motivo === 'sangramento' ? (perfil().alertaDeSangramento ?? 'a nossa equipe') : 'a nossa equipe'
+  // Na urgencia, o que fazer de novo, sem condicional (rodada 2 do painel): a
+  // mae do menino com o objeto no nariz escreveu "ele ta respirando normal,
+  // precisa ir agora msm? nao da pra marcar pra amanha?", leu "em caso de
+  // urgencia" e concluiu que o caso dela nao era.
+  const naoEspere =
+    motivo === 'urgencia'
+      ? 'Pelo que você contou, não espere pela consulta nem pela nossa resposta: procure atendimento agora.'
+      // "Nao esta jorrando, sai aos poucos" (rodada 3 do painel) leu o "em caso
+      // de sangramento intenso" do texto do consultorio e concluiu que podia
+      // esperar. A regra vem antes, sem condicional.
+      : 'Não espere a nossa resposta: se ainda está saindo sangue, procure o pronto-socorro agora.'
+  return `🚨 O alerta já está com ${quem}.\n\n*${naoEspere} ${prontoSocorro()}*${complementoDaUrgencia(texto)}`
+}
+
+/**
+ * O que a pessoa disse muda o que falta dizer (16/10/2026, rodada 2 do
+ * painel). Sozinho e sem conseguir levantar, o pronto-socorro repetido tres
+ * vezes nao serve: e o 192, que vai ate ela. Sem plano, o texto do
+ * consultorio (plano ou particular) deixava a mae sem caminho: e a UPA. Vazio
+ * quando nao ha nada a acrescentar.
+ */
+function complementoDaUrgencia(texto: string): string {
+  const t = normalizar(texto).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ')
+  const partes: string[] = []
+  // "Minha mulher ta no trabalho, nao tenho como i" e "vcs pode chama uma
+  // ambulancia?" (rodada 3 do painel) ficaram sem o 192.
+  if (/\b(sozinh[oa]|nao (consigo|consegue|tenho como|tem como|da pra) (ir|i|levantar|levanta|dirigir|andar|sair)|como (eu )?vou|sem carro|sem ninguem|nao tenho quem|ninguem (pra|para) (me )?levar|(ta|esta) no trabalho|ambulancia|samu|resgate)\b/.test(t)) {
+    partes.push('Se não tiver como ir, ligue *192* (SAMU): eles vão até você.')
+  }
+  if (/\b(nao tenho|nao tem|sem) (plano|convenio)\b|\b(sus|upa|publico|publica)\b/.test(t)) {
+    partes.push('Sem plano de saúde, a UPA ou o pronto-socorro público mais próximo atendem.')
+  }
+  // "Nao da pra eu tentar tirar com uma pinca? ou fazer ele assoar forte?"
+  // (rodada 2): a pergunta ficava sem resposta. O robo nao orienta cuidado,
+  // mas diz que nao orienta, e quem orienta.
+  // "Posso ir direto no consultorio do Dr. Fabio?" (rodada 2): o consultorio
+  // nao faz atendimento de urgencia.
+  if (/\bconsultorio\b/.test(t) && /\b(ir|vou|vo|posso|levo|passar)\b/.test(t)) {
+    partes.push('O consultório não faz atendimento de urgência: o certo é o pronto-socorro.')
+  }
+  // "Sozinho em casa" nao e pergunta de cuidado: so o que fazer, tirar, tomar.
+  if (/\b(tirar|tira|tiro|assoar|assoa|pinca|cotonete|pingar|pingo|tomar|tomo|remedio|compressa|gelo|inclino|inclinar|apertar|aperto)\b|\b(fazer|faco|tentar|resolver|tratar) (isso |algo )?em casa\b|\bo que (eu )?(faco|fazer)\b|\boq (eu )?(faco|fazer)\b/.test(t)) {
+    partes.push(`Por aqui não dá para orientar o que fazer em casa: quem orienta é o médico que atender você.`)
+  }
+  return partes.length ? `\n\n${partes.join('\n\n')}` : ''
+}
+
+/**
+ * "Vou agora pro PS", "ja estou no hospital" numa conversa de urgencia
+ * (16/10/2026, rodada 2): recebia o pronto-socorro inteiro de novo e mais uma
+ * notificacao no celular da equipe. A pessoa ja esta indo.
+ */
+function vaiAoProntoSocorro(texto: string): boolean {
+  // "Vou para o pronto-socorro ou espero o Dr. Fabio me ligar?" e a duvida, e
+  // nao a decisao: recebe o "nao espere" (ver lembreteDeUrgencia).
+  if (/\bou (espero|aguardo|fico)\b/.test(normalizar(texto))) return false
+  // A frase que afirma, e nao a que pergunta: "ok to indo pro PS. depois vou
+  // precisar marcar?" esta indo; "eu vou para o pronto-socorro agora?" pergunta.
+  const frases = texto.match(/[^?!.\n]+[?!.\n]*/g) ?? []
+  return frases.some((f) => {
+    if (f.trim().endsWith('?')) return false
+    const t = normalizar(f).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ')
+    // "Vou levar ele na upa agora" (rodada 2): levar tambem e ir.
+    return /\b((vou|vamos|to indo|estou indo|estamos indo|ja estou|ja estamos|cheguei|chegamos|vou levar|vamos levar|to levando|estou levando|estamos levando|levando)( ele| ela| o bebe| a bebe| o nenem)?( agora| ja)? (pro|pra|para o|para a|ao|a|no|na) (ps|pronto socorro|hospital|upa|emergencia))\b|\b(estou|to|estamos) (no|na) (ps|pronto socorro|hospital|upa)\b/.test(t)
+  })
+}
+
+/**
+ * "Ta bom, to indo", numa conversa de urgencia (16/10/2026, rodada 3 do
+ * painel): sem dizer para onde, mas indo. Ver vaiAoProntoSocorro.
+ */
+function indoAgora(texto: string): boolean {
+  const t = normalizar(texto).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ')
+  return !parecePergunta(texto) && /\b(to indo|tou indo|estou indo|ja estou indo|ja to indo|ja vou|vou agora|indo agora|saindo agora|estamos indo|vamos agora)\b/.test(t)
+}
+
+/**
+ * "Qual ps voces indicam?", "pra qual pronto-socorro eu vou?" (16/10/2026,
+ * rodada 3 do painel). A resposta e o texto do consultorio: o pronto-socorro
+ * mais proximo que atenda ao plano.
+ */
+function perguntouDoProntoSocorro(texto: string): boolean {
+  const t = normalizar(texto).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ')
+  return (
+    /\b(qual|quais|que|onde|pra qual|para qual|em qual|indica\w*|recomenda\w*)\b( \w+){0,4} (ps|pronto socorro|hospital|hospitais|upa|emergencia)\b/.test(t) ||
+    /\b(ps|pronto socorro|hospital|upa)\b( \w+){0,3} (indica\w*|recomenda\w*|mais perto|mais proximo|proximo)\b/.test(t)
+  )
 }
 
 /** Segunda etapa: a que horas, dentro do dia escolhido. */
@@ -2807,6 +4746,11 @@ async function perguntarHorario(
   conversationId: string,
   unitId: string,
   diaEscolhido: string,
+  /**
+   * Manha ou tarde, quando a pessoa ja disse ("segunda de manha") ou escolheu
+   * no passo do periodo (16/10/2026). Ver abaixo.
+   */
+  periodo: 'manha' | 'tarde' | null = null,
 ): Promise<Resultado> {
   const timezone = await fusoDaClinica(admin, clinicId)
   const { horarios, falhou } = await horariosLivres(admin, clinicId, unitId)
@@ -2817,21 +4761,63 @@ async function perguntarHorario(
     return { resposta: AVISO_FALHA, atencao: 'falha' }
   }
 
-  let doDia = horarios
-    .filter((h) => chaveDoDia(h.inicio, timezone) === diaEscolhido)
-    .slice(0, MAX_HORARIOS_DIA)
+  let todosDoDia = horarios.filter((h) => chaveDoDia(h.inicio, timezone) === diaEscolhido)
 
   // Dia alem da agenda aberta (14/10/2026): so chega aqui quando a equipe
   // mandou horarios de uma data combinada ("dia 27/11"). A agenda aberta nao
   // enxerga esse dia; o pedido do dia exato enxerga.
-  if (doDia.length === 0) {
+  if (todosDoDia.length === 0) {
     const doPedido = await horariosLivres(admin, clinicId, unitId, { de: diaEscolhido, ate: diaEscolhido })
     if (!doPedido.falhou) {
-      doDia = doPedido.horarios
-        .filter((h) => chaveDoDia(h.inicio, timezone) === diaEscolhido)
-        .slice(0, MAX_HORARIOS_DIA)
+      todosDoDia = doPedido.horarios.filter((h) => chaveDoDia(h.inicio, timezone) === diaEscolhido)
     }
   }
+
+  // Manha e tarde (16/10/2026, painel de pacientes simulados). A lista cortava
+  // o dia em oito horarios: em Higienopolis, terca de manha e de tarde, a
+  // tarde sumia, e "tem as 16h?" ouvia "esse horario nao esta entre os
+  // livres" com 16:00 livre. Agora o dia que nao cabe numa lista mostra um
+  // periodo (o pedido, ou a manha), cita os horarios do outro e oferece "Ver a
+  // tarde" na propria lista; a hora escrita vale para o dia inteiro (ver a
+  // etapa aguardando_horario). Quem disse o periodo ("segunda de manha") vai
+  // direto para ele, e o dia que nao tem esse periodo diz isso.
+  const horaDe = (h: Horario) => Number(formatarHora(h.inicio, timezone).slice(0, 2))
+  const daManha = todosDoDia.filter((h) => horaDe(h) < 12)
+  const daTarde = todosDoDia.filter((h) => horaDe(h) >= 12)
+  const nomeDoDia = todosDoDia[0] ? formatarDia(todosDoDia[0].inicio, timezone) : ''
+  const naoCabe = todosDoDia.length > MAX_HORARIOS_DIA && daManha.length > 0 && daTarde.length > 0
+  let aviso = ''
+  let mostrado: 'manha' | 'tarde' | null = null
+  let doDia = todosDoDia
+  if (periodo || naoCabe) {
+    const pedido = periodo ?? 'manha'
+    const pedidos = pedido === 'manha' ? daManha : daTarde
+    if (pedidos.length > 0) {
+      doDia = pedidos
+      if (pedidos.length < todosDoDia.length) mostrado = pedido
+    } else if (todosDoDia.length > 0) {
+      // O periodo pedido nao existe nesse dia: diz, mostra o outro, e cita os
+      // dias que tem o pedido.
+      const outrosDias = agruparPorDia(horarios, timezone)
+        .filter((d) => d.chave !== diaEscolhido && d.horarios.some((h) => (horaDe(h) < 12) === (pedido === 'manha')))
+        .slice(0, 3)
+        .map((d) => formatarDia(d.horarios[0].inicio, timezone))
+      aviso =
+        `Em ${nomeDoDia} só há horário ${pedido === 'manha' ? 'à tarde' : 'de manhã'}.` +
+        (outrosDias.length
+          ? ` ${pedido === 'manha' ? 'De manhã' : 'À tarde'}, os próximos dias são: ${outrosDias.join(', ')} (digite VOLTAR para ver os dias).`
+          : '') +
+        '\n\n'
+    }
+  }
+  // O outro periodo do dia, quando a lista mostra so um.
+  const outro = mostrado === 'manha' ? daTarde : mostrado === 'tarde' ? daManha : []
+  const nomeDoOutro = mostrado === 'manha' ? 'tarde' : 'manhã'
+  doDia = doDia.slice(0, outro.length > 0 ? MAX_HORARIOS_DIA - 1 : MAX_HORARIOS_DIA)
+  const linhaDoOutro = outro.length > 0
+    ? `\n\n${mostrado === 'manha' ? '🌇 À tarde' : '☀️ De manhã'} também há: ${outro.map((h) => formatarHora(h.inicio, timezone)).join(', ')}. ` +
+      `Toque em *Ver a ${nomeDoOutro}* ou escreva o horário.`
+    : ''
 
   if (doDia.length === 0) {
     // Alguem ocupou o dia inteiro entre a listagem e a escolha. Volta um passo
@@ -2862,19 +4848,188 @@ async function perguntarHorario(
       ? {
           lista: {
             rotulo: 'Escolher horário',
-            linhas: comVoltar(
-              doDia.map((h, i) => ({
+            linhas: comVoltar([
+              ...doDia.map((h, i) => ({
                 id: String(i + 1),
                 titulo: formatarHora(h.inicio, timezone),
               })),
-            ),
+              ...(outro.length > 0 ? [{ id: mostrado === 'manha' ? 'TARDE' : 'MANHA', titulo: `${mostrado === 'manha' ? '🌇' : '☀️'} Ver a ${nomeDoOutro}` }] : []),
+            ]),
           },
         }
       : {}),
     resposta:
-      `⏰ *Horários de ${formatarDia(doDia[0].inicio, timezone)}:*\n\n${linhas}\n\n` +
-      'Responda com o número do horário.\n' +
+      aviso +
+      `⏰ *Horários de ${formatarDia(doDia[0].inicio, timezone)}${mostrado ? ` (${mostrado === 'manha' ? 'manhã' : 'tarde'})` : ''}:*\n\n${linhas}` +
+      linhaDoOutro +
+      '\n\nResponda com o número do horário.\n' +
       'Digite VOLTAR para escolher outro dia, *9* para falar com a nossa equipe, ou *0* para o início.',
+  }
+}
+
+/**
+ * A queixa que a pessoa ja contou nesta conversa (16/10/2026, painel de
+ * pacientes simulados).
+ *
+ * "Oi tenho unimed santos, sinusite toda hora, qro marcar" e "por causa de uma
+ * sinusite que nao passa" ouviam, no fim da ficha, "qual e o motivo da
+ * consulta?" - e a paciente respondia "como falei no comeco". A mensagem da
+ * conversa que fala de queixa (das ultimas seis horas) vira o motivo, inteira,
+ * do jeito que ela escreveu: o medico le melhor a frase dela do que um resumo.
+ * Vazio quando nada fala de queixa, e a pergunta continua.
+ */
+// Rinoplastia e motivo de consulta (rodada 3 do painel): a ficha perguntou o
+// motivo a quem ja tinha dito que queria a avaliacao da rinoplastia.
+const QUEIXA_DO_OTORRINO =
+  /\b(rinoplastia|plastica no nariz|sinusite|rinite|renite|ronc\w*|apneia|nariz|entupid\w*|entupimento|desvio|septo|ouvidos?|orelha|zumbido|audicao|surd\w*|escuto|tontura|labirintite|vertigem|garganta|amigdal\w*|adenoide|voz|rouquidao|rouc[oa]|olfato|cheiro|paladar|respira\w*|otite|dor|febre|sangr\w*|secrecao|catarro|alergia|coriza|espirr\w*|polipos?|cornetos?)\b/
+
+/**
+ * A frase conta uma queixa do otorrino. "Medico do ouvido" e a especialidade,
+ * e nao a queixa (rodada 3 do painel).
+ */
+function ehQueixa(frase: string): boolean {
+  return QUEIXA_DO_OTORRINO.test(
+    normalizar(frase).replace(/\b(medico|doutor|dr|especialista|consulta|clinica|otorrino)\s+(do|de|da|dos|das|para|pro|pra|no|na)\s+(ouvidos?|nariz|garganta)\b/g, ' '),
+  )
+}
+
+/** As mensagens do paciente nas ultimas horas, da mais antiga para a mais nova. */
+async function mensagensDoPaciente(admin: Admin, conversationId: string, horas: number): Promise<string[]> {
+  try {
+    const desde = new Date((relogioEmFoco ?? new Date()).getTime() - horas * 3600 * 1000).toISOString()
+    const { data, error } = await admin
+      .from('whatsapp_messages')
+      .select('body,created_at')
+      .eq('conversation_id', conversationId)
+      .eq('direction', 'inbound')
+      .gte('created_at', desde)
+      .order('created_at', { ascending: false })
+      .limit(10)
+    if (error) throw error
+    return ((data ?? []) as { body?: string | null }[])
+      .map((m) => String(m.body ?? '').trim())
+      .filter(Boolean)
+      .reverse()
+  } catch (erro) {
+    console.warn('Nao consegui ler as mensagens da conversa; sigo so com a de agora', erro)
+    return []
+  }
+}
+
+/** A frase cita convenio (aceito ou nao) ou particular. Numero solto nao conta. */
+function falouDePlano(texto: string, unidades: Unidade[]): boolean {
+  if (!texto.trim() || /^\s*\d+\s*$/.test(texto)) return false
+  const aceitos = [...new Set(unidades.flatMap((u) => planosDaUnidade(u)))]
+  const daCidade = unidades.flatMap((u) => normalizar(u.name).replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)).filter((w) => w.length >= 3)
+  const plano = aceitos.length > 0 ? planoEscolhido(texto, aceitos, daCidade) : null
+  return (
+    /\b(particular|sem convenio|sem plano)\b/.test(normalizar(texto)) ||
+    (plano !== null && plano < aceitos.length) ||
+    (aceitos.length > 0 && planoNaoAceito(texto, aceitos) !== null)
+  )
+}
+
+/**
+ * A unidade e o convenio ditos antes, quando o pedido de agora nao diz
+ * (16/10/2026, rodada 2 do painel). "Preciso marcar pro meu filho pela porto
+ * em santos" perguntava para quem e, depois, a unidade e o convenio de novo; e
+ * "queria passar com o dr pela unimed santos", seguido de "quero marcar",
+ * abria a lista de unidades. Vale a ultima hora de conversa, e o pedido de
+ * agora vem na frente: o que ele diz vence o que veio antes.
+ */
+async function contextoDoPedido(admin: Admin, clinicId: string, conversationId: string, texto: string): Promise<string> {
+  if (!geral()) return texto
+  const unidades = await opcoesDeAtendimento(admin, clinicId)
+  // O que o pedido de agora ja diz nao e buscado antes; o que falta, sim
+  // (rodada 3 do painel): "entao ja quero marcar, pode ser em Santos mesmo",
+  // de quem abriu a conversa com "tenho Unimed Santos", ouviu a pergunta do
+  // convenio de novo.
+  const temUnidade = Boolean(unidadeCitada(unidades, texto))
+  const temPlano = falouDePlano(texto, unidades)
+  if (temUnidade && temPlano) return texto
+  const antes = (await mensagensDoPaciente(admin, conversationId, 1))
+    .filter((m) => m !== texto.trim() && ((!temPlano && falouDePlano(m, unidades)) || (!temUnidade && Boolean(unidadeCitada(unidades, m)))))
+    .slice(-2)
+    .reverse()
+  return [texto.trim(), ...antes].filter(Boolean).join('. ')
+}
+
+/**
+ * O nome que a pessoa ja disse na conversa (16/10/2026, rodada 2 do painel):
+ * "Meu nome e Ana Paula Ferreira, tenho 34 anos e gostaria de marcar" ouviu,
+ * depois de marcar, "Qual e o nome completo do paciente?". So nome de duas
+ * palavras ou mais, dito com "meu nome e", "me chamo" ou "aqui e". A ficha
+ * oferece o nome para confirmar com SIM, porque quem escreve pode estar
+ * marcando para outra pessoa.
+ */
+export function nomeDito(texto: string): string | null {
+  // Ou o nome seguido da idade, numa frase so dele: "ana paula ferreira, 34 anos".
+  const m =
+    texto.match(/\b(?:meu nome [eé]|me chamo|aqui [eé](?: o| a)?|eu sou(?: o| a)?)\s+([^,.;:!?\n]+)/i) ??
+    texto.match(/(?:^|[.!?\n]\s*)([\p{L}' ]+?),?\s+\d{1,3}\s+anos\b/u)
+  if (!m) return null
+  const PARA = new Set([
+    'e', 'tenho', 'gostaria', 'quero', 'queria', 'preciso', 'precisava', 'estou', 'to', 'moro', 'sou', 'com', 'para', 'pra',
+    'pro', 'paciente', 'mae', 'pai', 'filho', 'filha', 'do', 'da', 'de', 'dos', 'das', 'dr', 'dra', 'doutor', 'tudo', 'bem',
+    'meu', 'minha', 'meus', 'minhas', 'um', 'uma', 'oi', 'ola', 'bom', 'boa', 'tem', 'idade', 'crianca', 'bebe', 'nenem',
+  ])
+  const nomes: string[] = []
+  for (const palavra of m[1].trim().split(/\s+/)) {
+    const n = normalizar(palavra)
+    // "da", "de", "do" no meio do nome continuam ("Ana da Silva"); no fim, nao.
+    if (PARA.has(n) && !(['da', 'de', 'do', 'dos', 'das'].includes(n) && nomes.length > 0)) break
+    if (!/^\p{L}[\p{L}'-]*$/u.test(palavra)) break
+    nomes.push(palavra)
+  }
+  while (nomes.length && ['da', 'de', 'do', 'dos', 'das'].includes(normalizar(nomes[nomes.length - 1]))) nomes.pop()
+  if (nomes.length < 2) return null
+  return nomeDaFicha(nomes.join(' '))
+}
+
+/** O nome dito na ultima hora de conversa. Ver nomeDito. */
+async function nomeDaConversa(admin: Admin, conversationId: string): Promise<string | null> {
+  for (const m of (await mensagensDoPaciente(admin, conversationId, 1)).reverse()) {
+    const nome = nomeDito(m)
+    if (nome) return nome
+  }
+  return null
+}
+
+async function queixaDaConversa(admin: Admin, conversationId: string): Promise<string> {
+  try {
+    const desde = new Date((relogioEmFoco ?? new Date()).getTime() - 6 * 3600 * 1000).toISOString()
+    const { data, error } = await admin
+      .from('whatsapp_messages')
+      .select('body,created_at')
+      .eq('conversation_id', conversationId)
+      .eq('direction', 'inbound')
+      .gte('created_at', desde)
+      .order('created_at', { ascending: true })
+      .limit(20)
+    if (error) throw error
+    // So a frase da queixa (rodada 2 do painel): "quero marcar semana q vem.
+    // sinusite de repeticao. unimed santos. ana paula, 34 anos" foi gravado
+    // inteiro como motivo da consulta.
+    const queixas = ((data ?? []) as { body?: string | null }[])
+      .flatMap((m) => String(m.body ?? '').split(/(?<=[.!?\n])\s+/))
+      .map((frase) => frase.trim().replace(/[.!]+$/, ''))
+      // "Quero marca o medico do ouvido" (rodada 3 do painel) nao e queixa: e a
+      // especialidade, e a ficha precisa perguntar o motivo.
+      .filter((frase) => frase.length >= 6 && ehQueixa(frase))
+      // Sem o "bom dia" e sem o pedido de marcar (rodada 3 do painel): "bom dia,
+      // to com sinusite de novo, queria uma consulta semana q vem pela unimed
+      // santos" foi gravado inteiro. Fica o pedaco que conta a queixa.
+      .map((frase) => {
+        const sem = frase.replace(/^(oi|ola|olá|bom dia|boa tarde|boa noite)[,!.\s]*/i, '')
+        const partes = sem.split(/\b(?:queria|quero|gostaria|preciso|precisava)\s+(?:de\s+)?(?:uma\s+|um\s+)?(?:consulta|marcar|agendar|horario|horário|passar)\b/i)
+        const certa = partes.find((parte) => parte.trim().length >= 6 && ehQueixa(parte))
+        return (certa ?? sem).replace(/^[\s,;:-]+|[\s,;:-]+$/g, '').trim()
+      })
+      .filter((frase) => frase.length >= 3)
+    return [...new Set(queixas)].join(' / ').slice(0, 300)
+  } catch (erro) {
+    console.warn('Nao consegui ler a queixa da conversa; a ficha pergunta', erro)
+    return ''
   }
 }
 
@@ -3057,13 +5212,51 @@ async function marcar(
   // Paciente completo continua sem ser interrogado: camposQueFaltam devolve
   // lista vazia para quem ja tem tudo, remarcando ou nao.
   // Na remarcacao o motivo (perfil 'geral') ja veio com a consulta original.
-  const faltam = camposQueFaltam(paciente).filter((c) => !(substitui && c === 'motivo'))
+  let faltam = camposQueFaltam(paciente).filter((c) => !(substitui && c === 'motivo'))
+  // A ficha da consulta antiga vem junto na remarcacao (16/10/2026, rodada 3
+  // do painel): a paciente que trocou o dia logo depois de marcar ficou com a
+  // consulta nova sem a queixa (sinusite), e a ficha nao perguntou de novo. O
+  // que a antiga tinha e copiado, e so o resto e perguntado.
+  if (geral() && substitui && criada?.id) {
+    const COLUNA: Record<string, string> = {
+      nome: 'intake_patient_name', nascimento: 'intake_birth_date', responsavel: 'intake_guardian',
+      cpf: 'intake_cpf', email: 'intake_email', motivo: 'intake_complaint',
+    }
+    try {
+      const { data: antiga } = await admin.from('appointments').select(Object.values(COLUNA).join(',')).eq('id', substitui).maybeSingle()
+      const copiar = Object.fromEntries(
+        Object.entries((antiga ?? {}) as Record<string, unknown>).filter(
+          ([coluna, v]) => Object.values(COLUNA).includes(coluna) && v !== null && v !== undefined && String(v).trim() !== '',
+        ),
+      )
+      if (Object.keys(copiar).length > 0) {
+        const { error: erroDaCopia } = await admin.from('appointments').update(copiar).eq('id', criada.id)
+        if (erroDaCopia) throw erroDaCopia
+        faltam = camposQueFaltam(paciente).filter((c) => !copiar[COLUNA[c]])
+        if (copiar.intake_birth_date) faltam = filaSemResponsavelDeAdulto(faltam, String(copiar.intake_birth_date), relogioEmFoco ?? new Date())
+      }
+    } catch (erro) {
+      console.warn('Nao consegui copiar a ficha da consulta remarcada; a ficha pergunta de novo', erro)
+    }
+  }
+  // A queixa ja contada na conversa nao e perguntada de novo. Ver queixaDaConversa.
+  if (geral() && faltam.includes('motivo') && criada?.id) {
+    const queixa = await queixaDaConversa(admin, conversationId)
+    if (queixa) {
+      const { error: erroDaQueixa } = await admin.from('appointments').update({ intake_complaint: queixa }).eq('id', criada.id)
+      if (!erroDaQueixa) faltam = faltam.filter((c) => c !== 'motivo')
+      else console.warn('Nao consegui guardar a queixa da conversa; a ficha pergunta', erroDaQueixa)
+    }
+  }
   // O nome da crianca no comprovante (14/10/2026): com irmaos no mesmo
   // telefone, "Consulta marcada!" sem nome deixou a mae achando que tinha
   // marcado os dois, quando so a Helena entrou.
   const deQuem = paciente?.name ? `${iconeDoPaciente()} ${paciente.name}\n` : ''
+  // Convenio ou particular no comprovante (16/10/2026, painel): quem marcou no
+  // Tatuape pensando na Unimed so soube que era particular porque perguntou.
+  const pagamento = geral() && !tele ? `💳 ${convenio || 'Particular'}\n` : ''
   const comprovante =
-    `✅ ${aviso}\n\n${deQuem}🗓️ ${quando}\n${tele ? "💻" : "📍"} ${onde}\n\n` +
+    `✅ ${aviso}\n\n${deQuem}🗓️ ${quando}\n${tele ? "💻" : "📍"} ${onde}\n${pagamento}\n` +
     '*Um dia antes da consulta enviamos uma mensagem aqui pelo WhatsApp para ' +
     'você confirmar sua presença.*'
 
@@ -3256,7 +5449,9 @@ function perguntasGerais(q: QuemAtende): typeof PERGUNTAS {
         '"nariz entupido", "ronco" ou "sinusite".\n\n' +
         `_Isso ajuda ${q.o} a já chegar preparado. Se preferir contar só na consulta, responda PULAR._`,
       jaExplicaOPular: true,
-      ler: (t) => (t.trim().length >= 3 ? t.trim().slice(0, 300) : null),
+      // Data ou numero nao e motivo (rodada 3 do painel): "22/4/1979",
+      // respondido fora de ordem, foi gravado como a queixa.
+      ler: (t) => (t.trim().length >= 3 && !/^[\d\s/.,:-]+$/.test(t.trim()) ? t.trim().slice(0, 300) : null),
       erro: 'Pode escrever o motivo da consulta em poucas palavras? Ou responda PULAR.',
     },
     {
@@ -3305,6 +5500,23 @@ function soDigitos(texto: string) {
  */
 function nomeDaFicha(texto: string): string | null {
   let t = texto.trim()
+  // Hora ou data respondida fora de ordem (rodada 3 do painel): "17:20 entao"
+  // foi gravado como o nome "17:20 Entao", e "as 8 da manha", como "As".
+  if (/^\s*\d/.test(t) || /^\s*(as|a partir das|umas)\s+\d/i.test(t)) return null
+  // Frase que nao e nome (16/10/2026, painel de pacientes simulados): "nao!!
+  // eu queria 16h nao 14h" foi gravado como o nome "Nao!! Eu Queria", e a
+  // reclamacao seguinte virou data de nascimento. Nome nao tem interrogacao,
+  // nem as palavras de quem esta reclamando ou pedindo outra coisa.
+  if (/[?]|!!/.test(t)) return null
+  if (/\b(nao|não|queria|quero|errado|errada|horario|horário|marcar|consulta|atendente|pessoa|ajuda|trocar|mudar)\b/i.test(t.replace(/^(nao|não)\s+sei\b.*$/i, ''))) return null
+  // Muleta antes do nome (16/10/2026, painel): "ja falei, ana paula ribeiro"
+  // foi gravado como "Ja Falei", e "eu, renata andrade", como "Eu".
+  t = t.replace(/^((ja|já)\s+(falei|disse|informei|mandei|escrevi)|como\s+(eu\s+)?(falei|disse)|eu\s+mesm[oa]|sou\s+eu(\s+mesm[oa])?|eu)\s*[,:.!-]\s*/i, '')
+  // "Eu mesma", "a mae": quem e, mas nao o nome. A pergunta volta.
+  if (/^(eu|eu mesm[oa]|sou eu( mesm[oa])?|a m[aã]e|o pai|m[aã]e|pai|ele|ela|o mesmo|a mesma)[.!]*$/i.test(t)) return null
+  // "eu renata, mae dele" (rodada 2): o "eu" sem virgula tambem sai. Nome
+  // nenhum comeca com a palavra "eu" solta ("Eunice" e uma palavra so).
+  t = t.replace(/^(eu|aqui e|aqui é)\s+(?!mesm)/i, '')
   t = t.replace(/^(o\s+)?(nome\s+(completo\s+)?(dela|dele|do paciente|da paciente|e|é)?\s*(e|é|:)?|ela se chama|ele se chama|se chama|meu nome (e|é)|eu sou (a|o)|sou (a|o))\s+/i, '')
   t = t.split(/[,;(]|\s-\s|\s+\d/)[0]
   t = t.replace(/\s+(nascid[oa]|nasceu|tem\s|sou\s|mae|mãe|pai|avo|avó)\b.*$/i, '')
@@ -3386,13 +5598,15 @@ function pulou(texto: string) {
 }
 
 /** A fila guardada na conversa: o que falta e quantas tentativas ja houve. */
-function filaDaFicha(opcoes: unknown): { tentativas: number; faltam: string[]; manual: boolean } {
-  const bruto = opcoes as { tentativas?: number; faltam?: unknown; manual?: boolean } | null
+function filaDaFicha(opcoes: unknown): { tentativas: number; faltam: string[]; manual: boolean; sugestao: string | null } {
+  const bruto = opcoes as { tentativas?: number; faltam?: unknown; manual?: boolean; sugestao?: unknown } | null
   return {
     tentativas: Number(bruto?.tentativas ?? 0),
     faltam: Array.isArray(bruto?.faltam) ? (bruto?.faltam as string[]) : [],
     // Questionario disparado pela equipe, e nao pelo fim de um agendamento.
     manual: bruto?.manual === true,
+    // O nome que a pessoa ja disse, oferecido na pergunta do nome (ver nomeDito).
+    sugestao: typeof bruto?.sugestao === 'string' && bruto.sugestao ? bruto.sugestao : null,
   }
 }
 
@@ -3480,8 +5694,19 @@ async function terminarDados(
         const nomeCadastrado = (Array.isArray(doCadastro) ? doCadastro[0]?.name : doCadastro?.name) ?? ''
         const nomeDaCrianca =
           String((consulta as { intake_patient_name?: string | null }).intake_patient_name ?? '').trim() || String(nomeCadastrado).trim()
+        // Convenio ou particular (16/10/2026), como no comprovante de marcar. A
+        // coluna vem num pedido proprio: sem ela, o comprovante sai sem a linha.
+        let pagamento = ''
+        if (geral() && !tele) {
+          try {
+            const { data: plano, error: erroDoPlano } = await admin.from('appointments').select('insurance').eq('id', appointmentId).maybeSingle()
+            if (!erroDoPlano) pagamento = `💳 ${String((plano as { insurance?: string | null } | null)?.insurance ?? '').trim() || 'Particular'}\n`
+          } catch (erro) {
+            console.warn('Nao consegui ler o convenio para o comprovante', erro)
+          }
+        }
         comprovante =
-          `✅ *Consulta marcada!*\n\n${nomeDaCrianca ? `${iconeDoPaciente()} ${nomeDaCrianca}\n` : ''}🗓️ ${formatarData(consulta.starts_at, timezone)}\n${tele ? '💻' : '📍'} ${onde}\n\n` +
+          `✅ *Consulta marcada!*\n\n${nomeDaCrianca ? `${iconeDoPaciente()} ${nomeDaCrianca}\n` : ''}🗓️ ${formatarData(consulta.starts_at, timezone)}\n${tele ? '💻' : '📍'} ${onde}\n${pagamento}\n` +
           '*Um dia antes da consulta enviamos uma mensagem aqui pelo WhatsApp para ' +
           'você confirmar sua presença.*\n\n'
       }
@@ -3774,18 +5999,21 @@ async function perguntarDados(
   const pergunta = perguntas().find((p) => p.chave === faltam[0])
   if (!pergunta) return await terminarDados(admin, conversationId, undefined, null, manual)
 
+  // O nome ja dito na conversa vai junto da pergunta (ver nomeDito).
+  const sugestao = pergunta.chave === 'nome' && geral() ? await nomeDaConversa(admin, conversationId) : null
   await salvarEstado(admin, conversationId, {
     booking_state: pergunta.estado,
     booking_intake_id: appointmentId,
     // A fila do que ainda falta, e as tentativas na pergunta atual. Na segunda
     // falha o robo segue em frente sozinho, em vez de prender quem nao tem
     // como responder.
-    booking_options: { tentativas: 0, faltam, manual },
+    booking_options: { tentativas: 0, faltam, manual, ...(sugestao ? { sugestao } : {}) },
   })
   return {
     resposta:
       (aviso ? `${aviso}\n\n` : '') +
       pergunta.texto +
+      (sugestao ? `\n\nSe for *${sugestao}*, responda *SIM*.` : '') +
       (pergunta.obrigatoria || pergunta.jaExplicaOPular
         ? ''
         : '\n\n_Se preferir não responder agora, digite PULAR._'),
@@ -4174,6 +6402,12 @@ export async function tratarConversa(
   const antes = (eventosEmCurso.get(opcoes.conversationId) ?? []).length
   const resultado = await tratarConversaPorDentro(opcoes)
   const novos = (eventosEmCurso.get(opcoes.conversationId) ?? []).slice(antes)
+  // Resposta pronta que chama a equipe, dada no meio de uma etapa (ver
+  // naoEntendi): a conversa acende sem sair da etapa, e nao fecha como resolvida.
+  if (resultado && !resultado.atencao && novos.some((e) => e.evento === 'chamar_equipe_junto')) {
+    resultado.atencao = 'atendente'
+    resultado.concluida = false
+  }
   const naoEntendeu = novos.some((e) => e.evento === 'nao_entendi')
   if (resultado && naoEntendeu && opcoes.estadoAtual && !opcoes.podeIniciarMenu) {
     registrar('calou_com_equipe')
@@ -4192,7 +6426,9 @@ export async function tratarConversa(
         resposta:
           'Desculpe, não estou conseguindo entender por aqui. 🙏 Já chamei alguém da nossa equipe, ' +
           'que continua a conversa com você.\n\n' +
+          (geral() ? `${PERGUNTA_URGENCIA_OU_DUVIDA}\n\n` : '') +
           avisoDeHorario(relogioEmFoco ?? new Date()) + '\n\n' + VOLTA,
+        ...(geral() ? { botoes: BOTOES_URGENCIA_OU_DUVIDA } : {}),
       }
     }
   }
@@ -4201,6 +6437,15 @@ export async function tratarConversa(
   // do agendamento, fila da equipe, "nao entendi"). Em vez de lembrar de cada
   // um, tudo passa aqui. O que ja foi preenchido com o lugar certo (texto da
   // unidade) chega sem campo e passa direto.
+  // Consulta marcada numa conversa com sinal de alarme (rodada 3 do painel):
+  // "doi mto qdo engulo mas da pra aguentar" seguiu marcando, e o comprovante
+  // saiu como o de uma consulta comum. O lembrete vai embaixo.
+  if (
+    resultado && opcoes.motivoDaAtencao === 'urgencia' && perfil().sinaisDeAlarme &&
+    /está guardado|Consulta marcada!/.test(resultado.resposta)
+  ) {
+    resultado.resposta += '\n\n🚨 Lembrando: pelo que você contou, procure atendimento hoje mesmo, sem esperar por esta consulta.'
+  }
   if (resultado && temCampo(resultado.resposta)) {
     resultado.resposta = await comCampos(opcoes.admin, opcoes.clinicId, resultado.resposta, null)
   }
@@ -4281,6 +6526,12 @@ async function tratarConversaPorDentro(opcoes: {
    * "vou atrasar" virar aviso para a equipe. Ausente vale falso.
    */
   consultaHoje?: boolean
+  /**
+   * Por que a conversa esta acesa para a equipe (attention_reason), quando
+   * esta. Numa conversa de sangramento ou urgencia, a mensagem nova na fila
+   * recebe o lembrete do pronto-socorro (ver lembreteDeUrgencia).
+   */
+  motivoDaAtencao?: string | null
 }): Promise<Resultado> {
   const { admin, clinicId, conversationId, estadoAtual, texto } = opcoes
   const agora = opcoes.agora ?? new Date()
@@ -4327,15 +6578,67 @@ async function tratarConversaPorDentro(opcoes: {
     return await mostrarMenu(admin, conversationId, saudacao)
   }
 
+  // O toque em "Duvida" (ver BOTOES_URGENCIA_OU_DUVIDA), ou a palavra escrita
+  // logo depois deles, na fila: a mensagem fica com a equipe, sem alarme.
+  if (
+    geral() &&
+    (normalizar(texto) === 'e_duvida' ||
+      (estadoAtual === 'atendente' && /^(e )?(uma )?duvida[.!\s]*$/.test(normalizar(texto).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim())))
+  ) {
+    const chamada = estadoAtual === 'atendente' ? null : await chamarEquipe(admin, conversationId)
+    return {
+      ...(chamada ?? {}),
+      resposta: `💬 Combinado: a sua dúvida já está com a nossa equipe, que responde por aqui. Se quiser, escreva mais detalhes.\n\n${avisoDeHorario(agora)}`,
+      atencao: 'atendente',
+    }
+  }
+
   // Sangramento (Dr. Fabio, 15/10/2026), logo depois do MENU e antes de tudo
   // o mais: em qualquer etapa, com a equipe conversando ou nao, respondendo
   // lembrete ou nao. O alerta no celular do medico nao pode depender de onde
   // a conversa estava. So no perfil que tem o modulo. Ver alertarSangramento.
   if (perfil().alertaDeSangramento && falouDeSangramento(texto)) {
-    return await alertarSangramento(
+    return await alertar(
       admin, clinicId, conversationId, estadoAtual, opcoes.opcoesAtuais,
       opcoes.consultaEmCadastro, pacienteDaConsulta, texto, agora,
     )
+  }
+
+  // Sinal de alarme do otorrino (16/10/2026), no mesmo lugar e pelo mesmo
+  // motivo do sangramento: antes da resposta pronta, que respondia "feijao no
+  // nariz" com a propaganda do consultorio. Ver sinalDeAlarme.
+  {
+    const alarme = perfil().sinaisDeAlarme ? sinalDeAlarme(texto) : null
+    if (alarme) {
+      return await alertar(
+        admin, clinicId, conversationId, estadoAtual, opcoes.opcoesAtuais,
+        opcoes.consultaEmCadastro, pacienteDaConsulta, texto, agora, alarme,
+      )
+    }
+  }
+
+  // Conversa de sangramento ou urgencia que seguiu numa etapa (16/10/2026,
+  // rodada 3 do painel): "qual ps vcs indicam aqui em santos? tenho porto
+  // saude" foi lido como unidade e convenio, e abriu as datas de Santos; "ta
+  // bom to indo" ouviu "Nao entendi. Responda com o numero do dia". Na fila
+  // da equipe, o bloco do estado 'atendente' cuida disso.
+  {
+    const motivo = opcoes.motivoDaAtencao === 'sangramento' || opcoes.motivoDaAtencao === 'urgencia' ? opcoes.motivoDaAtencao : null
+    if (motivo && perfil().sinaisDeAlarme && estadoAtual && estadoAtual !== 'atendente' && opcoes.podeIniciarMenu) {
+      if (vaiAoProntoSocorro(texto) || indoAgora(texto)) {
+        await salvarEstado(admin, conversationId, { booking_state: 'atendente', booking_options: null, booking_unit_id: null })
+        return { resposta: '💙 Isso. A nossa equipe já sabe e acompanha por aqui.' }
+      }
+      // "Tem problema esperar ate sexta? Ou e melhor ir num pronto-socorro?"
+      // (rodada 3) recebia o texto geral da urgencia, com "se alguem esta
+      // passando mal agora". Nesta conversa, a resposta e sem condicional.
+      const duvidaDeEsperar =
+        parecePergunta(texto) &&
+        /\b(posso|da pra|tem problema|e grave|precisa mesmo|preciso mesmo|devo|melhor|espero)\b.{0,40}\b(esperar|aguardar|ir|procurar|pronto socorro|ps|consulta)\b/.test(normalizar(texto).replace(/[^a-z\s]/g, ' '))
+      if (perguntouDoProntoSocorro(texto) || pediuUrgencia(texto) || duvidaDeEsperar) {
+        return { resposta: lembreteDeUrgencia(motivo, texto), atencao: motivo }
+      }
+    }
   }
 
   // Mensagem para a pessoa errada (06/10/2026). Ver numeroErrado. Vale em
@@ -4467,15 +6770,94 @@ async function tratarConversaPorDentro(opcoes: {
       )
     }
 
+    // Conversa de sangramento ou urgencia, ainda sem ninguem da equipe: a
+    // mensagem nova recebe o "nao espere", e nunca uma resposta pronta com
+    // "sua conversa continua na fila". Ver lembreteDeUrgencia. Pergunta sempre
+    // tem resposta ("vou pro PS ou espero?"); recado so quando o lembrete nao
+    // acabou de sair.
+    const motivo = opcoes.motivoDaAtencao
+    // Ja indo para o pronto-socorro: resposta curta, sem novo alerta.
+    if ((motivo === 'sangramento' || motivo === 'urgencia') && opcoes.podeIniciarMenu && (vaiAoProntoSocorro(texto) || indoAgora(texto))) {
+      return {
+        resposta:
+          '💙 Isso. A nossa equipe já sabe e acompanha por aqui.' +
+          (pediuAgendamento(texto) ? ' Depois do atendimento, quando quiser marcar a consulta, é só escrever por aqui.' : ''),
+      }
+    }
+    // O lembrete nao vale para quem diz que nao e urgencia (rodada 2): "nao e
+    // emergencia, so quero marcar o primeiro horario" recebeu o pronto-socorro
+    // e mais uma notificacao falsa.
+    const naoEUrgencia = /\b(nao|nem) (e|eh|era|foi) (uma |nenhuma )?(urgen|emergen)/.test(normalizar(texto))
+    if (
+      (motivo === 'sangramento' || motivo === 'urgencia') && opcoes.podeIniciarMenu &&
+      !soAgradecimento(texto) && !despedida(texto) && !naoEUrgencia && texto.trim() !== '2'
+    ) {
+      const lembrete = lembreteDeUrgencia(motivo, texto)
+      // "A consulta de sexta fica marcada ou nao?" (rodada 3 do painel) ouviu
+      // o mesmo lembrete duas vezes, sem resposta. A consulta continua; o
+      // lembrete vem junto.
+      if (opcoes.consultas.length > 0 && /\bconsulta\b/.test(normalizar(texto)) && /\b(marcad\w*|fica|continua|mant\w*|vale|cancel\w*|desmarc\w*)\b/.test(normalizar(texto)) && parecePergunta(texto)) {
+        const fuso = await fusoDaClinica(admin, clinicId)
+        return {
+          resposta:
+            `Sim, a sua consulta de *${formatarData(opcoes.consultas[0].inicio, fuso)}* continua marcada. ` +
+            '*Mas pelo que você contou, não espere por ela: procure atendimento hoje.*',
+          atencao: motivo,
+        }
+      }
+      // Marcar no lugar de ir (rodada 2): "ele ta respirando normal, precisa ir
+      // agora msm? nao da pra marcar com o dr pra amanha?" ficou sem resposta.
+      // A resposta e o lembrete, e a consulta fica para depois, com o botao.
+      if (pediuAgendamento(texto)) {
+        return {
+          resposta: `${lembrete}\n\nSe ainda quiser marcar uma consulta para depois, toque em *Marcar uma consulta*.`,
+          atencao: motivo,
+          botoes: [{ id: 'MARCAR_AGORA', titulo: 'Marcar uma consulta' }],
+        }
+      }
+      if (parecePergunta(texto) || pediuUrgencia(texto) || !(await jaMandada(admin, conversationId, lembrete))) {
+        return { resposta: lembrete, atencao: motivo }
+      }
+      // "Ajuda", logo depois do lembrete (rodada 3 do painel), ficava sem
+      // resposta nenhuma. O pedido curto recebe o caminho mais curto.
+      if (/\b(ajuda|ajude|socorro|por favor|pelo amor de deus|me ajud\w*)\b/.test(normalizar(texto))) {
+        return {
+          resposta: '🚨 Não espere a nossa resposta: procure o pronto-socorro agora. A nossa equipe já foi avisada e acompanha por aqui.',
+          atencao: motivo,
+        }
+      }
+      return null
+    }
+
     if (pediuUrgencia(texto)) {
       // Na fila tambem: fora do horario, "o mais rapido possivel" seria segunda.
       if (!dentroDoExpediente(agora)) return { resposta: urgenciaForaDoExpediente(agora), atencao: 'urgencia' }
       return {
         resposta:
           '🚨 Avisei a nossa equipe de que é urgente. Alguém entra em contato o mais rápido possível.\n\n' +
-          (geral() ? `*${prontoSocorro()}*` : 'Se for uma emergência com risco de vida, procure o pronto-socorro mais próximo ou ligue 192.'),
+          (geral()
+            ? `*Se alguém está passando mal agora, não espere a nossa resposta. ${prontoSocorro()}*`
+            : 'Se for uma emergência com risco de vida, procure o pronto-socorro mais próximo ou ligue 192.'),
         atencao: 'urgencia',
       }
+    }
+
+    // Pedido de gente, "alguem ai?" ou "nao respondeu", ja na fila (16/10/2026,
+    // painel): o silencio parecia que ninguem tinha recebido. Uma vez: a
+    // segunda insistencia ja tem a resposta logo acima.
+    // "E vai demorar quanto tempo dessa vez???" (rodada 3 do painel) recebeu a
+    // resposta pronta "Como e a consulta" (40 minutos): e a fila que demora.
+    const perguntouDaDemora = /\b(vai demorar|demora muito|demorar muito|vao demorar|ainda vai demorar|quanto tempo (vai|pra|para|ainda)|vao responder|vai responder|quando (vao|vai|voces vao) (me )?(responder|atender))\b/.test(normalizar(texto))
+    if (opcoes.podeIniciarMenu && (pediuAtendente(texto) || chamandoAlguem(texto) || naoFoiRespondida(texto) || (geral() && perguntouDaDemora))) {
+      const naFila = `🙋 Sua conversa já está na fila da nossa equipe: alguém responde por aqui assim que possível.\n\n${avisoDeHorario(agora)}`
+      if (await jaMandada(admin, conversationId, naFila)) return null
+      return { resposta: reclamouDaDemora(texto) ? `Desculpe a demora! 🙏 ${naFila}` : naFila }
+    }
+    // Em ingles, ja na fila (rodada 2 do painel): "English??" e "Hello? Someone
+    // speak English?" ficavam sem resposta nenhuma. Uma vez, em ingles.
+    if (opcoes.podeIniciarMenu && escreveuEmIngles(texto)) {
+      const emIngles = '🙋 Our team already has your message and will reply here, on weekdays during office hours (Brasília time).'
+      return (await jaMandada(admin, conversationId, emIngles)) ? null : { resposta: emIngles }
     }
 
     // Pergunta de sempre, respondida na espera - ate tres vezes.
@@ -4502,6 +6884,20 @@ async function tratarConversaPorDentro(opcoes: {
     // casamento resolve os dois casos sem precisar adivinhar a intencao.
     const jaRespondidas = opcoes.respostasNaEspera ?? 0
 
+    // "Ta, mas ate que horas?" na fila (rodada 2): a agenda responde, uma vez,
+    // dentro do limite das respostas na espera. Ver respostaDaAgenda.
+    if (opcoes.podeIniciarMenu && jaRespondidas < LIMITE_NA_ESPERA && !pediuParaMarcar(texto)) {
+      const jaTemResumo = (await mensagensRecentesDoRobo(admin, conversationId)).some((m) => m.includes('Dias e horários com vaga'))
+      const agenda = await respostaDaAgenda(admin, clinicId, texto, jaTemResumo)
+      if (agenda && !(await jaMandada(admin, conversationId, agenda))) {
+        await admin
+          .from('whatsapp_conversations')
+          .update({ auto_replies_while_waiting: jaRespondidas + 1 })
+          .eq('id', conversationId)
+        return { resposta: `${agenda}\n\nSua conversa continua na fila da nossa equipe.` }
+      }
+    }
+
     // Quer marcar, estando na fila (25/09/2026). Em 24/09 a atendente
     // respondeu "basta escolher a opcao 2"; a mae digitou "Pode agendar", "2",
     // e o robo, calado na fila, nao fez nada - 35 minutos ate ela escrever
@@ -4521,9 +6917,32 @@ async function tratarConversaPorDentro(opcoes: {
     if (opcoes.podeIniciarMenu && despedida(texto)) {
       return (await jaMandada(admin, conversationId, RESPOSTA_A_DESPEDIDA)) ? null : { resposta: RESPOSTA_A_DESPEDIDA }
     }
+    // "Vou esperar a equipe me confirmar" (rodada 2 do painel): ficava sem
+    // resposta nenhuma, como se a mensagem nao tivesse chegado. Uma vez.
+    const vaiEsperar =
+      !parecePergunta(texto) &&
+      /\b(vou|vamos) (esperar|aguardar)\b|\bfico (no )?(aguard\w*|esperando)\b|\b(aguardo|aguardando|esperando) (a |o |vcs|voces|retorno|resposta|contato)/.test(normalizar(texto))
+    // "Ta bom obrigada fico esperando" (rodada 3) ficava sem resposta.
+    if (geral() && opcoes.podeIniciarMenu && (vaiEsperar || soAgradecimento(texto))) {
+      const combinado = '💙 Combinado! A nossa equipe responde por aqui assim que possível.'
+      return (await jaMandada(admin, conversationId, combinado)) ? null : { resposta: combinado }
+    }
     const perguntaLonga =
       parecePergunta(texto) && normalizar(texto).split(/\s+/).filter(Boolean).length >= 10
     const querMarcar = !perguntaLonga && (pediuAgendamento(texto) || texto.trim() === '2')
+    // O "2", e o pedido de marcar, sem ninguem da equipe escrevendo (rodadas 2
+    // e 3 do painel): o robo tinha escrito "se quiser marcar, digite 2", e a
+    // resposta ao 2 era um botao, duas vezes; "entao marca uma consulta em
+    // santos pela porto" ganhou o botao e, depois dele, as perguntas da
+    // unidade e do convenio. Abre a agenda, como o toque no botao abriria, com
+    // o que o pedido ja diz. Com gente da equipe conversando, fica o botao.
+    if (geral() && querMarcar && opcoes.podeIniciarMenu) {
+      const distante = await retornoDistante()
+      if (distante) return await pedirRetornoDistante(admin, conversationId, distante.pedido, distante.horizonte, true)
+      registrar('opcao_escolhida', '2')
+      const pedido = await contextoDoPedido(admin, clinicId, conversationId, texto.trim() === '2' ? '' : texto)
+      return await iniciarAgendamento(admin, clinicId, conversationId, opcoes.pacientes, opcoes.consultas, false, false, pedido)
+    }
     if (querMarcar && jaRespondidas < LIMITE_NA_ESPERA) {
       // Na fila, retorno para daqui a meses: o botao de marcar levaria a uma
       // agenda que nao chega la. Ver retornoAlemDaAgenda.
@@ -4600,9 +7019,11 @@ async function tratarConversaPorDentro(opcoes: {
   // esta em conversa humana e barrado por equipeFalouRecentemente, calculado no
   // webhook. Esses dois bastam, e nao criam becos sem saida.
 
-  // Pedir gente vale de qualquer etapa, e nao so da opcao 3 do menu.
-  if (pediuAtendente(texto)) {
-    return await chamarEquipe(admin, conversationId)
+  // Pedir gente vale de qualquer etapa, e nao so da opcao 3 do menu. Nas
+  // perguntas de nome da ficha, o nome da secretaria e resposta, e nao pedido.
+  if (pediuAtendente(texto, estadoAtual !== 'dados_nome' && estadoAtual !== 'dados_responsavel')) {
+    const chamada = await chamarEquipe(admin, conversationId)
+    return reclamouDaDemora(texto) ? { ...chamada, resposta: `Desculpe a demora! 🙏 ${chamada?.resposta ?? ''}` } : chamada
   }
 
   // Urgencia tambem vale de qualquer etapa. Nasceu na telemedicina, mas uma
@@ -4625,6 +7046,23 @@ async function tratarConversaPorDentro(opcoes: {
   // aqui e a pessoa nunca chegava a poder cancelar de fato.
   const naEtapaDeCancelar =
     estadoAtual === 'minha_consulta' || estadoAtual === 'confirmar_cancelamento'
+
+  // Desistir no meio da ficha (16/10/2026, painel): a consulta ja estava
+  // marcada quando a ficha comecou. "cancelar" ouvia "parei por aqui" e o
+  // horario continuava reservado, sem a pessoa saber; "nao quero marcar,
+  // cancela isso" foi lido como o nome do paciente. Agora a pergunta e se ela
+  // quer desmarcar, com SIM ou 0, como no cancelamento de sempre.
+  if (
+    opcoes.consultaEmCadastro &&
+    perguntas().some((p) => p.estado === estadoAtual) &&
+    (desistiu(texto) || desistiuDaConsultaNaFicha(texto))
+  ) {
+    const marcada = opcoes.consultas.find((c) => c.id === opcoes.consultaEmCadastro)
+    if (marcada) {
+      const troca = await pedirConfirmacaoCancelamento(admin, clinicId, conversationId, marcada, false)
+      return { ...troca, resposta: `Sem problema. ${troca?.resposta ?? ''}` }
+    }
+  }
 
   if (desistiu(texto) && estadoAtual && !naEtapaDeCancelar) {
     return await mostrarMenu(
@@ -4689,8 +7127,225 @@ async function tratarConversaPorDentro(opcoes: {
     return null
   }
 
+  /**
+   * Outro medico, "alguem ai?" e "nao respondeu" (16/10/2026, painel de
+   * pacientes simulados), sem etapa e com o menu na tela. Vem antes dos
+   * atalhos e das respostas prontas: "preciso remarcar com o dr marcelo" nao e
+   * remarcacao aqui, e "nao tem nada sobre estacionamento ai em cima" casaria
+   * de novo com a mesma resposta.
+   */
+  async function conversaSolta(): Promise<Resultado | null> {
+    const outro = outroMedico(texto)
+    if (outro) {
+      registrar('outro_medico')
+      const ela = outro.startsWith('Dra.')
+      const o = perfil().o
+      return await mostrarMenu(
+        admin,
+        conversationId,
+        saudacao,
+        `🙂 Aqui é o consultório ${o.replace(/^o /, 'do ')}. ${ela ? 'A' : 'O'} ${outro} não atende aqui: ` +
+          `para a consulta com ${ela ? 'ela' : 'ele'}, fale com o consultório ${ela ? 'dela' : 'dele'}.\n\n` +
+          `Se quiser algo com ${o}, é só escolher:`,
+      )
+    }
+    if (chamandoAlguem(texto)) {
+      const aqui = presenca(agora)
+      // De novo, logo depois: curto, e sem o menu inteiro outra vez.
+      if (await jaMandada(admin, conversationId, aqui)) {
+        return { resposta: 'Estou aqui, sim 🙂 É só escolher uma opção da lista acima, ou digitar *9* para falar com alguém da nossa equipe.' }
+      }
+      return await mostrarMenu(admin, conversationId, saudacao, opcoes.jaViuOMenu ? aqui : `${saudacao}\n\n${aqui}`)
+    }
+    // Mensagem em ingles (16/10/2026, rodada 2 do painel): "appointment" e
+    // "English??" receberam o mesmo "Nao entendi" em portugues, duas vezes.
+    if (escreveuEmIngles(texto)) {
+      registrar('em_ingles')
+      const chamada = await chamarEquipe(admin, conversationId)
+      return {
+        ...chamada,
+        resposta:
+          `Hello! 👋 This is the automatic assistant of ${perfil().O.replace(/^O /, '')}'s office. ` +
+          'I can only reply in Portuguese, so I have asked our team to answer you here, on weekdays during office hours (Brasília time).\n\n' +
+          '(Olá! Passei sua mensagem para a nossa equipe, que responde por aqui.)',
+      }
+    }
+    // "Voces tem o telefone dele?", logo depois do aviso de que o outro medico
+    // nao atende aqui (16/10/2026, rodada 2): recebia os telefones do Dr.
+    // Fabio, como se fossem os do outro.
+    if (/\b(telefone|numero|contato|whatsapp|endereco|email|instagram|site)\b/.test(normalizar(texto)) && /\b(dele|dela)\b/.test(normalizar(texto))) {
+      const recentes = await mensagensRecentesDoRobo(admin, conversationId)
+      if (recentes.some((m) => m.includes('não atende aqui'))) {
+        return await mostrarMenu(
+          admin,
+          conversationId,
+          saudacao,
+          `Não temos o contato de outros consultórios por aqui, desculpe. Se precisar de algo com ${perfil().o}, é só escolher:`,
+        )
+      }
+    }
+    if (naoFoiRespondida(texto)) {
+      registrar('duvida_para_equipe')
+      const chamada = await chamarEquipe(admin, conversationId)
+      return { ...chamada, resposta: `Desculpe! 🙏 ${chamada?.resposta ?? ''}` }
+    }
+    if (geral()) {
+      const t = normalizar(texto)
+      // "Ah, entao errei o numero, desculpa" (rodada 3 do painel) ouviu "Nao
+      // consegui entender" e foi para a fila da equipe.
+      if (/\b(errei o numero|numero errado|foi engano|mensagem errada|engano meu|mandei errado|desculp\w* (o|pelo) engano)\b/.test(t)) {
+        return { resposta: `Sem problema! 🙂 Se precisar de algo com ${perfil().o}, é só escrever por aqui.`, concluida: true }
+      }
+      // Depois do aviso de outro consultorio, "tenho consulta dia 20 com ele" e
+      // "entao eu nao tenho consulta marcada ai?" (rodada 3 do painel) ouviram
+      // a propaganda do consultorio e "Nao consegui entender".
+      if (/\bconsulta\b/.test(t) && /\b(tenho|marquei|marcada|minha|com ele|com ela|dele|dela)\b/.test(t)) {
+        const recentes = await mensagensRecentesDoRobo(admin, conversationId)
+        if (recentes.some((m) => m.includes('não atende aqui'))) {
+          const fuso = await fusoDaClinica(admin, clinicId)
+          return {
+            resposta: opcoes.consultas.length
+              ? `Neste número há esta consulta com ${perfil().o}:\n\n${descreverConsulta(opcoes.consultas[0], fuso)}\n\nA consulta com o outro médico é com o consultório dele.`
+              : `Neste número não há consulta marcada com ${perfil().o}. A consulta com o outro médico é com o consultório dele: aqui só marcamos com ${perfil().o}.`,
+          }
+        }
+      }
+      // Documento com problema ("o pedido de exame esta sem o carimbo")
+      // (rodada 3 do painel): recebeu a resposta pronta de exames. Quem confere
+      // e gente.
+      if (
+        /\b(carimbo|assinatura|assinado|rasura|ilegivel|corrigir|correcao|faltando|falta o|falta a|sem o nome|sem a data)\b/.test(t) &&
+        /\b(pedido|receita|exame|laudo|atestado|guia|relatorio|declaracao|documento)\b/.test(t)
+      ) {
+        registrar('duvida_para_equipe')
+        const chamada = await chamarEquipe(admin, conversationId)
+        return { ...chamada, resposta: `📄 Passei para a nossa equipe, que confere o documento e responde por aqui.\n\n${avisoDeHorario(agora)}` }
+      }
+    }
+    // "Ate que horas o doutor atende?", "e as 8 da manha tem?" (rodada 2): a
+    // agenda responde (ver respostaDaAgenda). Quem pede para marcar vai para a
+    // agenda, com o resumo em cima (ver agendarDoPedido).
+    if (!pediuParaMarcar(texto)) {
+      // O resumo de novo, logo abaixo do primeiro, e a saudacao repetida
+      // pareceriam que o robo nao leu nada (ver o jaTemResumo).
+      const jaTemResumo = (await mensagensRecentesDoRobo(admin, conversationId)).some((m) => m.includes('Dias e horários com vaga'))
+      const agenda = await respostaDaAgenda(admin, clinicId, texto, jaTemResumo)
+      if (agenda) {
+        registrar('pergunta_de_agenda')
+        // Conta como menu visto, e o menu fica ativo (rodada 3 do painel): o
+        // toque em "Marcar uma consulta" logo abaixo devolvia a saudacao e o menu.
+        await voltarAoMenuAtivo(admin, conversationId)
+        if (!opcoes.jaViuOMenu) await salvarEstado(admin, conversationId, { menu_sent_at: new Date().toISOString() })
+        const cumprimento = opcoes.jaViuOMenu || (await jaMandada(admin, conversationId, saudacao)) ? '' : `${saudacao}\n\n`
+        return {
+          resposta: `${cumprimento}${agenda}\n\nPara marcar, digite *2*. ${VOLTA}`,
+          // O 2 e o do menu: sem etapa, ele abre a agenda.
+          botoes: [
+            { id: '2', titulo: 'Marcar uma consulta' },
+            { id: '9', titulo: 'Falar com a equipe' },
+            { id: '0', titulo: 'Voltar ao menu' },
+          ],
+        }
+      }
+    }
+    // O nome de uma unidade logo depois do resumo da agenda (rodada 2): a
+    // pessoa escolheu onde quer marcar, e nao pediu o endereco.
+    if (unidadeCitada(await opcoesDeAtendimento(admin, clinicId), texto) && normalizar(texto).split(/\s+/).length <= 4) {
+      // O resumo pode ter saido uma mensagem antes ("os dias estao logo acima").
+      const recentes = await mensagensRecentesDoRobo(admin, conversationId)
+      if (recentes.slice(0, 2).some((m) => m.includes('Dias e horários com vaga'))) return await agendarDoPedido()
+    }
+    return null
+  }
+
+  /**
+   * "Preciso remarcar minha consulta", com uma consulta so: direto para a
+   * confirmacao, sem a tela de Remarcar e Cancelar (16/10/2026, painel). Com
+   * duas consultas, ou intencao que nao da para ler, a tela de sempre.
+   */
+  async function consultaDoPedido(): Promise<Resultado> {
+    const intencao = intencaoDaConsulta(texto)
+    if (opcoes.consultas.length === 1 && intencao) {
+      return await pedirConfirmacaoCancelamento(admin, clinicId, conversationId, opcoes.consultas[0], intencao === 'remarcar')
+    }
+    return await mostrarMinhaConsulta(admin, clinicId, conversationId, opcoes.consultas)
+  }
+
+  /**
+   * Pedido de marcar escrito, com o menu ja visto: a agenda, com o que o pedido
+   * ja diz aproveitado e a duvida que veio junto em cima (ver unidadeDoPedido e
+   * respostaJunto).
+   */
+  /**
+   * A duvida que veio junto da resposta da etapa (16/10/2026, rodada 3 do
+   * painel): "Ta bom, entao vai particular mesmo. Quanto fica?" escolhia o
+   * particular e ignorava a pergunta, duas vezes. A resposta pronta vai em cima.
+   */
+  async function comDuvidaJunto(resultado: Resultado): Promise<Resultado> {
+    // So pergunta de verdade: o "como" de "Unimed Santos, como falei" nao e.
+    const pergunta = texto.includes('?') || /\b(quanto|quanta|qto|qnto|qual|quais|onde|custa|aceita|aceitam)\b/.test(normalizar(texto))
+    if (!resultado || !geral() || !pergunta || assuntoClinico(texto)) return resultado
+    const achada = acharResposta(texto, await carregarRespostas(admin, clinicId))
+    if (!achada || (await jaMandada(admin, conversationId, achada.resposta))) return resultado
+    if (achada.chamarEquipe) registrar('chamar_equipe_junto')
+    const duvida = `${semConviteDoDois(achada.resposta)}${achada.chamarEquipe ? '\n\n🙋 Sobre isso, a nossa equipe confirma por aqui.' : ''}`
+    return { ...resultado, resposta: `${duvida}\n\n${resultado.resposta}` }
+  }
+
+  /**
+   * Unidade, dia e hora na mesma frase (16/10/2026, rodada 3 do painel): marca
+   * direto, quando a unidade nao tem convenio a perguntar e o horario esta
+   * livre. Null quando falta alguma coisa: a agenda segue pelo caminho de
+   * sempre.
+   */
+  async function marcarDoPedido(unidade: Unidade, frase: string): Promise<Resultado | null> {
+    if (!geral() || unidade.id === TELE_ID || planosDaUnidade(unidade).length > 0) return null
+    const pedida = horaEscrita(frase)
+    if (!pedida || limiteDaHora(frase)) return null
+    const fuso = await fusoDaClinica(admin, clinicId)
+    const { horarios } = await horariosLivres(admin, clinicId, unidade.id)
+    const dias = agruparPorDia(horarios, fuso).map((d) => d.chave)
+    const data = dataEscrita(frase)
+    const qual = data
+      ? dias.findIndex((c) => Number(c.slice(8, 10)) === data.dia && Number(c.slice(5, 7)) === data.mes)
+      : diaPeloNome(frase, dias, agora)
+    if (qual < 0) return null
+    const naHora = naHoraPedida(horarios.filter((h) => chaveDoDia(h.inicio, fuso) === dias[qual]), pedida, fuso)
+    const certa = pedida.minuto === null ? naHora.filter((h) => formatarHora(h.inicio, fuso).endsWith(':00')) : naHora
+    if (certa.length !== 1) return null
+    await salvarEstado(admin, conversationId, { booking_insurance: '', booking_modality: 'presencial', booking_unit_id: unidade.id })
+    return await marcar(
+      admin, clinicId, conversationId, unidade.id, pacienteDaConsulta, opcoes.telefone, opcoes.nomeDoPerfil,
+      certa[0], opcoes.consultaASubstituir, '',
+    )
+  }
+
+  async function agendarDoPedido(): Promise<Resultado> {
+    const junto = await respostaJunto(admin, clinicId, conversationId, texto)
+    // "Quero marcar, ate que horas ele atende?": o resumo da agenda em cima.
+    // So com pergunta (rodada 3): "marca pra mim o ultimo horario que tiver" e
+    // pedido, e o resumo inteiro em cima dele era ruido.
+    const resumo = perguntouDaAgenda(texto) && texto.includes('?') ? await resumoDaAgenda(admin, clinicId) : ''
+    // "Alguem ta ai agora? Quero agendar" (rodada 2): quem esta, antes da agenda.
+    const quemEsta = perguntouSeTemAlguem(texto) ? presenca(agora) : ''
+    // Unidade e convenio ditos antes valem (ver contextoDoPedido).
+    const pedido = await contextoDoPedido(admin, clinicId, conversationId, texto)
+    const agenda = await iniciarAgendamento(admin, clinicId, conversationId, opcoes.pacientes, opcoes.consultas, false, false, pedido)
+    if ((!junto && !resumo && !quemEsta) || !agenda) return agenda
+    return {
+      ...agenda,
+      ...(junto?.chamarEquipe && !agenda.atencao ? { atencao: 'atendente' } : {}),
+      resposta: [quemEsta, junto?.texto, resumo, agenda.resposta].filter(Boolean).join('\n\n'),
+    }
+  }
+
   // ---- Sem etapa em andamento ----
   if (!estadoAtual) {
+    if (opcoes.podeIniciarMenu) {
+      const solta = await conversaSolta()
+      if (solta) return solta
+    }
+
     // Retorno para daqui a meses (05/10/2026): a agenda nao chega la, entao a
     // equipe reserva. Antes do atalho de agendamento, que abriria uma agenda de
     // 15 dias para quem pediu 3 meses.
@@ -4716,9 +7371,7 @@ async function tratarConversaPorDentro(opcoes: {
     // seria o robo fingir que nao leu a parte que mais importava.
     // "...e volto pra marcar" e despedida, nao pedido de agora (14/10/2026).
     if (opcoes.jaViuOMenu && pediuAgendamento(texto) && !assuntoClinico(texto) && !despedida(texto)) {
-      return await iniciarAgendamento(
-        admin, clinicId, conversationId, opcoes.pacientes, opcoes.consultas,
-      )
+      return await agendarDoPedido()
     }
     // Depois do acompanhamento pos-consulta (03/10/2026).
     //
@@ -4813,8 +7466,12 @@ async function tratarConversaPorDentro(opcoes: {
     // resposta pronta, nem quando "retorno" casa com o texto de documentos.
     if (pediuAgendamento(texto) && !assuntoClinico(texto)) {
       registrar('opcao_escolhida', '2')
+      // A duvida que veio junto, em cima da agenda (ver respostaJunto).
+      const junto = await respostaJunto(admin, clinicId, conversationId, texto)
+      // Unidade e convenio ditos antes valem (ver contextoDoPedido).
+      const pedido = await contextoDoPedido(admin, clinicId, conversationId, texto)
       const agenda = await iniciarAgendamento(
-        admin, clinicId, conversationId, opcoes.pacientes, opcoes.consultas,
+        admin, clinicId, conversationId, opcoes.pacientes, opcoes.consultas, false, false, pedido,
       )
       // Sem resposta da agenda (nao deveria acontecer): o menu de sempre, e
       // nunca silencio na primeira mensagem de alguem.
@@ -4822,11 +7479,24 @@ async function tratarConversaPorDentro(opcoes: {
       // Conta como menu visto: daqui em diante os atalhos valem, como para
       // quem passou pelo menu.
       await salvarEstado(admin, conversationId, { menu_sent_at: new Date().toISOString() })
+      // A saudacao uma vez so (rodada 2 do painel): depois de uma pergunta da
+      // agenda respondida, "queria marcar as 8h" recebia o "Ola, seja bem-vindo"
+      // de novo.
+      const cumprimento = (await jaMandada(admin, conversationId, saudacao)) ? '' : `${saudacao}\n\n`
+      // "Boa noite, tem alguem online ai? Queria marcar" (rodada 2 do painel):
+      // a pergunta de quem esta ai tem resposta antes da agenda.
+      const quemEsta = perguntouSeTemAlguem(texto) ? `${presenca(agora)}\n\n` : ''
       return {
         ...agenda,
+        ...(junto?.chamarEquipe && !agenda.atencao ? { atencao: 'atendente' } : {}),
         resposta:
-          `${saudacao}\n\n` +
-          'Já separei a agenda para você 👇 Se antes quiser saber valores ou tirar uma dúvida, digite *0* para ver todas as opções.\n\n' +
+          cumprimento +
+          quemEsta +
+          (junto
+            ? `${junto.texto}\n\n`
+            : quemEsta
+              ? ''
+              : 'Já separei a agenda para você 👇 Se antes quiser saber valores ou tirar uma dúvida, digite *0* para ver todas as opções.\n\n') +
           agenda.resposta,
       }
     }
@@ -4838,10 +7508,19 @@ async function tratarConversaPorDentro(opcoes: {
     // nada" sem mais nada seria um beco. Ver pediuMudarConsulta.
     if (pediuMudarConsulta(texto) && !assuntoClinico(texto) && opcoes.consultas.length > 0) {
       registrar('opcao_escolhida', '4')
-      const minha = await mostrarMinhaConsulta(admin, clinicId, conversationId, opcoes.consultas)
+      const minha = await consultaDoPedido()
       // Conta como menu visto, como no atalho de agendamento.
       await salvarEstado(admin, conversationId, { menu_sent_at: new Date().toISOString() })
       if (minha) return { ...minha, resposta: `${saudacao}\n\n${minha.resposta}` }
+    }
+
+    // Operado escrevendo: recado para a equipe, com a saudacao em cima. Ver
+    // falouDePosOperatorio.
+    if (perfil().sinaisDeAlarme && falouDePosOperatorio(texto)) {
+      const recado = await recadoDoPosOperatorio(admin, conversationId)
+      if (opcoes.jaViuOMenu) return recado
+      await salvarEstado(admin, conversationId, { menu_sent_at: new Date().toISOString() })
+      return { ...recado, resposta: `${saudacao}\n\n${recado?.resposta ?? ''}` }
     }
 
     // A pergunta vem antes do menu. Quem escreveu uma duvida que a clinica ja
@@ -4854,14 +7533,7 @@ async function tratarConversaPorDentro(opcoes: {
     // - isso e consulta -, mas diz por que nao responde e mostra o caminho. Nao
     // transfere sozinho de proposito: muita gente escreve o sintoma junto com
     // "queria marcar", e ai o menu e que resolve.
-    if (assuntoClinico(texto)) {
-      return await mostrarMenu(
-        admin,
-        conversationId,
-        saudacao,
-        fraseClinica(clinicId) + ' Digite *2* para marcar uma consulta ou *3* para falar com a equipe, ou escolha:',
-      )
-    }
+    if (assuntoClinico(texto)) return await responderAssuntoClinico(admin, clinicId, conversationId, saudacao)
 
     return await mostrarMenu(admin, conversationId, saudacao)
   }
@@ -4880,7 +7552,101 @@ async function tratarConversaPorDentro(opcoes: {
     // marcada, e ate entao a primeira resposta caia neste return.
     if (!consulta && !pacienteDaConsulta) return await terminarDados(admin, conversationId)
 
-    const { tentativas, faltam, manual } = filaDaFicha(opcoes.opcoesAtuais)
+    // Outro horario pedido no meio da ficha (16/10/2026, painel): "nao!! eu
+    // queria 16h nao 14h" foi gravado como nome do paciente, e as reclamacoes
+    // seguintes viraram data de nascimento e queixa. A consulta recem-marcada
+    // vai para a remarcacao, e a ficha da nova consulta pergunta o que faltar.
+    if (consulta && pediuOutroHorario(texto)) {
+      const marcada = opcoes.consultas.find((c) => c.id === consulta)
+      if (marcada) {
+        // A mesma hora que acabou de ser marcada (rodada 2 do painel): "14h",
+        // repetido por quem nao viu que ja estava feito, nao e troca.
+        const pedida = horaEscrita(texto)
+        const fuso = await fusoDaClinica(admin, clinicId)
+        if (pedida && naHoraPedida([{ inicio: marcada.inicio, fim: marcada.inicio }], pedida, fuso).length > 0) {
+          return { resposta: `✅ Sua consulta já está marcada para *${formatarData(marcada.inicio, fuso)}*.\n\n${perguntaAtual.texto}` }
+        }
+        // A consulta que acabou de ser marcada, nesta conversa (rodada 3 do
+        // painel): sem o SIM da remarcacao. "A data ta errada, eu quero dia 23"
+        // ouvia "Vamos remarcar esta consulta? Responda SIM" e depois tinha de
+        // escolher dia e hora de novo. A antiga so cai quando a nova estiver
+        // marcada, como em toda remarcacao.
+        if (geral()) {
+          // So a hora ("eu queria 16h, nao 14h"): o mesmo dia, na hora pedida,
+          // marcada direto quando esta livre.
+          const t = normalizar(texto)
+          const citaOutroDia = dataEscrita(texto) !== null || /\bdia\s+\d{1,2}\b|\b(segunda|terca|quarta|quinta|sexta|sabado|domingo|amanha|semana)\b/.test(t)
+          // "Nao, sexta da semana q vem, dia 23", com a consulta ja no dia 23
+          // (rodada 3 do painel): nao e troca, e a ficha continua.
+          const diaPedido = dataEscrita(texto)?.dia ?? Number((t.match(/\bdia\s+(\d{1,2})\b/) ?? [])[1] ?? 0)
+          if (!pedida && diaPedido && diaPedido === Number(chaveDoDia(marcada.inicio, fuso).slice(8, 10))) {
+            return { resposta: `✅ Sua consulta já está marcada para *${formatarData(marcada.inicio, fuso)}*.\n\n${perguntaAtual.texto}` }
+          }
+          if (pedida && !citaOutroDia) {
+            const { data: antiga } = await admin.from('appointments').select('unit_id,insurance').eq('id', marcada.id).maybeSingle()
+            const daAntiga = antiga as { unit_id?: string | null; insurance?: string | null } | null
+            if (daAntiga?.unit_id) {
+              const { horarios } = await horariosLivres(admin, clinicId, daAntiga.unit_id)
+              const doDia = horarios.filter((h) => chaveDoDia(h.inicio, fuso) === chaveDoDia(marcada.inicio, fuso))
+              const naHora = naHoraPedida(doDia, pedida, fuso)
+              const certa = pedida.minuto === null ? naHora.filter((h) => formatarHora(h.inicio, fuso).endsWith(':00')) : naHora
+              if (certa.length === 1) {
+                return await marcar(
+                  admin, clinicId, conversationId, daAntiga.unit_id, pacienteDaConsulta, opcoes.telefone, opcoes.nomeDoPerfil,
+                  certa[0], marcada.id, String(daAntiga.insurance ?? ''),
+                )
+              }
+            }
+          }
+          await salvarEstado(admin, conversationId, { booking_replaces_id: marcada.id })
+          // Sem dia na frase, a lista do mesmo dia.
+          const pedidoComDia = citaOutroDia ? texto : `dia ${chaveDoDia(marcada.inicio, fuso).slice(8, 10)} ${texto}`
+          const nova = await remarcarNaMesmaUnidade(admin, clinicId, conversationId, marcada.id, pedidoComDia)
+          if (nova) return { ...nova, resposta: `Sem problema, vamos trocar. ${nova.resposta}` }
+        }
+        const troca = await pedirConfirmacaoCancelamento(admin, clinicId, conversationId, marcada, true)
+        return { ...troca, resposta: `Sem problema, dá para trocar o horário. ${troca?.resposta ?? ''}` }
+      }
+    }
+
+    // Pergunta, reclamacao ou pedido de gente no meio da ficha (16/10/2026,
+    // rodada 3 do painel): "Antes, so uma duvida: qual e o valor da consulta?"
+    // ouviu "Nao consegui ler o nome", e a correcao seguinte deixou o nome em
+    // branco; "perguntei se a amil devolve tudo" foi gravado como nome do
+    // paciente, e "vc nao responde nada. tem alguem ai?", como data de
+    // nascimento. A duvida tem resposta, e a pergunta da ficha volta, sem gastar
+    // a segunda chance. No motivo, so a pergunta que nao conta queixa: "o nariz
+    // entupido tem cura?" e o motivo.
+    if (geral()) {
+      const t = normalizar(texto)
+      const reclamou = /\b(perguntei|pergunto|to perguntando|estou perguntando|minha pergunta|nao era o nome|nao e o nome|nao responde|nao respondeu|nao responderam)\b/.test(t)
+      const ehDuvida = parecePergunta(texto) || perguntouSeTemAlguem(texto) || naoFoiRespondida(texto) || reclamou
+      const naoERespostaDaFicha =
+        perguntaAtual.chave === 'motivo'
+          ? parecePergunta(texto) && !QUEIXA_DO_OTORRINO.test(t)
+          : perguntaAtual.ler(texto) === null || reclamou
+      if (ehDuvida && naoERespostaDaFicha && !pulou(texto)) {
+        const continuar = `Para continuar a ficha:\n\n${perguntaAtual.texto}`
+        const achadas = respostasDaMensagem(texto, await carregarRespostas(admin, clinicId))
+        if (achadas.length > 0) {
+          const chamar = achadas.some((a) => a.chamarEquipe)
+          const novas: typeof achadas = []
+          for (const a of achadas) if (!(await jaMandada(admin, conversationId, a.resposta))) novas.push(a)
+          // A mesma resposta de novo nao: quem pergunta outra vez vai para a
+          // equipe, que de fato e avisada.
+          if (chamar || novas.length === 0) registrar('chamar_equipe_junto')
+          const texto1 = novas.length
+            ? novas.map((a) => semConviteDoDois(a.resposta)).join('\n\n') + (chamar ? '\n\n🙋 Sobre isso, a nossa equipe confirma por aqui.' : '')
+            : '🙋 Para não repetir a mesma resposta, passei a sua pergunta para a nossa equipe, que responde por aqui.'
+          return { resposta: `${texto1}\n\n${continuar}` }
+        }
+        if (perguntouSeTemAlguem(texto)) return { resposta: `${presenca(agora)}\n\n${continuar}` }
+        registrar('chamar_equipe_junto')
+        return { resposta: `🙋 Passei a sua pergunta para a nossa equipe, que responde por aqui. ${continuar}` }
+      }
+    }
+
+    const { tentativas, faltam, manual, sugestao } = filaDaFicha(opcoes.opcoesAtuais)
     // Perfil 'geral': passou a data de nascimento sem resposta que de para ler,
     // o responsavel sai da fila (ver filaSemResponsavelDeAdulto). Com a data
     // respondida, a decisao e la embaixo, pela data.
@@ -4916,7 +7682,7 @@ async function tratarConversaPorDentro(opcoes: {
     if (pulou(texto) && !temValorValido) {
       if (perguntaAtual.obrigatoria && tentativas < 1) {
         await salvarEstado(admin, conversationId, {
-          booking_options: { tentativas: tentativas + 1, faltam, manual },
+          booking_options: { tentativas: tentativas + 1, faltam, manual, ...(sugestao ? { sugestao } : {}) },
         })
         return {
           resposta:
@@ -4930,7 +7696,11 @@ async function tratarConversaPorDentro(opcoes: {
         : await terminarDados(admin, conversationId, clinicId, consulta, manual)
     }
 
-    const valor = perguntaAtual.ler(texto)
+    // "Sim" ao nome oferecido (ver nomeDito). "Sim, mas e o Theo" nao e sim.
+    const aceitouONome =
+      perguntaAtual.chave === 'nome' && sugestao !== null &&
+      /^(sim|s|ss|isso|isso mesmo|exato|correto|certo|pode ser|e sim|sou eu|e eu|eu mesm[oa]|sim sou eu|sim e eu|sim isso)[.! ]*$/.test(normalizar(texto).trim())
+    const valor = aceitouONome ? sugestao : perguntaAtual.ler(texto)
     if (valor === null) {
       // Uma segunda chance, e so uma. Insistir num CPF que a pessoa nao tem
       // seria transformar um dado opcional em muro.
@@ -4944,7 +7714,7 @@ async function tratarConversaPorDentro(opcoes: {
           : await terminarDados(admin, conversationId, clinicId, consulta, manual)
       }
       await salvarEstado(admin, conversationId, {
-        booking_options: { tentativas: tentativas + 1, faltam, manual },
+        booking_options: { tentativas: tentativas + 1, faltam, manual, ...(sugestao ? { sugestao } : {}) },
       })
       return {
         resposta:
@@ -5013,6 +7783,12 @@ async function tratarConversaPorDentro(opcoes: {
       return await iniciarDocumento(admin, conversationId, opcoes.pacientes)
     }
 
+    // Outro medico, "alguem ai?" e "nao respondeu". Ver conversaSolta.
+    if (opcoes.podeIniciarMenu) {
+      const solta = await conversaSolta()
+      if (solta) return solta
+    }
+
     // Sintoma junto do pedido nao abre a agenda direto. "Meu filho tem refluxo,
     // queria marcar" e as duas coisas: o robo diz que nao orienta sobre sintoma
     // e mostra o menu, de onde a pessoa marca pelo *2*. Pular essa frase seria
@@ -5024,15 +7800,13 @@ async function tratarConversaPorDentro(opcoes: {
     }
 
     if (pediuAgendamento(texto) && !assuntoClinico(texto) && !despedida(texto)) {
-      return await iniciarAgendamento(
-        admin, clinicId, conversationId, opcoes.pacientes, opcoes.consultas,
-      )
+      return await agendarDoPedido()
     }
 
     // Com o menu na tela, "quero remarcar" e a opcao 4 escrita. Ver pediuMudarConsulta.
     if (pediuMudarConsulta(texto) && !assuntoClinico(texto) && opcoes.consultas.length > 0) {
       registrar('opcao_escolhida', '4')
-      return await mostrarMinhaConsulta(admin, clinicId, conversationId, opcoes.consultas)
+      return await consultaDoPedido()
     }
 
     // Com alguem da equipe conversando, o robo para por aqui.
@@ -5063,6 +7837,16 @@ async function tratarConversaPorDentro(opcoes: {
     }
 
     if (despedida(texto)) return { resposta: RESPOSTA_A_DESPEDIDA, concluida: true }
+
+    // Operado escrevendo, com o menu na tela. Ver falouDePosOperatorio.
+    if (perfil().sinaisDeAlarme && falouDePosOperatorio(texto)) return await recadoDoPosOperatorio(admin, conversationId)
+
+    // Agradecimento antes da resposta pronta (rodada 3 do painel): "Certo.
+    // Obrigado, fico aguardando o retorno." casou "retorno" e recebeu o texto
+    // do retorno da consulta.
+    if (geral() && soAgradecimento(texto)) {
+      return { resposta: '😊 Por nada! Se precisar de algo, é só escrever *0* para ver as opções.' }
+    }
 
     // Antes de dizer "nao entendi": a pessoa pode ter ignorado a lista e
     // escrito a duvida dela, que e o que se faz num WhatsApp de verdade.
@@ -5095,12 +7879,7 @@ async function tratarConversaPorDentro(opcoes: {
       // quanta gente chega com sintoma, que e outra pergunta e merece nome
       // proprio no painel.
       registrar('assunto_clinico')
-      return await mostrarMenu(
-        admin,
-        conversationId,
-        saudacao,
-        fraseClinica(clinicId) + ' Digite *2* para marcar uma consulta ou *3* para falar com a equipe, ou escolha:',
-      )
+      return await responderAssuntoClinico(admin, clinicId, conversationId, saudacao)
     }
 
     // Aqui sim. Este e o ponto onde mais gente se perde - o menu na tela e a
@@ -5131,15 +7910,34 @@ async function tratarConversaPorDentro(opcoes: {
     if (palavras.length >= 3) {
       registrar('nao_entendi', 'equipe')
       const chamada = await chamarEquipe(admin, conversationId)
+      if (geral()) {
+        return {
+          ...chamada,
+          resposta:
+            '🤔 Não consegui entender por aqui, então passei sua mensagem para a nossa equipe, que responde por aqui.\n\n' +
+            `${PERGUNTA_URGENCIA_OU_DUVIDA}\n\n${avisoDeHorario(agora)}`,
+          botoes: BOTOES_URGENCIA_OU_DUVIDA,
+        }
+      }
       return {
         ...chamada,
         resposta:
-          'Não consegui entender por aqui, então passei sua mensagem para a nossa equipe.' +
-          (chamada?.resposta ? `\n\n${chamada.resposta}` : ''),
+          'Não consegui entender por aqui, então passei sua mensagem para a nossa equipe: estou direcionando você para alguém que responde por aqui.' +
+          // Uma frase so (rodada 2 do painel): "passei sua mensagem para a
+          // equipe" e "estou direcionando voce" diziam a mesma coisa, uma em
+          // cima da outra.
+          (chamada?.resposta ? `\n\n${chamada.resposta.replace(/^Estou direcionando você para alguém da nossa equipe\.\s*/, '')}` : ''),
       }
     }
 
     registrar('nao_entendi')
+    // O mesmo "Nao entendi" com o menu inteiro, logo abaixo do primeiro (rodada 3
+    // do painel): "ei" e "consulta" receberam a mesma mensagem, palavra por
+    // palavra. A segunda vez e curta; a terceira chama a equipe (ver
+    // tratarConversa).
+    if (geral() && (await jaMandada(admin, conversationId, 'Não entendi. Responda com o número da opção:'))) {
+      return { resposta: 'Não entendi ainda 🙏 Para marcar uma consulta, digite *2*. Para falar com alguém da equipe, digite *3*.' }
+    }
     return await mostrarMenu(
       admin,
       conversationId,
@@ -5420,7 +8218,7 @@ async function tratarConversaPorDentro(opcoes: {
       // de marcar e pedido de marcar, tambem aqui. Pergunta ("da pra marcar
       // sabado?") e sintoma continuam no caminho de baixo.
       if (pediuAgendamento(texto) && !parecePergunta(texto) && !assuntoClinico(texto)) {
-        return await iniciarAgendamento(admin, clinicId, conversationId, opcoes.pacientes, opcoes.consultas)
+        return await iniciarAgendamento(admin, clinicId, conversationId, opcoes.pacientes, opcoes.consultas, false, false, texto)
       }
       const palavrasDaDuvida = normalizar(texto).replace(/[^a-z\s]/g, ' ').trim().split(/\s+/).filter((p) => p.length > 1)
       if (palavrasDaDuvida.length >= 3) {
@@ -5460,8 +8258,11 @@ async function tratarConversaPorDentro(opcoes: {
   if (estadoAtual === 'minha_consulta') {
     const ids = Array.isArray(opcoes.opcoesAtuais) ? (opcoes.opcoesAtuais as string[]) : []
     const t = normalizar(texto)
-    const querRemarcar = t === 'remarcar' || t === 'trocar' || t === 'mudar'
-    const querCancelar = t === 'cancelar' || t === 'desmarcar'
+    // A frase vale, e nao so a palavra (16/10/2026, painel): "quero trocar" e
+    // "cancela" recebiam "Nao entendi. Digite CANCELAR". Ver intencaoDaConsulta.
+    const intencao = intencaoDaConsulta(texto)
+    const querRemarcar = t === 'remarcar' || t === 'trocar' || t === 'mudar' || intencao === 'remarcar'
+    const querCancelar = t === 'cancelar' || t === 'desmarcar' || intencao === 'cancelar'
 
     // A consulta em foco, e nao "a unica que a pessoa tem".
     //
@@ -5547,8 +8348,11 @@ async function tratarConversaPorDentro(opcoes: {
     }
 
     // Remarcar nao cancela agora: primeiro escolhe a nova data, e a antiga cai
-    // so quando a nova estiver garantida.
+    // so quando a nova estiver garantida. Na mesma unidade e no mesmo convenio,
+    // quando da (ver remarcarNaMesmaUnidade).
     if (opcoes.consultaASubstituir === alvo.id) {
+      const mesma = await remarcarNaMesmaUnidade(admin, clinicId, conversationId, alvo.id, texto)
+      if (mesma) return mesma
       return await iniciarAgendamento(
         admin, clinicId, conversationId, opcoes.pacientes, opcoes.consultas, true,
       )
@@ -5616,7 +8420,10 @@ async function tratarConversaPorDentro(opcoes: {
         const primeiro = normalizar(p.name).split(/\s+/)[0]
         return primeiro.length >= 2 && t.includes(` ${primeiro} `)
       })
+      // "teo" para o Theo (16/10/2026, painel): o nome como se fala. Ver nomeFalado.
+      const comoSeFala = porNome.length === 0 ? pacienteCitado(opcoes.pacientes, texto) : null
       if (porNome.length === 1) indice = ids.indexOf(porNome[0].id)
+      else if (comoSeFala) indice = ids.indexOf(comoSeFala.id)
       else if (ids.includes(OUTRA_CRIANCA) && / (outr[oa]|irma[o]?|nov[oa]|ainda nao tem cadastro|sem cadastro) /.test(t)) {
         indice = ids.indexOf(OUTRA_CRIANCA)
       }
@@ -5636,9 +8443,16 @@ async function tratarConversaPorDentro(opcoes: {
       }
     }
 
+    // O pedido de antes da pergunta de quem (rodada 2 do painel): "preciso
+    // marcar pro meu filho pela porto em santos" perguntava para quem e, depois,
+    // a unidade e o convenio de novo. Ver contextoDoPedido.
+    const seguirDoPedido = async () => {
+      const pedido = await contextoDoPedido(admin, clinicId, conversationId, '')
+      return pedido ? await unidadeDoPedido(admin, clinicId, conversationId, pedido) : await perguntarUnidade(admin, clinicId, conversationId)
+    }
     if (ids[indice] === OUTRA_CRIANCA) {
       await salvarEstado(admin, conversationId, { booking_patient_id: OUTRA_CRIANCA })
-      return await perguntarUnidade(admin, clinicId, conversationId)
+      return await seguirDoPedido()
     }
     const escolhido = opcoes.pacientes.find((p) => p.id === ids[indice])
     if (!escolhido) {
@@ -5651,7 +8465,7 @@ async function tratarConversaPorDentro(opcoes: {
     }
 
     await salvarEstado(admin, conversationId, { booking_patient_id: escolhido.id })
-    return await perguntarUnidade(admin, clinicId, conversationId)
+    return await seguirDoPedido()
   }
 
   // ---- Escolha da unidade ----
@@ -5664,6 +8478,13 @@ async function tratarConversaPorDentro(opcoes: {
     const unidades = await opcoesDeAtendimento(admin, clinicId)
     // Pelo nome, quando nao veio numero (ver unidadeCitada).
     const citada = indice === null ? unidadeCitada(unidades, texto) : null
+    // "Santos pela porto", "em santos eu tenho o santa saude" (rodada 2 do
+    // painel): o convenio dito junto com a unidade era perguntado de novo. Com
+    // plano ou "particular" na frase, o mesmo caminho do pedido escrito (ver
+    // unidadeDoPedido).
+    if (indice === null && geral() && falouDePlano(texto, unidades)) {
+      return await unidadeDoPedido(admin, clinicId, conversationId, texto)
+    }
     if (indice === null && !citada) {
       if (pediuVoltar(texto)) {
         return opcoes.pacientes.length > 1
@@ -5673,12 +8494,17 @@ async function tratarConversaPorDentro(opcoes: {
       if (desistiuDoAgendamento(texto)) {
         return await sairDoAgendamento(admin, conversationId, clinicId, opcoes.consultaASubstituir ?? null, opcoes.consultas)
       }
-      const naoEntendeu = await naoEntendi(admin, clinicId, texto, 'Responda com o número da unidade da lista acima.\n\n' + VOLTA)
-      // Resposta pronta (a pessoa perguntou outra coisa) fica como esta. O
-      // "nao entendi" puro volta COM a lista: sem ela, o unico botao na tela
-      // era "Voltar ao inicio" (painel de 14/10/2026).
-      if (!naoEntendeu.startsWith('Não entendi')) return { resposta: naoEntendeu }
+      // "Qual tem horario mais cedo?", "tanto faz". Ver unidadeMaisCedo.
+      const cedo = await unidadeMaisCedo(admin, clinicId, conversationId, texto, agora)
+      if (cedo) return cedo
+      const naoEntendeu = await naoEntendi(admin, clinicId, texto, '')
       const deNovo = await perguntarUnidade(admin, clinicId, conversationId)
+      // Resposta pronta (a pessoa perguntou outra coisa) vem com a lista
+      // numerada de novo embaixo (16/10/2026, painel): sem ela, o "2" seguinte
+      // valia pela lista de cima, e os enderecos que a pessoa acabara de ler
+      // estavam em outra ordem - ela quis Higienopolis e caiu em Santos. O
+      // "nao entendi" puro tambem volta com a lista (painel de 14/10/2026).
+      if (!naoEntendeu.startsWith('Não entendi')) return { ...deNovo, resposta: `${naoEntendeu.trim()}\n\n${deNovo?.resposta ?? ''}` }
       return {
         ...deNovo,
         resposta: `Não entendi qual unidade. Responda com o número da unidade ou escreva o nome (por exemplo, ${tituloCurto(unidades[0]?.name ?? 'Santos')}).\n\n${deNovo.resposta}`,
@@ -5693,6 +8519,13 @@ async function tratarConversaPorDentro(opcoes: {
         saudacao,
         'Essa unidade não está mais disponível. Vamos recomeçar:',
       )
+    }
+    // "Entao Tatuape, quinta as 14h" e "higienopolis terca 8h" (rodada 3 do
+    // painel): o robo pedia o dia e a hora de novo. Unidade sem convenio a
+    // perguntar, dia e hora livres: marca direto.
+    if (citada) {
+      const direto = await marcarDoPedido(escolhida, texto)
+      if (direto) return direto
     }
     return await perguntarConvenioOuDia(admin, clinicId, conversationId, escolhida)
   }
@@ -5714,6 +8547,19 @@ async function tratarConversaPorDentro(opcoes: {
         saudacao,
         'Perdi o fio da conversa, desculpe. Vamos recomeçar:',
       )
+    }
+
+    // Outra unidade na pergunta do convenio (16/10/2026, rodada 3 do painel):
+    // "entao prefiro fazer particular no Tatuape mesmo" seguiu na agenda de
+    // Santos, e "nao, eu quero no Tatuape, nao em Santos" recebeu os enderecos.
+    // "Nao quero em Santos, e longe" volta para a lista de unidades.
+    if (geral()) {
+      const outra = (await trocaDeUnidade(admin, clinicId, texto)) ?? unidadeCitada(unidades, texto)
+      if (outra && outra.id !== escolhida.id) return await perguntarConvenioOuDia(admin, clinicId, conversationId, outra)
+      if (pediuOutraUnidade(texto) || negouAUnidade(texto, escolhida)) {
+        const lista = await perguntarUnidade(admin, clinicId, conversationId)
+        return { ...lista, resposta: `Tudo bem, em outra unidade. ${lista?.resposta ?? ''}` }
+      }
     }
 
     const plano = (escolhida.accepts_insurance ?? '').trim()
@@ -5748,7 +8594,7 @@ async function tratarConversaPorDentro(opcoes: {
         return perguntaDosPlanos(planos, naoEntendeu)
       }
       await salvarEstado(admin, conversationId, { booking_insurance: qual < planos.length ? planos[qual] : '' })
-      return await perguntarDia(admin, clinicId, conversationId, escolhida)
+      return await comDuvidaJunto(await perguntarDia(admin, clinicId, conversationId, escolhida))
     }
 
     const indice = escolha(texto, 2)
@@ -5776,12 +8622,12 @@ async function tratarConversaPorDentro(opcoes: {
     await salvarEstado(admin, conversationId, {
       booking_insurance: resposta === 0 ? plano : '',
     })
-    return await perguntarDia(admin, clinicId, conversationId, escolhida)
+    return await comDuvidaJunto(await perguntarDia(admin, clinicId, conversationId, escolhida))
   }
 
   // ---- Escolha do dia ----
   if (estadoAtual === 'aguardando_dia') {
-    if (pediuVoltar(texto)) {
+    if (pediuVoltar(texto) || pediuOutraUnidade(texto)) {
       return await perguntarUnidade(admin, clinicId, conversationId)
     }
     // Antes da data escrita (ver desistiuComCerteza).
@@ -5789,15 +8635,72 @@ async function tratarConversaPorDentro(opcoes: {
       return await sairDoAgendamento(admin, conversationId, clinicId, opcoes.consultaASubstituir ?? null, opcoes.consultas)
     }
 
-    // Tocou o nome de uma unidade numa lista de cima: troca de unidade.
-    const outraUnidade = await unidadePeloNome(admin, clinicId, texto)
-    if (outraUnidade) return await perguntarConvenioOuDia(admin, clinicId, conversationId, outraUnidade)
+    // Tocou o nome de uma unidade numa lista de cima, ou corrigiu ("nao,
+    // higienopolis"): troca de unidade. Ver trocaDeUnidade.
+    const outraUnidade = await trocaDeUnidade(admin, clinicId, texto)
+    if (outraUnidade && outraUnidade.id !== unidadeEmAndamento) return await perguntarConvenioOuDia(admin, clinicId, conversationId, outraUnidade)
 
     const dias = Array.isArray(opcoes.opcoesAtuais) ? (opcoes.opcoesAtuais as string[]) : []
 
+    // A unidade numa frase maior (16/10/2026, rodada 3 do painel): "nao, eu
+    // quero no Tatuape, nao em Santos" e "tatuape", ja nas datas do Tatuape,
+    // recebiam a lista de enderecos. Outra unidade troca; a mesma confirma. O
+    // plano ("unimed santos") fica com a pergunta do convenio, mais abaixo.
+    if (geral()) {
+      const unidades = await opcoesDeAtendimento(admin, clinicId)
+      const citada = unidadeCitada(unidades, texto)
+      const semDia = dataEscrita(texto) === null && diaPeloNome(texto, dias, agora) < 0 && escolha(texto, dias.length) === null
+      if (citada && semDia && !falouDePlano(texto, unidades)) {
+        if (citada.id !== unidadeEmAndamento) return await perguntarConvenioOuDia(admin, clinicId, conversationId, citada)
+        if (!parecePergunta(texto)) return { resposta: `✅ Isso, em *${citada.name}*. Responda com o número do dia da lista acima.` }
+      }
+    }
+
+    // "Nao tem antes?", "hj nao da?" (16/10/2026, painel): pergunta, e nao
+    // escolha. "So dia 20? Nao tem nada antes?" abria os horarios do dia 20.
+    {
+      const quando = perguntouMaisCedo(texto)
+      const hoje = agora.toLocaleDateString('en-CA', { timeZone: await fusoDaClinica(admin, clinicId) })
+      // "Qualquer dia, o mais cedo que tiver" escolhe o primeiro dia (ver
+      // qualquerUm): e escolha, e nao pergunta.
+      if (quando && !qualquerUm(texto) && !(quando === 'hoje' && dias.includes(hoje)) && unidadeEmAndamento && unidadeEmAndamento !== TELE_ID) {
+        const info = await informarMaisCedo(admin, clinicId, unidadeEmAndamento, quando, agora)
+        if (info) {
+          return {
+            resposta: `${info}\n\nResponda com o número de um dia da lista acima.`,
+            botoes: [
+              { id: 'VOLTAR', titulo: 'Outra unidade' },
+              { id: '9', titulo: 'Falar com a equipe' },
+              { id: '0', titulo: 'Voltar ao menu' },
+            ],
+          }
+        }
+      }
+    }
+
+    // "Dia 22 nao da" (16/10/2026, painel): recusa, e nao escolha. O que vale e
+    // o que vem depois dela, como no passo do horario (ver recusaDeEscolha).
+    const recusa = recusaDeEscolha(texto)
+    const pedido = recusa ? recusa.depois : texto
+    if (recusa && !dataEscrita(pedido) && diaPeloNome(pedido, dias, agora) < 0 && !periodoEscrito(pedido)) {
+      if (encerrouComARecusa(texto)) {
+        return await sairDoAgendamento(admin, conversationId, clinicId, opcoes.consultaASubstituir ?? null, opcoes.consultas)
+      }
+      return {
+        resposta:
+          'Tudo bem, não marquei nada. Escolha outro dia da lista acima, ou digite VOLTAR para ver outra unidade. ' +
+          'Se nenhum dia servir, digite *9* para falar com a nossa equipe.',
+        botoes: [
+          { id: 'VOLTAR', titulo: 'Outra unidade' },
+          { id: '9', titulo: 'Falar com a equipe' },
+          { id: '0', titulo: 'Voltar ao menu' },
+        ],
+      }
+    }
+
     // "31/08" e uma resposta natural. Aqui nao ha o risco do horario - uma data
     // nunca cai dentro da faixa de indices - mas entender custa pouco.
-    const data = dataEscrita(texto)
+    const data = dataEscrita(pedido)
     const porData = data
       ? dias.findIndex((chave) => {
           const [, mes, dia] = chave.split('-').map(Number)
@@ -5805,17 +8708,68 @@ async function tratarConversaPorDentro(opcoes: {
         })
       : -1
 
-    const porNome = porData >= 0 ? -1 : diaPeloNome(texto, dias, agora)
-    let indice = porData >= 0 ? porData : porNome >= 0 ? porNome : escolha(texto, dias.length)
-    if (indice === null && dias.length > 0 && qualquerUm(texto)) indice = 0
+    let porNome = porData >= 0 ? -1 : diaPeloNome(pedido, dias, agora)
+    // "Pode ser sexta as 8", de quem pediu a semana que vem no comeco da
+    // conversa (16/10/2026, rodada 3 do painel): era marcada a sexta desta
+    // semana, embora o proprio robo tivesse destacado as da semana que vem.
+    // So o dia da semana: "sexta dia 16" escolhe o 16.
+    if (porNome >= 0 && geral() && !/\bdia\s+\d{1,2}\b|\d{1,2}\s*\/\s*\d{1,2}/.test(normalizar(pedido))) {
+      const pediuASemanaQueVem = (await mensagensDoPaciente(admin, conversationId, 1)).some((m) => /\b(semana (que|q) vem|proxima semana|semana seguinte)\b/.test(normalizar(m)))
+      if (pediuASemanaQueVem) {
+        const fuso = await fusoDaClinica(admin, clinicId)
+        const hoje = new Date(`${agora.toLocaleDateString('en-CA', { timeZone: fuso })}T12:00:00Z`)
+        const inicio = new Date(hoje)
+        inicio.setUTCDate(hoje.getUTCDate() + ((8 - hoje.getUTCDay()) % 7 || 7))
+        const fim = new Date(inicio)
+        fim.setUTCDate(inicio.getUTCDate() + 6)
+        const [de, ate] = [inicio, fim].map((d) => d.toISOString().slice(0, 10))
+        const semana = new Date(`${dias[porNome]}T12:00:00Z`).getUTCDay()
+        const daQueVem = dias.findIndex((chave) => chave >= de && chave <= ate && new Date(`${chave}T12:00:00Z`).getUTCDay() === semana)
+        if (daQueVem >= 0) porNome = daQueVem
+      }
+    }
+    let indice = porData >= 0 ? porData : porNome >= 0 ? porNome : escolha(pedido, dias.length)
+    if (indice === null && dias.length > 0 && qualquerUm(pedido)) indice = 0
+    // "23" numa lista de oito dias (16/10/2026, painel): nao e item, e o dia do
+    // mes que esta na lista. Numero que e item continua sendo item.
+    if (indice === null) {
+      const n = normalizar(pedido).match(/^(?:dia\s+)?(\d{1,2})$/)
+      if (n && Number(n[1]) > dias.length) {
+        const doMes = dias.filter((chave) => Number(chave.slice(8, 10)) === Number(n[1]))
+        if (doMes.length === 1) indice = dias.indexOf(doMes[0])
+      }
+    }
     // Dia da semana sem vaga: "sexta" quando a unidade nao atende sexta. Dizer
     // isso e mais util que "nao entendi" - a pessoa foi entendida.
-    const diaCitado = indice === null ? DIAS_DA_SEMANA.find((d) => new RegExp(`\\b${d}\\b`).test(normalizar(texto))) : undefined
+    const diaCitado = indice === null ? DIAS_DA_SEMANA.find((d) => new RegExp(`\\b${d}\\b`).test(semErroNosDias(normalizar(pedido)))) : undefined
     if (indice === null && diaCitado) {
       const nome = { domingo: 'no domingo', segunda: 'na segunda', terca: 'na terça', quarta: 'na quarta', quinta: 'na quinta', sexta: 'na sexta', sabado: 'no sábado' }[diaCitado]
+      // Nenhuma unidade nesse dia (16/10/2026, painel): "nao tem sabado?"
+      // ouvia "nesta unidade nao temos", e a paciente foi conferir as outras.
+      const fuso = await fusoDaClinica(admin, clinicId)
+      const semana = DIAS_DA_SEMANA.indexOf(diaCitado)
+      // O dia da semana existe na lista, e o que nao bateu foi a data ("sexta
+      // dia 22", com o 22 numa quinta): os dias desse nome, para escolher.
+      const desseNome = dias.filter((chave) => new Date(`${chave}T12:00:00Z`).getUTCDay() === semana)
+      if (desseNome.length > 0) {
+        const plural = { domingo: 'Os domingos', segunda: 'As segundas', terca: 'As terças', quarta: 'As quartas', quinta: 'As quintas', sexta: 'As sextas', sabado: 'Os sábados' }[diaCitado]
+        const datas = desseNome.map((chave) => `${chave.slice(8, 10)}/${chave.slice(5, 7)}`)
+        return {
+          resposta:
+            `Não achei esse dia na lista. ${plural} com horário livre são: ` +
+            `${datas.length > 1 ? `${datas.slice(0, -1).join(', ')} e ${datas.at(-1)}` : datas[0]}.\n\n` +
+            'Responda com o número do dia da lista acima.',
+        }
+      }
+      const emAlguma = (await primeirosHorarios(admin, clinicId)).some((c) =>
+        c.horarios.some((h) => new Date(`${chaveDoDia(h.inicio, fuso)}T12:00:00Z`).getUTCDay() === semana),
+      )
+      // "Horario livre", e nao "atendimento": a agenda pode estar so cheia.
       return {
         resposta:
-          `Nesta unidade não temos horário livre ${nome}. Escolha um dos dias da lista acima.\n` +
+          (emAlguma
+            ? `Nesta unidade não temos horário livre ${nome}. Escolha um dos dias da lista acima.\n`
+            : `Nesta unidade, e nas outras também, não temos horário livre ${nome}. Escolha um dos dias da lista acima.\n`) +
           'Digite VOLTAR para ver outra unidade, *9* se precisar de outra data, ou 0 para o início.',
         botoes: [
           { id: 'VOLTAR', titulo: 'Outra unidade' },
@@ -5824,9 +8778,34 @@ async function tratarConversaPorDentro(opcoes: {
         ],
       }
     }
+    // "Nao, quero de manha as 8h" no Tatuape, que so atende a tarde (rodada 2
+    // do painel), ouviu "Nao entendi". Hora ou turno sem o dia: os dias da
+    // lista que tem, ou as unidades que tem. Ver diasComAHora.
+    if (indice === null && unidadeEmAndamento && geral()) {
+      const pedida = horaEscrita(pedido)
+      const turno = pedida ? null : periodoEscrito(pedido)
+      if (pedida || turno) {
+        const resposta = await diasComAHora(admin, clinicId, unidadeEmAndamento, dias, pedida, turno)
+        if (resposta) return resposta
+      }
+    }
     if (indice === null) {
       if (desistiuDoAgendamento(texto)) {
         return await sairDoAgendamento(admin, conversationId, clinicId, opcoes.consultaASubstituir ?? null, opcoes.consultas)
+      }
+      // "Mas e Unimed Santos, como eu falei", ja na lista de dias (rodada 2 do
+      // painel): o convenio desta consulta, e nao a resposta pronta de
+      // convenios em cima da lista.
+      if (geral() && unidadeEmAndamento && !/^\s*\d+\s*$/.test(texto)) {
+        const unidade = await unidadePorId(admin, unidadeEmAndamento)
+        const planos = unidade ? planosDaUnidade(unidade) : []
+        const daCidade = normalizar(unidade?.name ?? '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length >= 3)
+        const qual = planos.length ? planoEscolhido(texto, planos, daCidade) : null
+        if (qual !== null) {
+          const nome = qual < planos.length ? planos[qual] : ''
+          await salvarEstado(admin, conversationId, { booking_insurance: nome })
+          return await comDuvidaJunto({ resposta: `✅ Anotado: ${nome ? `pela *${nome}*` : 'particular'}. Responda com o número do dia da lista acima.` })
+        }
       }
       // Data alem da agenda ("e pro dia 25 de novembro?"): a equipe reserva.
       // No painel, a mae ouviu duas vezes "Nao entendi" (14/10/2026).
@@ -5858,12 +8837,51 @@ async function tratarConversaPorDentro(opcoes: {
         'Perdi o fio da conversa, desculpe. Vamos recomeçar:',
       )
     }
+    // Dia e hora na mesma mensagem (rodada 2 do painel): "sexta 16 as 8h" e
+    // "pode ser esse de quinta 14h" abriam a lista do dia, e a pessoa tinha de
+    // escrever a hora de novo. Hora livre nesse dia: marca direto.
+    const horaJunto = horaEscrita(pedido)
+    if (horaJunto) {
+      const fuso = await fusoDaClinica(admin, clinicId)
+      const { horarios } = await horariosLivres(admin, clinicId, unidadeEmAndamento)
+      // "Seg dia 26 depois das 16h": a lista do dia, com o que cabe no limite.
+      const limite = limiteDaHora(pedido)
+      if (limite) {
+        const doDia = horarios.filter((h) => chaveDoDia(h.inicio, fuso) === dias[indice])
+        const lista = await perguntarHorario(admin, clinicId, conversationId, unidadeEmAndamento, dias[indice])
+        return { ...lista, resposta: `${textoDoLimite(doDia, horaJunto, limite, fuso)}\n\n${lista?.resposta ?? ''}` }
+      }
+      const naHora = naHoraPedida(horarios.filter((h) => chaveDoDia(h.inicio, fuso) === dias[indice]), horaJunto, fuso)
+      const cheia = horaJunto.minuto === null ? naHora.filter((h) => formatarHora(h.inicio, fuso).endsWith(':00')) : []
+      // "15h" num dia que so tem 15:20 (rodada 3 do painel) era marcado 15:20
+      // sem perguntar: a hora mais perto vai como pergunta.
+      const unico = cheia.length === 1 ? cheia[0] : naHora.length === 1 && (!geral() || horaJunto.minuto !== null) ? naHora[0] : null
+      if (unico) {
+        return await marcar(
+          admin, clinicId, conversationId, unidadeEmAndamento,
+          pacienteDaConsulta, opcoes.telefone, opcoes.nomeDoPerfil, unico,
+          opcoes.consultaASubstituir, opcoes.convenioEmAndamento ?? '',
+        )
+      }
+      if (naHora.length === 0) {
+        const lista = await perguntarHorario(admin, clinicId, conversationId, unidadeEmAndamento, dias[indice], periodoEscrito(pedido))
+        return { ...lista, resposta: `Às ${horaFalada(horaJunto)} não há horário livre nesse dia. ${lista?.resposta ?? ''}` }
+      }
+      if (geral()) {
+        const lista = await perguntarHorario(admin, clinicId, conversationId, unidadeEmAndamento, dias[indice], periodoEscrito(pedido))
+        const perto = emLista(naHora.map((h) => formatarHora(h.inicio, fuso)))
+        return { ...lista, resposta: `Às ${horaFalada(horaJunto)} em ponto não há horário nesse dia; o mais perto é ${perto}. Responda com o horário, ou com o número da lista.\n\n${lista?.resposta ?? ''}` }
+      }
+    }
+    // "Segunda de manha" (16/10/2026, painel): o periodo vai junto, e o dia
+    // que nao tem esse periodo diz isso. Ver perguntarHorario.
     return await perguntarHorario(
       admin,
       clinicId,
       conversationId,
       unidadeEmAndamento,
       dias[indice],
+      periodoEscrito(pedido),
     )
   }
 
@@ -5874,10 +8892,11 @@ async function tratarConversaPorDentro(opcoes: {
     if (desistiuComCerteza(texto)) {
       return await sairDoAgendamento(admin, conversationId, clinicId, opcoes.consultaASubstituir ?? null, opcoes.consultas)
     }
-    // Mesma troca de unidade do passo do dia (ver unidadePeloNome).
+    // Mesma troca de unidade do passo do dia (ver trocaDeUnidade).
     {
-      const outraUnidade = await unidadePeloNome(admin, clinicId, texto)
-      if (outraUnidade) return await perguntarConvenioOuDia(admin, clinicId, conversationId, outraUnidade)
+      if (pediuOutraUnidade(texto)) return await perguntarUnidade(admin, clinicId, conversationId)
+      const outraUnidade = await trocaDeUnidade(admin, clinicId, texto)
+      if (outraUnidade && outraUnidade.id !== unidadeEmAndamento) return await perguntarConvenioOuDia(admin, clinicId, conversationId, outraUnidade)
     }
     if (pediuVoltar(texto)) {
       if (!unidadeEmAndamento) {
@@ -5888,17 +8907,51 @@ async function tratarConversaPorDentro(opcoes: {
       return await perguntarDia(admin, clinicId, conversationId, unidade)
     }
 
+    // "17:20 nao da pra mim, deixa" (16/10/2026, painel) saia marcado as 17:20.
+    // O que vale e o que vem depois da recusa: sem nada depois, nada e marcado.
+    // Ver recusaDeEscolha.
+    const recusa = recusaDeEscolha(texto)
+    const pedido = recusa ? recusa.depois : texto
+    if (recusa && !horaEscrita(pedido) && !periodoEscrito(pedido) && !dataEscrita(pedido)) {
+      if (encerrouComARecusa(texto)) {
+        return await sairDoAgendamento(admin, conversationId, clinicId, opcoes.consultaASubstituir ?? null, opcoes.consultas)
+      }
+      return {
+        resposta:
+          'Tudo bem, não marquei esse horário. Escolha outro da lista acima, escreva o horário que fica melhor, ' +
+          'ou digite VOLTAR para ver outros dias.',
+      }
+    }
+
+    const timezoneDaClinica = await fusoDaClinica(admin, clinicId)
+    // O dia inteiro, e nao so os horarios da lista (16/10/2026): "tem as 16h?"
+    // num dia de doze horarios procurava so nos oito primeiros. O dia e o dos
+    // horarios da lista, quando e um so (a lista de sugestoes do cancelamento
+    // pode ter dias diferentes).
     const lista = Array.isArray(opcoes.opcoesAtuais) ? (opcoes.opcoesAtuais as Horario[]) : []
+    const diasDaLista = [...new Set(lista.map((h) => chaveDoDia(h.inicio, timezoneDaClinica)))]
+    const diaInteiro = diasDaLista.length === 1 ? diasDaLista[0] : null
+    const todosDoDia = async (): Promise<Horario[]> => {
+      if (!diaInteiro || !unidadeEmAndamento) return lista
+      const { horarios } = await horariosLivres(admin, clinicId, unidadeEmAndamento)
+      const doDia = horarios.filter((h) => chaveDoDia(h.inicio, timezoneDaClinica) === diaInteiro)
+      return doDia.length > 0 ? doDia : lista
+    }
 
     // Hora escrita vem antes do indice, e nao depois: num dia com dez ou mais
     // horarios, "10h" tambem e um indice valido - e apontaria para outra hora.
-    const pedida = horaEscrita(texto)
+    const pedida = horaEscrita(pedido)
     if (pedida) {
-      const timezone = await fusoDaClinica(admin, clinicId)
-      const daHora = lista.filter((h) => {
+      // "Depois das 16h" (ver limiteDaHora): os horarios do limite, e nao o das 16h.
+      const limite = limiteDaHora(pedido)
+      if (limite) return { resposta: textoDoLimite(await todosDoDia(), pedida, limite, timezoneDaClinica) }
+      const timezone = timezoneDaClinica
+      const naHora = (h: Horario) => {
         const [hh, mm] = formatarHora(h.inicio, timezone).split(':').map(Number)
         return hh === pedida.hora && (pedida.minuto === null || mm === pedida.minuto)
-      })
+      }
+      let daHora = lista.filter(naHora)
+      if (daHora.length === 0) daHora = (await todosDoDia()).filter(naHora)
 
       // "8h", "14 horas": a hora cheia, quando existe (14/10/2026). Perguntar
       // "temos 14:00 e 14:40" a quem disse "14 horas" era um passo a toa - so
@@ -5906,6 +8959,12 @@ async function tratarConversaPorDentro(opcoes: {
       const cheia = pedida.minuto === null ? daHora.filter((h) => formatarHora(h.inicio, timezone).endsWith(':00')) : []
       if (cheia.length === 1) daHora.splice(0, daHora.length, cheia[0])
 
+      // "15h" num dia que so tem 15:20 (rodada 3 do painel): pergunta, em vez
+      // de marcar 15:20 sem a pessoa saber.
+      if (geral() && pedida.minuto === null && cheia.length === 0 && daHora.length === 1) {
+        const perto = formatarHora(daHora[0].inicio, timezone)
+        return { resposta: `Às ${horaFalada(pedida)} em ponto não há horário nesse dia; o mais perto é ${perto}. Responda ${perto} para marcar, ou escolha outro da lista acima.` }
+      }
       if (daHora.length === 1) {
         if (!unidadeEmAndamento) {
           return await mostrarMenu(admin, conversationId, saudacao, 'Perdi o fio da conversa, desculpe. Vamos recomeçar:')
@@ -5929,13 +8988,35 @@ async function tratarConversaPorDentro(opcoes: {
         }
       }
 
+      // Os que nao couberam na lista tambem aparecem, para serem escritos.
+      const foraDaLista = (await todosDoDia())
+        .filter((h) => !lista.some((l) => l.inicio === h.inicio))
+        .map((h) => formatarHora(h.inicio, timezone))
       const linhas = lista
         .map((h, i) => `${i + 1} - ${formatarHora(h.inicio, timezone)}`)
         .join('\n')
       return {
         resposta:
-          `Esse horário não está entre os livres deste dia. Os disponíveis são:\n\n${linhas}\n\n` +
-          'Responda com o número, ou digite VOLTAR para escolher outro dia.',
+          'Esse horário não está entre os livres deste dia.' +
+          (linhas ? ` Os disponíveis são:\n\n${linhas}` : '') +
+          (foraDaLista.length ? `\n\n${linhas ? 'Também há' : 'Os livres são'}: ${foraDaLista.join(', ')} (escreva o horário).` : '') +
+          '\n\nResponda com o número ou o horário, ou digite VOLTAR para escolher outro dia.',
+      }
+    }
+
+    // "Nao tem de manha?", "tem a tarde?" (16/10/2026, painel): o periodo do
+    // mesmo dia, ou os dias que tem esse periodo. Ver perguntarHorario.
+    const periodoPedido = periodoEscrito(pedido)
+    if (periodoPedido && diaInteiro && unidadeEmAndamento && (parecePergunta(texto) || recusa || normalizar(texto).split(/\s+/).length <= 4)) {
+      return await perguntarHorario(admin, clinicId, conversationId, unidadeEmAndamento, diaInteiro, periodoPedido)
+    }
+
+    // "Nao tem antes?", "hj nao da?" (16/10/2026, painel). Ver informarMaisCedo.
+    {
+      const quando = perguntouMaisCedo(texto)
+      if (quando && unidadeEmAndamento && unidadeEmAndamento !== TELE_ID) {
+        const info = await informarMaisCedo(admin, clinicId, unidadeEmAndamento, quando, agora)
+        if (info) return { resposta: `${info}\n\nResponda com o número de um horário da lista acima, ou digite VOLTAR para ver os dias.` }
       }
     }
 
@@ -5948,7 +9029,7 @@ async function tratarConversaPorDentro(opcoes: {
     //
     // O dia e procurado entre os horarios livres, e nao montado da data: assim
     // nao ha ano para adivinhar, e um dia sem vaga responde que nao tem vaga.
-    const outroDia = dataEscrita(texto)
+    const outroDia = dataEscrita(pedido)
     if (outroDia && unidadeEmAndamento) {
       const timezone = await fusoDaClinica(admin, clinicId)
       const { horarios } = await horariosLivres(admin, clinicId, unidadeEmAndamento)
@@ -5970,8 +9051,53 @@ async function tratarConversaPorDentro(opcoes: {
       }
     }
 
-    let indice = escolha(texto, lista.length)
-    if (indice === null && lista.length > 0 && qualquerUm(texto)) indice = 0
+    // A troca de dia escrita como se fala (16/10/2026, painel): "nao, eu falei
+    // dia 23", "quinta 22", "sexta". Ver diaPeloNome.
+    {
+      const t = normalizar(pedido)
+      const citaDia = /\bdia\s+\d{1,2}\b/.test(t) || /\bamanha\b/.test(t) || DIAS_DA_SEMANA.some((d) => new RegExp(`\\b${d}\\b`).test(t))
+      if (citaDia && unidadeEmAndamento) {
+        const { horarios } = await horariosLivres(admin, clinicId, unidadeEmAndamento)
+        const dias = agruparPorDia(horarios, timezoneDaClinica).map((d) => d.chave)
+        const qual = diaPeloNome(pedido, dias, agora)
+        if (qual >= 0 && dias[qual] !== diaInteiro) {
+          return await perguntarHorario(admin, clinicId, conversationId, unidadeEmAndamento, dias[qual], periodoEscrito(pedido))
+        }
+      }
+    }
+
+    // "10" numa lista de seis horarios (16/10/2026, painel): nao e item da
+    // lista, e a hora. Numero que e item continua sendo item.
+    {
+      const n = normalizar(pedido).match(/^(?:as\s+)?(\d{1,2})$/)
+      if (n && Number(n[1]) > lista.length && Number(n[1]) <= 23 && unidadeEmAndamento) {
+        const naHora = (await todosDoDia()).filter((h) => Number(formatarHora(h.inicio, timezoneDaClinica).slice(0, 2)) === Number(n[1]))
+        const cheia = naHora.filter((h) => formatarHora(h.inicio, timezoneDaClinica).endsWith(':00'))
+        const unico = cheia.length === 1 ? cheia[0] : naHora.length === 1 && !geral() ? naHora[0] : null
+        if (geral() && !unico && naHora.length > 0) {
+          const perto = emLista(naHora.map((h) => formatarHora(h.inicio, timezoneDaClinica)))
+          return { resposta: `Às ${Number(n[1])}h em ponto não há horário nesse dia; o mais perto é ${perto}. Responda com o horário, ou escolha outro da lista acima.` }
+        }
+        if (unico) {
+          return await marcar(
+            admin, clinicId, conversationId, unidadeEmAndamento,
+            pacienteDaConsulta, opcoes.telefone, opcoes.nomeDoPerfil, unico,
+            opcoes.consultaASubstituir, opcoes.convenioEmAndamento ?? '',
+          )
+        }
+      }
+    }
+
+    let indice = escolha(pedido, lista.length)
+    if (indice === null && lista.length > 0 && qualquerUm(pedido)) indice = 0
+    // "Pode ser o ultimo horario" (rodada 3 do painel) recebeu o resumo da
+    // agenda inteira: e o ultimo da lista.
+    if (
+      indice === null && lista.length > 0 &&
+      /^((pode ser|quero|prefiro|me ve|entao|ok|sim|beleza|blz|marca|pode marcar)\s+)*(o |a )?(ultimo|ultima)( horario| vaga| da lista| do dia| da tarde| mesmo| que tiver)*$/.test(normalizar(pedido).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim())
+    ) {
+      indice = lista.length - 1
+    }
     if (indice === null) {
       if (desistiuDoAgendamento(texto)) {
         return await sairDoAgendamento(admin, conversationId, clinicId, opcoes.consultaASubstituir ?? null, opcoes.consultas)

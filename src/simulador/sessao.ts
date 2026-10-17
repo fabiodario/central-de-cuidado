@@ -108,6 +108,18 @@ export const ETAPAS: Record<string, string> = {
   documento_farmacia: 'Pedido de documento: farmácia',
 }
 
+/** O sinal de alarme do otorrino, como a tela conta (ver sinalDeAlarme). */
+const SINAIS: Record<string, string> = {
+  corpo_estranho: 'corpo estranho',
+  respiracao: 'respiração',
+  surdez: 'surdez súbita',
+  tontura: 'tontura forte',
+  engolir: 'não consegue engolir',
+  rosto: 'rosto ou fala',
+  pos_operatorio: 'pós-operatório',
+  mal_estar: 'passando mal',
+}
+
 const EVENTOS: Record<string, (detalhe?: string) => { titulo: string; tom: Tom } | null> = {
   menu_enviado: () => ({ titulo: 'Mostrou o menu de opções', tom: 'neutro' }),
   // A consulta gravada ja aparece pela escrita em appointments, com dia e
@@ -131,6 +143,12 @@ const EVENTOS: Record<string, (detalhe?: string) => { titulo: string; tom: Tom }
   acompanhamento_recado: () => ({ titulo: 'Recado do paciente: guardado para o médico', tom: 'atencao' }),
   // O alerta em si vira linha propria, com quem recebeu (ver enviarDaFamilia).
   alerta_sangramento: () => ({ titulo: 'Falou em sangramento: alerta disparado', tom: 'alerta' }),
+  sinal_de_alarme: (d) => ({ titulo: `Sinal de alarme${d ? ` (${SINAIS[d] ?? d})` : ''}: pronto-socorro e alerta`, tom: 'alerta' }),
+  pos_operatorio: () => ({ titulo: 'Paciente operado: passou para a equipe', tom: 'atencao' }),
+  outro_medico: () => ({ titulo: 'Citou outro médico: explicou que aqui é outro consultório', tom: 'atencao' }),
+  chamar_equipe_junto: () => ({ titulo: 'Dúvida que a equipe confirma: conversa acesa, agendamento segue', tom: 'atencao' }),
+  em_ingles: () => ({ titulo: 'Escreveu em inglês: passou para a equipe', tom: 'atencao' }),
+  pergunta_de_agenda: () => ({ titulo: 'Perguntou da agenda: respondeu com os dias e horários livres', tom: 'neutro' }),
   cpf_depois: () => ({ titulo: 'CPF mandado depois: guardado no cadastro', tom: 'bom' }),
   nao_entendi_repetido: () => ({ titulo: 'Terceiro "não entendi" seguido: chamou a equipe', tom: 'alerta' }),
   acompanhamento_agradeceu: () => ({ titulo: 'Agradecimento depois do acompanhamento', tom: 'neutro' }),
@@ -313,6 +331,12 @@ export class Simulacao {
     const futuras = this.consultas().filter(
       (c) => c.status === 'scheduled' && new Date(String(c.starts_at)).getTime() >= agora.getTime(),
     )
+    // A mensagem da familia entra no historico ANTES do robo, como o webhook
+    // grava (16/10/2026): o robo le as mensagens de antes da conversa - a
+    // queixa contada na primeira, por exemplo - e precisa ver a de agora tambem.
+    const historico = this.banco.linhas('whatsapp_messages')
+    historico.push({ conversation_id: CONVERSA, direction: 'inbound', automatic: false, body: familia.texto, created_at: agora.toISOString() })
+
     const hoje = agora.toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
     const consultaHoje = this.consultas().some(
       (c) =>
@@ -331,6 +355,7 @@ export class Simulacao {
       podeIniciarMenu: !this.equipeConversando,
       posAcompanhamento: false,
       consultaHoje,
+      motivoDaAtencao: (conversa.attention_reason as string | null) ?? null,
       texto: entrada.anexo ? '' : (entrada.idDoToque ?? entrada.texto),
       telefone: this.familia.telefone,
       pacientes,
@@ -370,10 +395,8 @@ export class Simulacao {
       Object.assign(conversa, { needs_attention: true, attention_reason: conversa.attention_reason || 'atendente' })
     }
 
-    // As mensagens tambem no banco falso, como o webhook grava: e dali que o
+    // A resposta tambem no banco falso, como o webhook grava: e dali que o
     // robo confere se uma resposta pronta acabou de sair (jaMandada).
-    const historico = this.banco.linhas('whatsapp_messages')
-    historico.push({ conversation_id: CONVERSA, direction: 'inbound', automatic: false, body: familia.texto, created_at: agora.toISOString() })
     if (resultado?.resposta) {
       historico.push({ conversation_id: CONVERSA, direction: 'outbound', automatic: true, body: resultado.resposta, created_at: agora.toISOString() })
     }
@@ -431,14 +454,18 @@ export class Simulacao {
       registros.push(this.registro('bandeira', `Conversa acesa na lista: ${m?.rotulo ?? motivoAgora}`, m?.tom ?? 'alerta', agora))
     }
 
-    // Sangramento: a notificacao que chega no celular de quem recebe o alerta,
-    // a cada mensagem - como o aviso da equipe faz em producao.
+    // Sangramento e urgencia: a notificacao que chega no celular de quem recebe
+    // o alerta, a cada mensagem - como o aviso da equipe faz em producao, que
+    // marca os dois como urgentes (ver aviso-da-equipe.ts). A urgencia entrou
+    // em 16/10/2026, com os sinais de alarme do otorrino.
     const alertas: Alerta[] = []
-    if (resultado?.atencao === 'sangramento' && this.identidade.alertaPara.length > 0) {
+    const urgente = resultado?.atencao === 'sangramento' || resultado?.atencao === 'urgencia'
+    if (urgente && this.identidade.alertaPara.length > 0) {
       const pacientes = this.pacientes()
       const quem = pacientes.length === 1 ? String(pacientes[0].name) : this.familia.nomeDoPerfil
+      const titulo = resultado?.atencao === 'sangramento' ? `🩸 Sangramento: ${quem}` : `🚨 Urgência: ${quem}`
       this.contador += 1
-      alertas.push({ id: `a${this.contador}`, em: agora, para: this.identidade.alertaPara, titulo: `🩸 Sangramento: ${quem}`, texto: familia.texto })
+      alertas.push({ id: `a${this.contador}`, em: agora, para: this.identidade.alertaPara, titulo, texto: familia.texto })
       registros.push(
         this.registro('alerta', `📲 Alerta no celular: ${this.identidade.alertaPara.join(' e ')}`, 'alerta', agora, `"${familia.texto.slice(0, 120)}"`),
       )

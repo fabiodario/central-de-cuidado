@@ -75,7 +75,7 @@ async function clinicaDoLogin(): Promise<string> {
 export async function lerClinicaDoLogin(): Promise<LinhasDaClinica> {
   const c = await clinicaDoLogin()
   const hoje = diaDeBrasilia(new Date())
-  const [clinica, unidades, regras, excecoes, agenda, saudacao, telemedicina, respostas, marcaTele, convenios, valores, valorTele] =
+  const [clinica, unidades, regras, excecoes, agenda, saudacao, telemedicina, respostas, marcaTele, convenios, valores, valorTele, chamaAEquipe] =
     await Promise.all([
       opcional(tabela('clinics').select('id,name').eq('id', c), 'o nome da clinica'),
       linhas(tabela('clinic_units').select('id,name,address,info_text,archived_at').eq('clinic_id', c)),
@@ -100,6 +100,8 @@ export async function lerClinicaDoLogin(): Promise<LinhasDaClinica> {
       opcional(tabela('clinic_units').select('id,accepts_insurance').eq('clinic_id', c), 'o convenio das unidades'),
       opcional(tabela('clinic_units').select('id,price_cents').eq('clinic_id', c), 'o valor das unidades'),
       opcional(tabela('clinic_settings').select('telemedicine_price_cents').eq('clinic_id', c).limit(1), 'o valor da telemedicina'),
+      // Coluna de 16/10/2026: a resposta que tambem chama a equipe.
+      opcional(tabela('bot_answers').select('id,hand_off').eq('clinic_id', c), 'o "chamar a equipe" das respostas prontas'),
     ])
 
   // RLS nao da erro para quem nao enxerga: devolve lista vazia. Sem unidade
@@ -112,6 +114,7 @@ export async function lerClinicaDoLogin(): Promise<LinhasDaClinica> {
   const tele = porId(marcaTele)
   const convenio = porId(convenios)
   const valor = porId(valores)
+  const equipe = porId(chamaAEquipe)
   return {
     clinica: clinica[0] ?? null,
     unidades: unidades.map((u) => ({
@@ -123,6 +126,6 @@ export async function lerClinicaDoLogin(): Promise<LinhasDaClinica> {
     regras,
     excecoes,
     configuracoes: { ...(agenda[0] ?? {}), ...(saudacao[0] ?? {}), ...(telemedicina[0] ?? {}), ...(valorTele[0] ?? {}) },
-    respostas,
+    respostas: respostas.map((r) => ({ ...r, hand_off: equipe.get(r.id)?.hand_off === true })),
   }
 }

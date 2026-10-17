@@ -3409,6 +3409,8 @@ export type RespostaPronta = {
   ordem: number
   /** Antes de responder, pergunta Santos, São Paulo ou Telemedicina e usa o texto do lugar. */
   perguntarUnidade: boolean
+  /** Depois de responder, passa a conversa para a equipe: assunto que a equipe confirma (16/10/2026). */
+  chamarEquipe: boolean
 }
 
 /** Escape para a tabela nova, que os tipos gerados ainda não conhecem. */
@@ -3443,6 +3445,18 @@ export async function listRespostasProntas(clinicId: string): Promise<RespostaPr
     .eq('clinic_id', clinicId)
     .order('position', { ascending: true })
   if (error) fail(error)
+  // hand_off (16/10/2026) vem em consulta propria: sem a coluna no banco, o
+  // Postgres recusaria a lista inteira, e a tela perderia todas as respostas.
+  const chamaAEquipe = new Set<string>()
+  try {
+    const extra = await respostasProntas().select('id,hand_off').eq('clinic_id', clinicId)
+    if (extra.error) throw extra.error
+    for (const linha of (extra.data ?? []) as { id: string; hand_off?: boolean | null }[]) {
+      if (linha.hand_off) chamaAEquipe.add(linha.id)
+    }
+  } catch (erro) {
+    console.warn('bot_answers sem hand_off; a tela segue sem o "chamar a equipe"', erro)
+  }
   return ((data ?? []) as LinhaDaResposta[]).map((linha) => ({
     id: linha.id,
     assunto: linha.subject,
@@ -3451,6 +3465,7 @@ export async function listRespostasProntas(clinicId: string): Promise<RespostaPr
     ativa: linha.is_active,
     ordem: linha.position,
     perguntarUnidade: Boolean(linha.ask_unit),
+    chamarEquipe: chamaAEquipe.has(linha.id),
   }))
 }
 
@@ -3468,18 +3483,26 @@ export async function saveRespostaPronta(
     ask_unit: resposta.perguntarUnidade,
   }
 
-  if (resposta.id) {
-    const { error } = await respostasProntas().update(valores).eq('id', resposta.id)
+  let id = resposta.id
+  if (id) {
+    const { error } = await respostasProntas().update(valores).eq('id', id)
     if (error) fail(error)
-    return resposta.id
+  } else {
+    const { data, error } = await respostasProntas()
+      .insert({ ...valores, clinic_id: clinicId })
+      .select('id')
+      .single()
+    if (error) fail(error)
+    id = ((data ?? {}) as { id?: string }).id ?? ''
   }
 
-  const { data, error } = await respostasProntas()
-    .insert({ ...valores, clinic_id: clinicId })
-    .select('id')
-    .single()
-  if (error) fail(error)
-  return ((data ?? {}) as { id?: string }).id ?? ''
+  // O "chamar a equipe" vai separado, pelo mesmo motivo da leitura: sem a
+  // coluna, ele se perde e avisa, e o resto da resposta fica salvo.
+  if (id) {
+    const { error } = await respostasProntas().update({ hand_off: resposta.chamarEquipe }).eq('id', id)
+    if (error) console.warn('Nao consegui salvar o "chamar a equipe" desta resposta', error)
+  }
+  return id
 }
 
 export async function deleteRespostaPronta(id: string): Promise<void> {

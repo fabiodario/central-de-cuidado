@@ -9,6 +9,18 @@ import { chaveDoWhatsApp } from '../_shared/whatsapp-teste.ts'
 import { montarAviso } from '../_shared/aviso-da-equipe.ts'
 import { avisarEquipe } from '../_shared/push-da-equipe.ts'
 import {
+  BOTOES_URGENCIA_OU_DUVIDA,
+  contextoDaLeitura,
+  decidirSegundaLeitura,
+  lerComJev,
+  type Leitura,
+  type MensagemDoHistorico,
+  modoDaSegundaLeitura,
+  PERGUNTA_URGENCIA_OU_DUVIDA,
+  precisaDeLeitura,
+  temBotaoDeUrgencia,
+} from '../_shared/segunda-leitura.ts'
+import {
   ESPERA_MAXIMA_MS,
   complementoDaRajada,
   precisaEsperar,
@@ -915,6 +927,30 @@ Deno.serve(async (req) => {
             !semRespostaDoRobo(message.type) &&
             settings.whatsapp_autoreply_enabled
           ) {
+            // Segunda leitura pelo Jev (17/10/2026, prototipo, DESLIGADA por
+            // padrao): ver _shared/segunda-leitura.ts. Comeca antes do motor
+            // para correr junto com ele, e qualquer falha vira "nada a fazer".
+            // Conversa ja acesa como urgencia ou sangramento nao e lida.
+            const modoJev = modoDaSegundaLeitura(Deno.env.get('JEV_SEGUNDA_LEITURA'), Deno.env.get('TYPESAFE_API_KEY'))
+            const motivoAceso = conversaAnterior?.needs_attention ? ((conversaAnterior.attention_reason as string | null) ?? null) : null
+            const leituraJev: Promise<Leitura> | null =
+              modoJev !== 'desligada' && precisaDeLeitura(body, message.type === 'interactive', motivoAceso)
+                ? (async (): Promise<Leitura> => {
+                    const { data: historico } = await admin
+                      .from('whatsapp_messages')
+                      .select('direction,body,automatic,external_message_id')
+                      .eq('conversation_id', conversation.id)
+                      .order('created_at', { ascending: false })
+                      .limit(10)
+                    const linhas = (historico ?? []) as (MensagemDoHistorico & { external_message_id?: string | null })[]
+                    // A mensagem de agora ja esta gravada (logo acima): fica de fora do contexto.
+                    const antes = externalId
+                      ? linhas.filter((m) => m.external_message_id !== externalId)
+                      : linhas[0]?.direction === 'inbound' && linhas[0]?.body === body ? linhas.slice(1) : linhas
+                    return await lerComJev({ texto: body, ...contextoDaLeitura(antes) }, { chave: Deno.env.get('TYPESAFE_API_KEY') ?? '' })
+                  })().catch((erro): Leitura => ({ ok: false, erro: String((erro as Error)?.message ?? erro) }))
+                : null
+
             const resultado = await tratarConversa({
               admin,
               clinicId,
@@ -928,6 +964,10 @@ Deno.serve(async (req) => {
               // Consulta atendida ha poucos dias conta igual (ver consultouHaPouco).
               posAcompanhamento: (acompanhamentoRecente || consultouHaPouco) && !equipeFalouRecentemente,
               consultaHoje,
+              // Conversa de sangramento ou urgencia na fila: a mensagem nova
+              // recebe o "nao espere" (ver lembreteDeUrgencia). Etapa vencida
+              // e conversa nova, e o motivo velho nao conta.
+              motivoDaAtencao: etapaVenceu ? null : ((conversaAnterior?.attention_reason as string | null) ?? null),
               texto: escolhido,
               telefone: waId,
               pacientes,
@@ -954,11 +994,37 @@ Deno.serve(async (req) => {
               },
             })
 
+            // A decisao da segunda leitura (ver decidirSegundaLeitura): so
+            // acrescenta. A resposta do robo sai igual; a urgencia acesa pelo
+            // Jev entra no lugar do motivo que a regra deu (atendente, anexo),
+            // nunca no de urgencia ou sangramento, que a regra ja acendeu.
+            const decisaoJev = leituraJev
+              ? decidirSegundaLeitura(await leituraJev, {
+                  modo: modoJev,
+                  motivoDoRobo: resultado?.atencao ?? motivoAceso,
+                  roboRespondeu: Boolean(resultado),
+                  jaTemBotaoDeUrgencia: temBotaoDeUrgencia(resultado),
+                })
+              : null
+            if (resultado && decisaoJev?.atencao) {
+              resultado.atencao = decisaoJev.atencao
+              resultado.concluida = false
+            }
+
             if (resultado) {
-              await responder(resultado.resposta, null, {
+              const respondeu = await responder(resultado.resposta, null, {
                 botoes: resultado.botoes,
                 lista: resultado.lista,
               })
+              // A pergunta com os dois botoes vai DEPOIS da resposta, numa
+              // mensagem propria. Toque na lista da mensagem de antes chega como
+              // o titulo da opcao (oQueFoiEscolhido), que o motor le na unidade,
+              // no convenio, no dia e no horario; no menu principal, "Duvidas
+              // sobre a consulta" tocado assim vira "nao entendi" (conferido no
+              // simulador em 17/10/2026).
+              if (respondeu && decisaoJev?.botoes) {
+                await responder(PERGUNTA_URGENCIA_OU_DUVIDA, null, { botoes: BOTOES_URGENCIA_OU_DUVIDA })
+              }
               // Atendimento fechado pelo robô, sem nada pendente para a
               // equipe. A conversa passa a "Resolvida", como se alguém
               // tivesse clicado em Concluir.
@@ -1037,7 +1103,9 @@ Deno.serve(async (req) => {
                   .from('whatsapp_conversations')
                   .update({
                     needs_attention: true,
-                    attention_reason: conversaAnterior?.attention_reason || 'atendente',
+                    // A urgencia que o Jev leu, com a equipe conversando (17/10/2026,
+                    // prototipo): a notificacao sai como urgencia, e o robo segue calado.
+                    attention_reason: decisaoJev?.atencao ?? (conversaAnterior?.attention_reason || 'atendente'),
                   })
                   .eq('id', conversation.id)
                 if (erroDoSilencio) {
@@ -1066,6 +1134,8 @@ Deno.serve(async (req) => {
                 eventos.push({ evento: 'chamou_equipe', detalhe: resultado.atencao })
               }
               if (resultado?.concluida) eventos.push({ evento: 'concluiu_sozinho' })
+              // A nota do Jev e o que foi feito com ela, para medir com mensagem de verdade.
+              if (decisaoJev) eventos.push({ evento: 'segunda_leitura', detalhe: decisaoJev.detalhe })
 
               if (eventos.length > 0) {
                 const { error: erroDoRegistro } = await admin
@@ -1103,7 +1173,7 @@ Deno.serve(async (req) => {
                   (conversaAnterior?.needs_attention
                     ? String(conversaAnterior.attention_reason ?? '') || null
                     : null)
-                : String(conversaAnterior?.attention_reason ?? '') || 'atendente'
+                : decisaoJev?.atencao ?? (String(conversaAnterior?.attention_reason ?? '') || 'atendente')
               const aviso = montarAviso({
                 conversationId: conversation.id,
                 atencaoAntes: Boolean(conversaAnterior?.needs_attention),

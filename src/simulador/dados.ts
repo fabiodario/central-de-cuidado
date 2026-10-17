@@ -23,8 +23,9 @@
  * igual na reuniao, sem depender de rede.
  */
 import type { Linha } from './banco-falso'
-import { horariosLivres, tabelasDaAgenda, type AgendaDaClinica } from './agenda'
+import { horariosLivres, tabelasDaAgenda, type AgendaDaClinica, type Bloqueio } from './agenda'
 import { CLINICA_DR_FABIO } from '../../supabase/functions/_shared/quem-atende.ts'
+import { feriadosDoAno } from '../../supabase/functions/_shared/expediente.ts'
 
 export type ChaveIdentidade = 'fabio'
 
@@ -56,15 +57,43 @@ const FECHO =
   '🙋 Quer falar com a Dayane ou alguém da equipe? Digite *9*.\n\n' +
   '⏰ Segunda a sexta, 8h às 18h. Fora desse horário, respondemos no próximo dia útil.'
 
-const PALAVRAS_DO_VALOR = ['credito', 'parcela', 'parcelar', 'pix', 'valor', 'valores', 'pagamento', 'preco', 'preço', 'preços', 'pagar', 'quanto', 'recibo', 'cartao', 'cartão', 'custa', 'debito', 'custo', 'particular', 'premium']
-const PALAVRAS_DO_ENDERECO = ['local', 'endereco', 'endereço', 'carro', 'localizacao', 'localização', 'onde', 'mapa', 'referencia', 'referência', 'estacionamento', 'estacionar', 'fica', 'chegar', 'rua', 'bairro', 'unidades', 'telefone', 'telefones']
+// Sem "particular" e "premium" (16/10/2026, painel): "preciso de uma consulta
+// o quanto antes, particular, em qualquer unidade" e jeito de pagar, e nao
+// pergunta de valor, e recebia o texto de valores em cima da agenda.
+const PALAVRAS_DO_VALOR = ['credito', 'parcela', 'parcelar', 'pix', 'valor', 'valores', 'pagamento', 'preco', 'preço', 'preços', 'pagar', 'quanto', 'recibo', 'cartao', 'cartão', 'custa', 'debito', 'custo', 'fiscal', 'dinheiro', 'boleto']
+// Sem "carro", "estacionamento" e "fica" (16/10/2026, painel de pacientes
+// simulados): "tem estacionamento?" recebia os enderecos, que nao falam de
+// estacionamento, e "fica dificil ir ate ai" tambem. Estacionamento ganhou
+// resposta propria, logo abaixo.
+const PALAVRAS_DO_ENDERECO = ['local', 'endereco', 'endereço', 'localizacao', 'localização', 'onde', 'mapa', 'referencia', 'referência', 'chegar', 'rua', 'bairro', 'unidades', 'telefone', 'telefones']
 
 /** Linhas de bot_answers, na ordem em que a clinica cadastrou. */
 function respostas(clinicId: string, lista: Omit<Linha, 'id'>[]): Linha[] {
-  return lista.map((r, i) => ({ id: `resposta-${i + 1}`, clinic_id: clinicId, is_active: true, position: i, ...r }))
+  return lista.map((r, i) => ({ id: `resposta-${i + 1}`, clinic_id: clinicId, is_active: true, position: i, hand_off: false, ...r }))
 }
 
+// O que o consultorio ainda nao informou (16/10/2026): a resposta diz que a
+// equipe confirma e chama a equipe (hand_off), para a pergunta nao ficar sem
+// dono. Quando o consultorio informar, escrever a resposta e desligar.
+const A_EQUIPE_CONFIRMA = { ask_unit: false, hand_off: true }
+
 const LEVAR = '📋 Traga um documento com foto e os exames anteriores que tiver, como tomografia, endoscopia nasal ou audiometria.'
+
+// Os feriados nacionais como dias fechados, como na clinica real: a carga de
+// 15/10/2026 levou os da migration 20260831090000 (de 07/09/2026 ao fim de
+// 2027). Sem eles o simulador oferecia Finados (02/11) em Santos (painel de
+// pacientes simulados, 16/10/2026). Carnaval e Cinzas vao marcados como ponto
+// facultativo, igual ao banco.
+const FERIADOS: Bloqueio[] = [2026, 2027]
+  .flatMap((ano) => [...feriadosDoAno(ano)])
+  .filter(([data]) => data >= '2026-09-07')
+  .sort(([a], [b]) => a.localeCompare(b))
+  .map(([data, nome]) => ({
+    id: `feriado-${data}`,
+    data,
+    motivo: /Carnaval|Cinzas/.test(nome) ? `${nome} (ponto facultativo)` : nome,
+    unidadeId: null,
+  }))
 
 const FABIO: Identidade = {
   chave: 'fabio',
@@ -126,31 +155,107 @@ const FABIO: Identidade = {
       },
     ],
     datasExtras: [],
-    bloqueios: [],
+    bloqueios: FERIADOS,
     preferencias: PREFERENCIAS,
     // Otorrino examina (nasofibroscopia, otoscopia): sem telemedicina.
     telemedicinaAtiva: false,
     telemedicinaValor: null,
   },
+  // A ordem decide o empate (respostas.ts). O assunto especifico vem antes do
+  // valor (16/10/2026, rodada 3 do painel): 'o retorno tem que pagar de novo?'
+  // e 'aparelio pra escutar, qto fica?' empatavam com Valor e ouviam o valor da
+  // consulta. O preco de uma coisa e assunto dela, e cada uma dessas respostas
+  // ja diz que o valor a equipe confirma.
   respostas: respostas(CLINICA_DR_FABIO, [
+    {
+      subject: 'Cirurgia',
+      // Antes de Convenios de proposito: "o Porto cobre a operacao de septo?"
+      // empata nas duas, e o empate fica com a de cima.
+      keywords: ['cirurgia', 'cirurgias', 'operar', 'operacao', 'operação', 'operacoes', 'opera', 'cobre', 'cobertura', 'coberta', 'septoplastia', 'turbinectomia', 'adenoidectomia', 'amigdalectomia'],
+      answer:
+        '🩺 *Cirurgia*\n\n' +
+        'O Dr. Fábio é especialista em cirurgia das vias aéreas superiores. A indicação de cirurgia é feita na consulta, depois da avaliação: é nela que ele explica o tratamento para o seu caso.\n\n' +
+        'Valores e cobertura do seu plano a nossa equipe confirma.',
+      ...A_EQUIPE_CONFIRMA,
+    },
+    {
+      subject: 'Retorno',
+      keywords: ['retorno', 'retornos', 'revisao', 'revisão'],
+      answer: '🔁 *Retorno*\n\nO prazo do retorno e se ele é cobrado, a nossa equipe confirma para você.',
+      ...A_EQUIPE_CONFIRMA,
+    },
+    {
+      subject: 'Exames no consultório',
+      keywords: ['exame', 'exames', 'nasofibroscopia', 'nasofibro', 'videonasofibroscopia', 'endoscopia', 'audiometria', 'impedanciometria', 'imitanciometria', 'laringoscopia', 'videolaringoscopia', 'bera', 'otoneurologico', 'otoneurológico'],
+      answer:
+        '🔬 *Exames*\n\n' +
+        'Quais exames são feitos no consultório, como a nasofibroscopia ou a audiometria, e em qual unidade, a nossa equipe confirma para você.',
+      ...A_EQUIPE_CONFIRMA,
+    },
+    {
+      subject: 'Aparelho auditivo',
+      // "surdez", "vende" e "comprar" (16/10/2026, rodada 2 do painel): "tem
+      // aparelho pra surdez ai? qual o valor" empatava com Valor e perdia, e
+      // "e o aparelho de ouvido, vcs vendem?" perdia para "O que o Dr. Fabio trata".
+      // 'aparelio' e 'aparelhinho' (rodada 3): como se escreve.
+      keywords: ['aparelho', 'aparelhos', 'aparelio', 'aparelhinho', 'auditivo', 'auditiva', 'auditivos', 'protese', 'prótese', 'surdez', 'vende', 'vendem', 'venda', 'comprar'],
+      answer:
+        '🦻 *Aparelho auditivo*\n\n' +
+        'Sobre aparelho auditivo, a nossa equipe confirma para você. Se a queixa é a audição, o primeiro passo é a consulta com o Dr. Fábio: digite *2* para marcar.',
+      ...A_EQUIPE_CONFIRMA,
+    },
+    {
+      subject: 'Rinoplastia',
+      // "rino" (16/10/2026, rodada 2 do painel): e assim que muita gente escreve.
+      keywords: ['rinoplastia', 'rino', 'plastica', 'plástica', 'estetica', 'estética', 'harmonia', 'harmonico', 'harmônico', 'formato'],
+      answer:
+        '✨ *Rinoplastia com o Dr. Fábio*\n\n' +
+        'Função e estética em equilíbrio: o objetivo é um nariz harmônico que também respira bem.\n\n' +
+        'O primeiro passo é a consulta de avaliação, em que o Dr. Fábio examina o nariz e explica as possibilidades para o seu caso. O valor da cirurgia é passado depois dessa avaliação. Digite *2* para marcar.',
+      ask_unit: false,
+    },
     {
       subject: 'Valor e pagamento',
       keywords: PALAVRAS_DO_VALOR,
+      // O valor ainda nao foi configurado: a equipe passa, e e chamada.
       answer:
         '💙 *Consulta com o Dr. Fábio*\n\n' +
         '• *Particular (Consulta Particular Premium)*, nas três unidades: avaliação completa, sem pressa, com diagnóstico e plano de tratamento sob medida.\n' +
         '• *Convênio*, em Santos (Boqueirão): Porto Saúde, Unimed Santos e Santa Saúde.\n\n' +
-        '💳 O valor da consulta particular e as formas de pagamento a nossa equipe passa por aqui. Emitimos recibo para você pedir reembolso ao seu plano.',
-      ask_unit: true,
+        '💳 O valor da consulta particular e as formas de pagamento a nossa equipe passa por aqui. Emitimos recibo para você pedir reembolso ao seu plano.\n\n' +
+        'O valor de cirurgias, como a rinoplastia, é passado depois da consulta de avaliação.',
+      ...A_EQUIPE_CONFIRMA,
+    },
+    {
+      subject: 'Guia e encaminhamento',
+      // 'clinico' (rodada 2 do painel): "pela unimed precisa de pedido do clinico
+      // geral?" e pergunta de encaminhamento.
+      keywords: ['guia', 'guias', 'encaminhamento', 'encaminhar', 'encaminhado', 'encaminhada', 'autorizacao', 'autorização', 'autorizar', 'requisicao', 'requisição', 'clinico', 'clínico'],
+      answer:
+        '📄 *Guia e encaminhamento*\n\n' +
+        'Se o seu plano pede guia, autorização ou encaminhamento para a consulta, a nossa equipe confirma para você. No dia, traga a carteirinha do convênio.',
+      ...A_EQUIPE_CONFIRMA,
     },
     {
       subject: 'Convênios',
-      keywords: ['convenio', 'convênio', 'convenios', 'convênios', 'plano', 'planos', 'aceita', 'aceitam', 'cobertura', 'coberto', 'credenciado', 'credenciada', 'carteirinha', 'reembolso', 'unimed', 'porto', 'santa', 'amil', 'bradesco', 'sulamerica', 'sulamérica', 'notredame', 'intermedica', 'hapvida', 'cassi', 'golden', 'prevent', 'omint', 'careplus', 'seguro', 'seguros'],
+      keywords: ['convenio', 'convênio', 'convenios', 'convênios', 'plano', 'planos', 'aceita', 'aceitam', 'cobertura', 'coberto', 'cobre', 'credenciado', 'credenciada', 'carteirinha', 'reembolso', 'unimed', 'porto', 'santa', 'amil', 'bradesco', 'sulamerica', 'sulamérica', 'notredame', 'intermedica', 'hapvida', 'cassi', 'golden', 'prevent', 'omint', 'careplus', 'seguro', 'seguros', 'paulistana', 'allianz', 'mediservice', 'cabesp'],
       answer:
         '💳 *Convênios*\n\n' +
-        'Em *Santos (Boqueirão)*, o Dr. Fábio atende pelos planos *Porto Saúde*, *Unimed Santos* e *Santa Saúde*, além do particular.\n\n' +
+        'Em *Santos (Boqueirão)*, o Dr. Fábio atende pelos planos *Porto Saúde*, *Unimed Santos* e *Santa Saúde*, além do particular. Da Unimed, só a *Unimed Santos*.\n\n' +
         'Em *São Paulo* (Higienópolis e Tatuapé), a consulta é *particular*. Emitimos recibo para você pedir reembolso ao seu plano.\n\n' +
+        'Cobertura de exames e de cirurgia depende do plano: a nossa equipe confirma.\n\n' +
         'Para marcar pelo convênio, digite *2* e escolha Santos.',
+      ask_unit: false,
+    },
+    {
+      subject: 'Crianças',
+      // Antes de O que o Dr. Fabio trata (rodada 2 do painel): "o dr atende nenem?
+      // nao sei se e normal levar no otorrino" empatava, e o empate fica com a de
+      // cima. 'bb' e como muita mae escreve.
+      keywords: ['bb', 'crianca', 'criança', 'criancas', 'crianças', 'filho', 'filha', 'filhos', 'filhas', 'bebe', 'bebê', 'bebes', 'bebês', 'nenem', 'neném', 'infantil', 'idade'],
+      answer:
+        '👶 Sim! O Dr. Fábio atende *crianças e adultos*.\n\n' +
+        'Respiração pela boca, ronco e nariz sempre entupido são queixas comuns na infância, e a consulta é feita com calma, no tempo da criança.',
       ask_unit: false,
     },
     {
@@ -176,15 +281,6 @@ const FABIO: Identidade = {
       ask_unit: false,
     },
     {
-      subject: 'Rinoplastia',
-      keywords: ['rinoplastia', 'plastica', 'plástica', 'estetica', 'estética', 'harmonia', 'harmonico', 'harmônico', 'formato'],
-      answer:
-        '✨ *Rinoplastia com o Dr. Fábio*\n\n' +
-        'Função e estética em equilíbrio: o objetivo é um nariz harmônico que também respira bem.\n\n' +
-        'O primeiro passo é a consulta de avaliação, em que o Dr. Fábio examina o nariz e explica as possibilidades para o seu caso. Digite *2* para marcar.',
-      ask_unit: false,
-    },
-    {
       subject: 'Endereços e telefones',
       keywords: [...PALAVRAS_DO_ENDERECO, 'higienopolis', 'higienópolis', 'tatuape', 'tatuapé', 'santos', 'boqueirao', 'boqueirão'],
       answer:
@@ -195,11 +291,38 @@ const FABIO: Identidade = {
       ask_unit: false,
     },
     {
+      subject: 'Estacionamento',
+      keywords: ['estacionamento', 'estacionar', 'estaciono', 'carro', 'garagem', 'manobrista', 'valet'],
+      answer: '🚗 *Estacionamento*\n\nA informação de estacionamento de cada unidade a nossa equipe confirma para você.',
+      ...A_EQUIPE_CONFIRMA,
+    },
+    {
+      subject: 'Consulta por vídeo',
+      keywords: ['online', 'video', 'vídeo', 'videochamada', 'teleconsulta', 'telemedicina', 'distancia', 'distância', 'remota', 'remoto'],
+      answer:
+        '💻 *Consulta por vídeo*\n\n' +
+        'As consultas com o Dr. Fábio são *presenciais*, nas unidades de Santos (Boqueirão), Higienópolis e Tatuapé. Digite *2* para ver os horários.',
+      ask_unit: false,
+    },
+    {
+      subject: 'Dias e horários',
+      keywords: ['noite', 'sabado', 'sábado', 'sabados', 'sábados', 'domingo', 'domingos', 'feriado', 'feriados', 'fecha', 'abre', 'abrem', 'abrir', 'funcionam', 'funcionamento', 'expediente', 'madrugada'],
+      answer:
+        '🕐 *Dias e horários*\n\n' +
+        'O Dr. Fábio atende de segunda a sexta, de manhã ou à tarde, conforme a unidade. Não há atendimento à noite nem aos fins de semana.\n\n' +
+        'A nossa equipe responde por aqui de segunda a sexta, das 8h às 18h. Digite *2* para ver os dias e horários livres de cada unidade.',
+      ask_unit: false,
+    },
+    {
       subject: 'Como é a consulta',
-      keywords: ['funciona', 'inclui', 'incluso', 'incluído', 'incluido', 'demora', 'duracao', 'duração', 'tempo', 'primeira', 'avaliacao', 'avaliação', 'diagnostico', 'diagnóstico', 'exames', 'cirurgia', 'acompanhamento', 'retorno', 'proprio', 'próprio', 'pessoalmente'],
+      // Sem "exames", "cirurgia", "retorno" e "pessoalmente" (16/10/2026,
+      // painel): cada uma trazia este texto para quem perguntava outra coisa.
+      // Cada assunto ganhou resposta propria. A duracao e a da agenda (40 min).
+      keywords: ['funciona', 'inclui', 'incluso', 'incluído', 'incluido', 'demora', 'dura', 'duram', 'duracao', 'duração', 'tempo', 'minutos', 'avaliacao', 'avaliação', 'diagnostico', 'diagnóstico', 'acompanhamento'],
       answer:
         '🩺 *Como é a consulta com o Dr. Fábio*\n\n' +
-        '1️⃣ *Consulta*: você é ouvido com atenção, sem pressa: sua história, seus sintomas e como eles afetam a sua rotina.\n' +
+        '⏱️ A consulta dura cerca de 40 minutos, sem pressa.\n\n' +
+        '1️⃣ *Consulta*: você é ouvido com atenção: sua história, seus sintomas e como eles afetam a sua rotina.\n' +
         '2️⃣ *Diagnóstico*: preciso e objetivo. Se for necessário, ele indica exames complementares.\n' +
         '3️⃣ *Plano de tratamento*: a melhor rota para a sua melhora, que pode envolver medicação, acompanhamento ou, em alguns casos, cirurgia.\n' +
         '4️⃣ *Acompanhamento*: a equipe fica à disposição para tirar suas dúvidas durante o tratamento.\n\n' +
@@ -208,7 +331,10 @@ const FABIO: Identidade = {
     },
     {
       subject: 'O que levar',
-      keywords: ['levar', 'trazer', 'documento', 'documentos', 'guia', 'antecedencia', 'antecedência', 'tomografia', 'audiometria', 'preparo', 'jejum'],
+      // Sem "guia", "tomografia" e "audiometria" (16/10/2026): guia e exames
+      // ganharam resposta propria, e "O que levar" respondia "voces fazem
+      // audiometria?" com "traga a sua audiometria".
+      keywords: ['levar', 'trazer', 'documento', 'documentos', 'antecedencia', 'antecedência', 'preparo', 'jejum'],
       answer:
         '📋 *Para a consulta, traga:*\n\n' +
         '• Documento com foto\n' +
@@ -218,11 +344,13 @@ const FABIO: Identidade = {
       ask_unit: false,
     },
     {
-      subject: 'Crianças',
-      keywords: ['crianca', 'criança', 'criancas', 'crianças', 'filho', 'filha', 'filhos', 'filhas', 'bebe', 'bebê', 'infantil', 'idade'],
+      subject: 'Áudio',
+      // Por ultimo: "audio" tambem e o comeco de "audiometria", e o empate fica
+      // com Exames, que vem antes.
+      keywords: ['audio', 'audios', 'áudio', 'áudios'],
       answer:
-        '👶 Sim! O Dr. Fábio atende *crianças e adultos*.\n\n' +
-        'Respiração pela boca, ronco e nariz sempre entupido são queixas comuns na infância, e a consulta é feita com calma, no tempo da criança.',
+        '🎤 Pode mandar áudio, sim: ele vai para a nossa equipe, que ouve e responde por aqui, de segunda a sexta, das 8h às 18h.\n\n' +
+        'Para marcar consulta é mais rápido por escrito: digite *2*.',
       ask_unit: false,
     },
   ]),

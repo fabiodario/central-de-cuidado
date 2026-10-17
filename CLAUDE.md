@@ -61,7 +61,35 @@ que muda de clínica para clínica fica em `_shared/quem-atende.ts`:
   do motor. **O padrão deste sistema é o Dr. Fábio.**
 
 Ao portar correções do robô do Dr. Marcello para cá, compare os dois
-`atendimento.ts`: as diferenças são só os pontos do perfil.
+`atendimento.ts`. Até 15/10/2026 as diferenças eram só os pontos do perfil;
+desde 16/10/2026 o motor daqui tem também as correções do painel de pacientes
+simulados (abaixo), que o do Dr. Marcello não tem. Elas estão marcadas nos
+comentários com "16/10/2026, painel": um grep acha todas.
+
+Mais três pontos do perfil, de 16/10/2026: `sinaisDeAlarme` (corpo estranho,
+falta de ar, surdez súbita, tontura forte com vômito, não conseguir engolir,
+rosto torto: pronto-socorro na hora e conversa acesa como urgência),
+`equipe` (o nome da Dayane na mensagem é pedido de gente) e `nomesDoMedico`
+(outro médico citado ouve que este é outro consultório).
+
+## Painel de pacientes simulados (tests/painel)
+
+Desde 16/10/2026: 40 pacientes (`tests/painel/pacientes.json`), cada um em
+duas redações, conversam com o robô de verdade por `tests/conversar.mjs`, e um
+juiz confere sete critérios (`tests/painel/README.md`). Toda falha achada vira
+caso em `tests/fabio.test.mjs`, e a correção é desligada uma vez para provar
+que o caso falha sem ela. Rodadas de 16/10/2026: 14, 41 e 40 de 80 conversas
+passaram; as falhas críticas foram de 20 para 2 e depois 5, todas de urgência
+escrita de um jeito que a regra ainda não lia. O painel acha falhas novas a
+cada rodada, mas não mede quanto falta. Rode de novo depois de mudança grande
+no robô; o resultado de cada rodada fica anotado no README do painel.
+
+Resposta pronta pode **chamar a equipe** (`bot_answers.hand_off`, desde
+16/10/2026): o robô responde e acende a conversa para a equipe, sem tirar a
+pessoa do menu. É o caminho para o que o consultório ainda não informou
+(estacionamento, exames, guia, retorno, valor). Quando a resposta mudar em
+`src/simulador/dados.ts`, `node scripts/respostas-prontas-sql.mjs` gera o SQL
+que leva a mudança ao banco da clínica.
 
 ## Simulador (reuniões)
 
@@ -93,8 +121,9 @@ login.
 
 `npm run test:bot` (ou `TESTAR BOT.bat`): o motor inteiro no perfil de origem
 (~1.240 verificações), o simulador com os roteiros do Dr. Fábio e
-`tests/fabio.test.mjs`, que cobre o que é só dele (sangramento, convênios,
-ficha de adulto e criança). Nenhum roteiro pode mostrar texto do Dr. Marcello
+`tests/fabio.test.mjs`, que cobre o que é só dele (sangramento, sinais de
+alarme, convênios, ficha de adulto e criança) e cada falha do painel de
+pacientes simulados. Nenhum roteiro pode mostrar texto do Dr. Marcello
 nem chamar paciente adulto de "criança": o teste do simulador barra.
 
 **Prove que o teste pega o defeito**: desligue a correção e confirme que ele

@@ -3329,18 +3329,21 @@ await caso('Pergunta clínica aponta a saída de urgência', [
   ['meu filho está com dor de barriga há 3 dias, posso dar dipirona?', ['não posso orientar', 'digite *URGÊNCIA*']],
 ])
 
-// "Quero remarcar" vai direto para a consulta, em vez do menu.
+// "Quero remarcar" vai direto para a consulta, em vez do menu. Desde
+// 16/10/2026 (painel de pacientes simulados do Dr. Fabio), com uma consulta so
+// e a intencao escrita, vai direto para a confirmacao, que mostra a consulta:
+// a tela de Remarcar e Cancelar era um passo a mais para quem ja tinha dito.
 await caso('"Quero remarcar" mostra a consulta', [
-  ['quero remarcar', ['Sua consulta', 'REMARCAR']],
+  ['quero remarcar', ['Vamos remarcar esta consulta', 'Responda SIM']],
 ], { consultas: [CONSULTA_ANA], pacientes: [] })
 
 await caso('"Preciso desmarcar a consulta" na primeira mensagem também, com a apresentação', [
-  ['preciso desmarcar a consulta de quinta', ['Aqui é o consultório', 'Sua consulta', 'CANCELAR']],
+  ['preciso desmarcar a consulta de quinta', ['Aqui é o consultório', 'Confirma o cancelamento desta consulta', 'Responda SIM']],
 ], { consultas: [CONSULTA_ANA], primeiraMensagem: true })
 
 await caso('Com o menu na tela, "queria trocar a data" é a opção 4', [
   ['Oi', 'Como podemos ajudar'],
-  ['queria trocar a data da consulta', 'Sua consulta'],
+  ['queria trocar a data da consulta', 'Vamos remarcar esta consulta'],
 ], { consultas: [CONSULTA_ANA] })
 
 {
@@ -4110,10 +4113,13 @@ await caso('Na fila, a mesma resposta pronta não sai duas vezes', [
   ['e convênio da Unimed?', null],
 ], { respostasProntas: RESPOSTAS })
 
-await caso('Sem fila, a pergunta repetida aponta para a resposta de cima', [
+// Desde 16/10/2026 (painel de pacientes simulados do Dr. Fabio) a pergunta
+// repetida vai para a equipe, em vez de apontar "Essa informacao esta logo
+// acima": quem pergunta de novo e quem nao achou a resposta ali.
+await caso('Sem fila, a pergunta repetida vai para a equipe, sem repetir o texto', [
   ['Oi', 'Como podemos ajudar'],
   ['Qual o valor?', 'R$ 450,00'],
-  ['quanto custa a consulta?', 'logo acima'],
+  ['quanto custa a consulta?', 'passei sua pergunta para a nossa equipe'],
 ], {
   respostasProntas: RESPOSTAS,
   verificar: ({ ultimoToque, titulo }) => {

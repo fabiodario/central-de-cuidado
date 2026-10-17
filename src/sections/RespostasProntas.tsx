@@ -50,6 +50,7 @@ const NOVA: Omit<Item, 'ordem'> = {
   resposta: '',
   ativa: false,
   perguntarUnidade: false,
+  chamarEquipe: false,
 }
 
 /**
@@ -358,6 +359,21 @@ export default function RespostasProntas() {
                 <span className="text-[10px] font-bold leading-relaxed text-slate-500">
                   Depois da resposta, perguntar onde é o atendimento (Santos, São Paulo ou Telemedicina) para
                   enviar o texto daquela unidade, que fica no cartão dela em Agenda → Configuração → Unidades.
+                </span>
+              </label>
+
+              {/* Assunto que a equipe confirma (16/10/2026): o robo responde e
+                  poe a conversa na fila, para a pergunta nao ficar sem dono. */}
+              <label className="mt-2 flex cursor-pointer items-start gap-2.5 rounded-[14px] border border-[#081b2c]/[0.06] bg-[#f8f7f4] px-3.5 py-3">
+                <input
+                  type="checkbox"
+                  checked={item.chamarEquipe}
+                  onChange={(e) => mudar(indice, { chamarEquipe: e.target.checked })}
+                  className="mt-0.5 h-3.5 w-3.5 accent-[#2f7fc1]"
+                />
+                <span className="text-[10px] font-bold leading-relaxed text-slate-500">
+                  Depois da resposta, chamar a equipe: a conversa entra na fila de Respostas para alguém completar.
+                  Use para o que a equipe ainda precisa confirmar, como estacionamento ou guia do convênio.
                 </span>
               </label>
             </div>
