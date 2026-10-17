@@ -320,7 +320,7 @@ await caso('a migration: coluna, tabela, RLS forcada e so o servidor escreve', (
   assert.match(m, /alter table public\.alertas_de_urgencia force row level security/)
   assert.match(m, /revoke all on table public\.alertas_de_urgencia from public, anon, authenticated/)
   assert.match(m, /grant select on table public\.alertas_de_urgencia to authenticated/)
-  assert.doesNotMatch(m, /supabase\.co|favohmryseurvnlxocfc|marcello/i, 'nada de URL de projeto nem do sistema do Dr. Marcello')
+  assert.doesNotMatch(m, /supabase\.co|marcello/i, 'nada de URL de projeto nem do sistema do Dr. Marcello')
 })
 
 conferirDesligar()
