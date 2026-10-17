@@ -1,5 +1,6 @@
 import { adminClient, corsHeaders, json } from '../_shared/whatsapp.ts'
 import { sendFollowup } from '../_shared/sendFollowup.ts'
+import { escolherParaEnviar } from '../_shared/disparo-do-acompanhamento.ts'
 
 /**
  * Disparo automatico diario dos acompanhamentos vencidos.
@@ -54,7 +55,7 @@ Deno.serve(async (req) => {
 
     const { data: vencidos, error } = await admin
       .from('followups')
-      .select('id,patient_id,followup_key,due_date,whatsapp_failed_at')
+      .select('id,clinic_id,patient_id,followup_key,due_date,whatsapp_failed_at')
       .lte('due_date', today)
       .gte('due_date', limite.toISOString().slice(0, 10))
       .eq('status', 'pending')
@@ -63,19 +64,34 @@ Deno.serve(async (req) => {
       .order('due_date', { ascending: false })
       .limit(500)
 
-    const due = (vencidos ?? []).filter(
-      (f) => !f.whatsapp_failed_at || f.whatsapp_failed_at < tresDiasAtras,
-    )
-    if ((vencidos ?? []).length === 500) {
-      console.warn('whatsapp-dispatch: 500 acompanhamentos vencidos na janela; os excedentes ficam para amanha')
-    }
-
     if (error) {
       console.error('Due lookup failed', error)
       return json({ error: 'Erro ao listar acompanhamentos vencidos.', details: error.message }, 500)
     }
+    if ((vencidos ?? []).length === 500) {
+      console.warn('whatsapp-dispatch: 500 acompanhamentos vencidos na janela; os excedentes ficam para amanha')
+    }
 
-    const resumo = { vencidos: due.length, enviados: 0, pulados: 0, falhas: 0 }
+    // Quem desligou o acompanhamento automatico em Preferencias (17/10/2026).
+    // Consulta separada: a coluna e nova, e o Postgres recusa a query inteira
+    // quando uma coluna nao existe. Coluna ainda ausente (publicacao no meio):
+    // ninguem conseguiu desligar, segue como antes. Qualquer outro erro para o
+    // disparo do dia: mandar para quem pediu para parar e pior que atrasar.
+    const clinicasDesligadas = new Set<string>()
+    const { data: desligadas, error: erroDaOpcao } = await admin
+      .from('clinic_settings')
+      .select('clinic_id')
+      .eq('acompanhamento_automatico', false)
+    if (erroDaOpcao && erroDaOpcao.code !== '42703') {
+      console.error('whatsapp-dispatch: nao li quem desligou o acompanhamento; nada foi enviado', erroDaOpcao)
+      return json({ error: 'Não consegui ler quem desligou o acompanhamento automático.', details: erroDaOpcao.message }, 500)
+    }
+    if (erroDaOpcao) console.warn('whatsapp-dispatch: opcao do acompanhamento ainda nao existe no banco; todas ligadas')
+    for (const linha of desligadas ?? []) clinicasDesligadas.add(String(linha.clinic_id))
+
+    const { enviar: due, desligados } = escolherParaEnviar(vencidos ?? [], { clinicasDesligadas, tresDiasAtras })
+
+    const resumo = { vencidos: due.length, enviados: 0, pulados: 0, falhas: 0, desligados }
     const detalhes: { followupId: string; resultado: string }[] = []
 
     for (const followup of due) {

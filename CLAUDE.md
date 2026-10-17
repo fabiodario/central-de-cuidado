@@ -150,13 +150,23 @@ nem chamar paciente adulto de "criança": o teste do simulador barra.
 **Prove que o teste pega o defeito**: desligue a correção e confirme que ele
 falha. Um teste que passa com o conserto desativado não testa nada.
 
-## node_modules fica fora do OneDrive
+## node_modules dentro do OneDrive (desde 17/10/2026)
 
-A pasta `node_modules` do projeto é uma junção para
-`%LOCALAPPDATA%\fabio-dario-sistema\node_modules`: são 27 mil arquivos que o
-OneDrive não precisa sincronizar, e o npm falha quando o OneDrive trava um
-deles. Os `.bat` recriam a junção em outro computador. Não troque por uma pasta
-comum.
+Até 17/10/2026 a pasta `node_modules` era uma junção para
+`%LOCALAPPDATA%\fabio-dario-sistema\node_modules`, para o OneDrive não
+sincronizar 27 mil arquivos. Nesse dia, no primeiro PUBLICAR com dois cliques,
+os programas abertos pelo Windows não atravessaram a junção ("'eslint' não é
+reconhecido"), embora os comandos rodados pelo Claude atravessassem. O
+`npm install` do PUBLICAR trocou a junção por uma pasta comum dentro do projeto
+(200 MB), e o Edu decidiu deixar assim por enquanto: todos os projetos dele
+ficam no OneDrive para abrir em qualquer computador.
+
+- **Não recrie a junção:** ela quebra o PUBLICAR com dois cliques. Teste do
+  jeito do Edu (dois cliques) antes de mexer nisso de novo.
+- Se um `npm install` falhar com arquivo travado, pause o OneDrive e rode de
+  novo.
+- A cópia antiga em `%LOCALAPPDATA%\fabio-dario-sistema` ficou sem uso; apagar
+  só com o OK do Edu.
 
 ## Regras herdadas do sistema do Dr. Marcello (continuam valendo)
 

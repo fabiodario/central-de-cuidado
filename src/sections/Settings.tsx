@@ -26,6 +26,7 @@ import {
 import DadosDaClinica from '@/sections/DadosDaClinica'
 import RespostasProntas from '@/sections/RespostasProntas'
 import SegundaLeituraDoJev from '@/sections/SegundaLeituraDoJev'
+import EnvioDoAcompanhamento from '@/sections/EnvioDoAcompanhamento'
 import InformacoesDoWhatsApp from '@/sections/InformacoesDoWhatsApp'
 import NotificacoesNoCelular from '@/sections/NotificacoesNoCelular'
 import { marcaSemClinicaConhecida } from '@/lib/marca'
@@ -210,6 +211,7 @@ export default function Settings({ db, importDb, clearAll }: Props) {
         </div>
 
         <div className="space-y-4 p-5 sm:p-6">
+          <EnvioDoAcompanhamento />
           <div className="rounded-[22px] border border-[#081b2c]/[0.07] bg-[#efeae2] p-4 sm:p-5">
             <div className="max-w-md rounded-[14px] rounded-tl-none bg-white p-3.5 text-xs leading-relaxed text-[#203546] shadow-sm">
               {marcaSemClinicaConhecida(clinicId).acompanhamentoV2 ? (

@@ -2338,6 +2338,34 @@ export async function saveModoDoJev(clinicId: string, modo: ModoDoJev): Promise<
   }
 }
 
+/**
+ * O envio automatico das 9h dos acompanhamentos de 15, 30 e 90 dias
+ * (17/10/2026), em consulta separada: a coluna e nova. Ligado por padrao.
+ */
+export async function getAcompanhamentoAutomatico(clinicId: string): Promise<boolean> {
+  const { data, error } = await (supabase as unknown as SupabaseClient)
+    .from('clinic_settings')
+    .select('acompanhamento_automatico')
+    .eq('clinic_id', clinicId)
+    .maybeSingle()
+  if (error) fail(error)
+  return data?.acompanhamento_automatico !== false
+}
+
+export async function saveAcompanhamentoAutomatico(clinicId: string, ligado: boolean): Promise<void> {
+  const { data, error } = await (supabase as unknown as SupabaseClient)
+    .from('clinic_settings')
+    .update({ acompanhamento_automatico: ligado })
+    .eq('clinic_id', clinicId)
+    .select('acompanhamento_automatico')
+  if (error) fail(error)
+  // Mesma conferencia do modo do Jev: sem linha gravada de volta, a tela nao
+  // pode dizer "salvo".
+  if (!data?.length || data[0]?.acompanhamento_automatico !== ligado) {
+    throw new Error('Não foi possível salvar: só o responsável pela clínica muda esta opção.')
+  }
+}
+
 export interface UltimaLeituraDoJev {
   detalhe: string
   quando: string
