@@ -277,6 +277,22 @@ Deno.serve(async (req) => {
         if (!settings?.clinic_id) continue
         const clinicId = settings.clinic_id
 
+        // O modo do Jev (17/10/2026, Preferencias) em consulta separada: a
+        // coluna e nova, e o Postgres recusa a query inteira quando uma coluna
+        // nao existe. Sem ler, fica desligado e o robo segue como sempre.
+        let opcaoDoJev: string | null = null
+        try {
+          const { data: jev, error: erroDoJev } = await admin
+            .from('clinic_settings')
+            .select('jev_segunda_leitura')
+            .eq('clinic_id', clinicId)
+            .maybeSingle()
+          if (erroDoJev) console.warn('meta-webhook: nao li o modo do Jev; segue desligado', erroDoJev.message)
+          opcaoDoJev = (jev?.jev_segunda_leitura as string | null | undefined) ?? null
+        } catch (erro) {
+          console.warn('meta-webhook: nao li o modo do Jev; segue desligado', erro)
+        }
+
         // A Meta manda em `contacts` o nome que a pessoa configurou no WhatsApp
         // dela. Nao e nome verificado, mas para um contato sem cadastro e a
         // unica coisa que a equipe tem para saber com quem esta falando.
@@ -927,11 +943,12 @@ Deno.serve(async (req) => {
             !semRespostaDoRobo(message.type) &&
             settings.whatsapp_autoreply_enabled
           ) {
-            // Segunda leitura pelo Jev (17/10/2026, prototipo, DESLIGADA por
-            // padrao): ver _shared/segunda-leitura.ts. Comeca antes do motor
-            // para correr junto com ele, e qualquer falha vira "nada a fazer".
-            // Conversa ja acesa como urgencia ou sangramento nao e lida.
-            const modoJev = modoDaSegundaLeitura(Deno.env.get('JEV_SEGUNDA_LEITURA'), Deno.env.get('TYPESAFE_API_KEY'))
+            // Segunda leitura pelo Jev (17/10/2026, DESLIGADA por padrao; o modo
+            // vem de Preferencias, a chave dos segredos): ver
+            // _shared/segunda-leitura.ts. Comeca antes do motor para correr
+            // junto com ele, e qualquer falha vira "nada a fazer". Conversa ja
+            // acesa como urgencia ou sangramento nao e lida.
+            const modoJev = modoDaSegundaLeitura(opcaoDoJev)
             const motivoAceso = conversaAnterior?.needs_attention ? ((conversaAnterior.attention_reason as string | null) ?? null) : null
             const leituraJev: Promise<Leitura> | null =
               modoJev !== 'desligada' && precisaDeLeitura(body, message.type === 'interactive', motivoAceso)

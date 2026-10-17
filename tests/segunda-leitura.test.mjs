@@ -5,11 +5,12 @@
 // fala com a TypeSafe: a API e um fetch falso. A medicao com o Jev de verdade
 // fica fora do repositorio, em ../jev-medicao.
 //
-// Fora do "npm run test:bot" de proposito, enquanto e prototipo:
-//   node tests/segunda-leitura.test.mjs
+// No "npm run test:bot" desde 17/10/2026, quando o modo passou a ser ligado e
+// desligado em Preferencias. Sozinho: node tests/segunda-leitura.test.mjs
 // SEGUNDA_LEITURA_TS aponta para outra copia do modulo (para provar que o
 // teste pega o defeito com a protecao desligada).
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { buildSync } from 'esbuild'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -59,14 +60,30 @@ const leu = (nota) => ({ ok: true, nota, sozinha: nota, comContexto: nota, model
 // Chave e modo
 // ---------------------------------------------------------------
 
-await caso('desligada por padrao: sem segredo, com valor estranho ou sem a chave da TypeSafe', () => {
-  assert.equal(SL.modoDaSegundaLeitura(undefined, 'chave'), 'desligada')
-  assert.equal(SL.modoDaSegundaLeitura('', 'chave'), 'desligada')
-  assert.equal(SL.modoDaSegundaLeitura('sim', 'chave'), 'desligada')
-  assert.equal(SL.modoDaSegundaLeitura('ligada', ''), 'desligada')
-  assert.equal(SL.modoDaSegundaLeitura('ligada', undefined), 'desligada')
-  assert.equal(SL.modoDaSegundaLeitura(' Ligada ', 'chave'), 'ligada')
-  assert.equal(SL.modoDaSegundaLeitura('sombra', 'chave'), 'sombra')
+await caso('o modo vem da opcao de Preferencias: desligada por padrao e com valor estranho', () => {
+  assert.equal(SL.modoDaSegundaLeitura(undefined), 'desligada')
+  assert.equal(SL.modoDaSegundaLeitura(null), 'desligada')
+  assert.equal(SL.modoDaSegundaLeitura(''), 'desligada')
+  assert.equal(SL.modoDaSegundaLeitura('sim'), 'desligada')
+  assert.equal(SL.modoDaSegundaLeitura('desligada'), 'desligada')
+  assert.equal(SL.modoDaSegundaLeitura(' Ligada '), 'ligada')
+  assert.equal(SL.modoDaSegundaLeitura('sombra'), 'sombra')
+})
+
+// Ligada em Preferencias sem a chave nos segredos (17/10/2026): antes virava
+// desligada calada; agora cada leitura falha como "sem chave", fica
+// registrada e a tela mostra.
+await caso('ligada sem a chave: falha como "sem chave", sem chamar a TypeSafe, e o registro diz', async () => {
+  const chamadas = []
+  for (const chave of ['', '   ', undefined]) {
+    const r = await SL.lerComJev(ENTRADA, { chave, fetch: apiFalsa({ chamadas }) })
+    assert.deepEqual(r, { ok: false, erro: 'sem chave' })
+  }
+  assert.equal(chamadas.length, 0, 'sem chave, nada sai para a TypeSafe')
+  const d = SL.decidirSegundaLeitura({ ok: false, erro: 'sem chave' }, LIGADA)
+  assert.deepEqual(d, { botoes: false, atencao: null, detalhe: 'falhou: sem chave' })
+  assert.equal(SL.descreverLeituraDoJev(d.detalhe).tom, 'erro')
+  assert.match(SL.descreverLeituraDoJev(d.detalhe).texto, /TYPESAFE_API_KEY/)
 })
 
 await caso('so mensagem escrita, com letra, em conversa que ainda nao e urgencia', () => {
@@ -247,6 +264,64 @@ await caso('o toque em Urgencia leva ao pronto-socorro com alerta, e o de Duvida
       }
     }
   }
+})
+
+// ---------------------------------------------------------------
+// Ligar e desligar em Preferencias (17/10/2026)
+// ---------------------------------------------------------------
+
+await caso('Preferencias: cada leitura registrada vira frase, com a nota em virgula; falha e possivel urgencia se destacam', () => {
+  const ver = (d) => SL.descreverLeituraDoJev(d)
+  assert.deepEqual(ver('sombra 0.42 jev-1.13.0'), { texto: 'Só observando: nota 0,42.', tom: 'ok' })
+  assert.deepEqual(ver('nada 0.05 jev-1.13.0'), { texto: 'Nada a fazer: nota 0,05.', tom: 'ok' })
+  assert.equal(ver('regra 0.90 jev-1.13.0').tom, 'ok')
+  assert.equal(ver('botoes 0.31 jev-1.13.0').tom, 'alerta')
+  assert.match(ver('botoes 0.31 jev-1.13.0').texto, /0,31.*Urgência e Dúvida/)
+  assert.equal(ver('urgencia 0.86 jev-1.13.0').tom, 'alerta')
+  assert.match(ver('urgencia 0.86 jev-1.13.0').texto, /0,86.*equipe foi avisada/)
+  assert.equal(ver('falhou: tempo esgotado').tom, 'erro')
+  assert.equal(ver('falhou: HTTP 401').tom, 'erro')
+  assert.match(ver('falhou: HTTP 401').texto, /HTTP 401/)
+  // O que a decisao escreve, a tela entende: nenhuma leitura vira "?".
+  for (const nota of [0.05, 0.25, 0.6]) {
+    for (const modo of ['sombra', 'ligada']) {
+      const d = SL.decidirSegundaLeitura(leu(nota), { ...LIGADA, modo })
+      assert.doesNotMatch(ver(d.detalhe).texto, /\?|Sem detalhe/, d.detalhe)
+    }
+  }
+})
+
+const ler = (...partes) => readFileSync(join(AQUI, '..', ...partes), 'utf8')
+
+await caso('o webhook le o modo da clinica em consulta separada, e nao mais do segredo', () => {
+  const webhook = ler('supabase', 'functions', 'meta-webhook', 'index.ts')
+  assert.doesNotMatch(webhook, /JEV_SEGUNDA_LEITURA/, 'o modo nao vem mais do segredo')
+  assert.match(webhook, /modoDaSegundaLeitura\(opcaoDoJev\)/)
+  // Coluna nova em consulta propria: o Postgres recusa a query inteira quando
+  // uma coluna nao existe, e a consulta principal das preferencias levaria o
+  // robo inteiro junto.
+  assert.match(webhook, /\.select\('jev_segunda_leitura'\)/)
+  const principal = webhook.match(/\.from\('clinic_settings'\)\s*\.select\(\s*'clinic_id,[^']*'/)
+  assert.ok(principal, 'a consulta principal das preferencias')
+  assert.doesNotMatch(principal[0], /jev_segunda_leitura/)
+})
+
+await caso('o banco: so tres modos, desligada por padrao, e a tela pode gravar (grant da coluna)', () => {
+  const sql = ler('supabase', 'migrations', '20261017120000_segunda_leitura_do_jev.sql')
+  assert.match(sql, /add column if not exists jev_segunda_leitura text not null default 'desligada'/)
+  assert.match(sql, /check \(jev_segunda_leitura in \('desligada', 'sombra', 'ligada'\)\)/)
+  assert.match(sql, /grant update \(jev_segunda_leitura\) on table public\.clinic_settings to authenticated/)
+})
+
+await caso('Preferencias: a secao do Jev esta na tela, so o responsavel muda, e salvar confere a linha gravada', () => {
+  assert.match(ler('src', 'sections', 'Settings.tsx'), /<SegundaLeituraDoJev \/>/)
+  const repo = ler('src', 'lib', 'repository.ts')
+  const salvar = repo.slice(repo.indexOf('export async function saveModoDoJev'), repo.indexOf('export interface UltimaLeituraDoJev'))
+  assert.match(salvar, /\.select\('jev_segunda_leitura'\)/, 'pede a linha gravada de volta')
+  assert.match(salvar, /throw new Error/, 'quem nao e responsavel ve o erro, e nao "salvo"')
+  const tela = ler('src', 'sections', 'SegundaLeituraDoJev.tsx')
+  assert.match(tela, /membership\.role === 'owner'/, 'so o responsavel muda')
+  assert.match(tela, /perguntar\(/, 'sair do desligado pede confirmacao')
 })
 
 console.log(`segunda-leitura: ${ok} casos ok`)

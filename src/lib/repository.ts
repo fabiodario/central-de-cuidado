@@ -2306,6 +2306,57 @@ export async function saveAutoReply(clinicId: string, prefs: AutoReplySettings) 
   if (error) fail(error)
 }
 
+/** A segunda leitura das mensagens pelo Jev (ver supabase/functions/_shared/segunda-leitura.ts). */
+export type ModoDoJev = 'desligada' | 'sombra' | 'ligada'
+
+/**
+ * O modo do Jev (17/10/2026), em consulta separada: a coluna e nova, e o
+ * Postgres recusa a query inteira quando uma coluna nao existe.
+ */
+export async function getModoDoJev(clinicId: string): Promise<ModoDoJev> {
+  const { data, error } = await (supabase as unknown as SupabaseClient)
+    .from('clinic_settings')
+    .select('jev_segunda_leitura')
+    .eq('clinic_id', clinicId)
+    .maybeSingle()
+  if (error) fail(error)
+  const modo = String(data?.jev_segunda_leitura ?? '')
+  return modo === 'ligada' || modo === 'sombra' ? modo : 'desligada'
+}
+
+export async function saveModoDoJev(clinicId: string, modo: ModoDoJev): Promise<void> {
+  const { data, error } = await (supabase as unknown as SupabaseClient)
+    .from('clinic_settings')
+    .update({ jev_segunda_leitura: modo })
+    .eq('clinic_id', clinicId)
+    .select('jev_segunda_leitura')
+  if (error) fail(error)
+  // Quem nao e o responsavel pela clinica passa pela politica do banco sem
+  // erro e sem mudar linha nenhuma. Sem esta conferencia a tela diria "salvo".
+  if (!data?.length || data[0]?.jev_segunda_leitura !== modo) {
+    throw new Error('Não foi possível salvar: só o responsável pela clínica muda esta opção.')
+  }
+}
+
+export interface UltimaLeituraDoJev {
+  detalhe: string
+  quando: string
+}
+
+/** O ultimo evento segunda_leitura do robo, para Preferencias mostrar se o Jev esta lendo. */
+export async function getUltimaLeituraDoJev(clinicId: string): Promise<UltimaLeituraDoJev | null> {
+  const { data, error } = await (supabase as unknown as SupabaseClient)
+    .from('whatsapp_bot_events')
+    .select('detalhe,criado_em')
+    .eq('clinic_id', clinicId)
+    .eq('evento', 'segunda_leitura')
+    .order('criado_em', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) fail(error)
+  return data ? { detalhe: String(data.detalhe ?? ''), quando: String(data.criado_em) } : null
+}
+
 /**
  * Ate quando a equipe pode responder em texto livre nesta conversa.
  * A Meta so permite isso por 24h depois da ultima mensagem do paciente; depois

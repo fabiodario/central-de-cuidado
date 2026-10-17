@@ -91,6 +91,27 @@ pessoa do menu. É o caminho para o que o consultório ainda não informou
 `src/simulador/dados.ts`, `node scripts/respostas-prontas-sql.mjs` gera o SQL
 que leva a mudança ao banco da clínica.
 
+## Segunda leitura pelo Jev (TypeSafe AI)
+
+Desde 17/10/2026 o robô pode pedir ao Jev, da TypeSafe AI, uma nota de
+urgência para cada mensagem escrita (`_shared/segunda-leitura.ts`, chamado no
+`meta-webhook`). O Jev só acrescenta cuidado: a partir de 0,2 manda a pergunta
+Urgência ou Dúvida, a partir de 0,5 acende a urgência. Nunca tira urgência da
+regra, nunca muda a resposta, nunca marca consulta, e qualquer falha deixa o
+robô como sempre.
+
+- O modo (desligado, só observar, ligado) fica em Preferências
+  (`clinic_settings.jev_segunda_leitura`, só o responsável muda). A chave fica
+  só nos segredos das Edge Functions (`TYPESAFE_API_KEY`), nunca no banco nem
+  na tela. Ligado sem chave, cada leitura fica registrada como "falhou: sem
+  chave", e Preferências mostra.
+- Os limiares foram medidos com a versão fixa `jev-1.13.0` e a pergunta
+  palavra por palavra: mudar um dos dois pede medir de novo (`../jev-medicao`,
+  fora do repositório).
+- O texto do paciente vai para os Estados Unidos: está na política de
+  privacidade (seção 4), com o OK do Dr. Fábio.
+- Testes em `tests/segunda-leitura.test.mjs`, dentro do `npm run test:bot`.
+
 ## Simulador (reuniões)
 
 `src/simulador`: o robô de verdade com banco falso no navegador. Identidade em

@@ -25,7 +25,9 @@
  *  - Qualquer falha (chave desligada, sem chave, tempo esgotado, erro da API)
  *    deixa o robo exatamente como hoje.
  *
- * DESLIGADA por padrao. O segredo JEV_SEGUNDA_LEITURA das Edge Functions liga:
+ * DESLIGADA por padrao. Desde 17/10/2026 o modo fica em Preferencias
+ * (clinic_settings.jev_segunda_leitura, so o responsavel pela clinica muda), e
+ * so a chave fica nos segredos das Edge Functions (TYPESAFE_API_KEY):
  *   sombra  le e registra a nota em whatsapp_bot_events, sem mudar nada;
  *   ligada  le, registra e age.
  * Com paciente de verdade, so depois de: contrato de tratamento de dados com
@@ -36,9 +38,12 @@
 
 export type ModoDaSegundaLeitura = 'desligada' | 'sombra' | 'ligada'
 
-/** O modo vem do segredo; sem a chave da TypeSafe, desligada. */
-export function modoDaSegundaLeitura(valor: string | null | undefined, chave: string | null | undefined): ModoDaSegundaLeitura {
-  if (!String(chave ?? '').trim()) return 'desligada'
+/**
+ * O modo vem da opcao da clinica em Preferencias; valor estranho, desligada.
+ * A chave nao entra aqui (17/10/2026): ligada sem chave tem que aparecer como
+ * falha (ver lerComJev), e nao virar desligada calada.
+ */
+export function modoDaSegundaLeitura(valor: string | null | undefined): ModoDaSegundaLeitura {
   const v = String(valor ?? '').trim().toLowerCase()
   return v === 'ligada' || v === 'sombra' ? v : 'desligada'
 }
@@ -157,6 +162,10 @@ export async function lerComJev(
   entrada: { texto: string; anteriores: string[]; ultimaDoRobo: string },
   opcoes: { chave: string; fetch?: typeof fetch; modelo?: string; tempoLimiteMs?: number },
 ): Promise<Leitura> {
+  // Ligada na tela sem a chave nos segredos (17/10/2026): cada leitura fica
+  // registrada como "falhou: sem chave", e Preferencias mostra. Antes isso
+  // virava desligada sem aviso nenhum.
+  if (!String(opcoes.chave ?? '').trim()) return { ok: false, erro: 'sem chave' }
   const buscar = opcoes.fetch ?? fetch
   const modelo = opcoes.modelo ?? SEGUNDA_LEITURA.modelo
   const controle = new AbortController()
@@ -235,6 +244,36 @@ export function decidirSegundaLeitura(
     return { botoes: true, atencao: null, detalhe: `botoes ${nota} ${leitura.modelo}` }
   }
   return nada(`nada ${nota} ${leitura.modelo}`)
+}
+
+/**
+ * O evento segunda_leitura (o `detalhe` de decidirSegundaLeitura) em frase para
+ * Preferencias (17/10/2026): quem liga o Jev precisa ver se ele esta lendo, e
+ * a falha (sem chave, fora do ar) tem que aparecer, e nao ficar so no banco.
+ */
+export function descreverLeituraDoJev(detalhe: string): { texto: string; tom: 'ok' | 'alerta' | 'erro' } {
+  const d = String(detalhe ?? '').trim()
+  if (d.startsWith('falhou:')) {
+    const erro = d.slice('falhou:'.length).trim()
+    if (erro === 'sem chave') {
+      return { texto: 'Falhou: falta a chave da TypeSafe nos segredos do Supabase (TYPESAFE_API_KEY).', tom: 'erro' }
+    }
+    if (erro === 'tempo esgotado') {
+      return { texto: 'Falhou: a TypeSafe não respondeu a tempo. O robô seguiu como sempre.', tom: 'erro' }
+    }
+    return { texto: `Falhou (${erro || 'erro'}). O robô seguiu como sempre.`, tom: 'erro' }
+  }
+  const [acao, nota] = d.split(/\s+/)
+  const n = nota && /^\d+(\.\d+)?$/.test(nota) ? nota.replace('.', ',') : '?'
+  if (acao === 'sombra') return { texto: `Só observando: nota ${n}.`, tom: 'ok' }
+  if (acao === 'nada') return { texto: `Nada a fazer: nota ${n}.`, tom: 'ok' }
+  if (acao === 'regra') return { texto: `A regra já tinha reconhecido a urgência. Nota do Jev: ${n}.`, tom: 'ok' }
+  if (acao === 'botoes') {
+    return { texto: `Possível urgência (nota ${n}): o paciente recebeu os botões Urgência e Dúvida.`, tom: 'alerta' }
+  }
+  if (acao === 'urgencia') return { texto: `Urgência (nota ${n}): a equipe foi avisada.`, tom: 'alerta' }
+  if (acao === 'desligada') return { texto: 'Desligada.', tom: 'ok' }
+  return { texto: d || 'Sem detalhe.', tom: 'ok' }
 }
 
 /** A resposta do robo ja traz o botao de urgencia? (botoes do "nao entendi", ou a linha de urgencia de uma lista) */
