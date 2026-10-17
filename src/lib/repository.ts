@@ -2447,6 +2447,23 @@ export async function sendConversationMenu(conversationId: string) {
 }
 
 /**
+ * O veredito de quem atende sobre uma urgencia (17/10/2026, ver
+ * supabase/functions/_shared/veredito.ts): o servidor manda o texto fixo ao
+ * paciente, muda o motivo da conversa e registra o veredito.
+ */
+export async function sendUrgencyVerdict(conversationId: string, veredito: 'urgente' | 'nao_urgente') {
+  const { data, error } = await supabase.functions.invoke('whatsapp-reply', {
+    body: { conversationId, veredito },
+  })
+  if (error) {
+    throw new Error(await motivoDaFuncao(error, data, 'Não foi possível enviar o veredito.'))
+  }
+  if ((data as { error?: string } | null)?.error) {
+    throw new Error((data as { error: string }).error)
+  }
+}
+
+/**
  * Manda os horarios livres de uma unidade pela lista tocavel do robo
  * (14/10/2026, botao "Mandar horarios"). A familia toca no dia e no horario,
  * e o robo marca a consulta.

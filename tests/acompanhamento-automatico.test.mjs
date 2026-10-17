@@ -14,7 +14,8 @@ const fonte = process.env.ACOMPANHAMENTO_TS ?? join(AQUI, '..', 'supabase', 'fun
 const saida = join(AQUI, 'disparo-do-acompanhamento.build.mjs')
 buildSync({ entryPoints: [fonte], format: 'esm', outfile: saida, logLevel: 'warning' })
 const { escolherParaEnviar } = await import(`${pathToFileURL(saida).href}?v=${Date.now()}`)
-const ler = (...partes) => readFileSync(join(AQUI, '..', ...partes), 'utf8')
+// Sem CR: o git no Windows grava CRLF, e os trechos procurados aqui sao com \n.
+const ler = (...partes) => readFileSync(join(AQUI, '..', ...partes), 'utf8').replace(/\r\n/g, '\n')
 
 let ok = 0
 async function caso(nome, fn) {

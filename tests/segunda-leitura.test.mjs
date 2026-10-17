@@ -291,7 +291,8 @@ await caso('Preferencias: cada leitura registrada vira frase, com a nota em virg
   }
 })
 
-const ler = (...partes) => readFileSync(join(AQUI, '..', ...partes), 'utf8')
+// Sem CR: o git no Windows grava CRLF, e os trechos procurados aqui sao com \n.
+const ler = (...partes) => readFileSync(join(AQUI, '..', ...partes), 'utf8').replace(/\r\n/g, '\n')
 
 await caso('o webhook le o modo da clinica em consulta separada, e nao mais do segredo', () => {
   const webhook = ler('supabase', 'functions', 'meta-webhook', 'index.ts')

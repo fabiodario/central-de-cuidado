@@ -3,6 +3,14 @@ import { iniciarQuestionario, mostrarMenu, oferecerHorarios } from '../_shared/a
 import { montarConteudo } from '../_shared/conteudo.ts'
 import { variantesDoTelefone } from '../_shared/telefone-br.ts'
 import { chaveDoWhatsApp } from '../_shared/whatsapp-teste.ts'
+import { clinicaDeQuemAtende } from '../_shared/papel.ts'
+import {
+  conversaDepoisDoVeredito,
+  detalheDoVeredito,
+  MOTIVOS_COM_VEREDITO,
+  textoDoVeredito,
+  vereditoValido,
+} from '../_shared/veredito.ts'
 
 /**
  * Resposta livre da equipe para um paciente, a partir da tela de Conversas.
@@ -70,6 +78,12 @@ type ReplyRequest = {
    * consulta quando ha irmaos no mesmo telefone.
    */
   horarios?: { unidade?: string; de?: string | null; ate?: string | null; pacienteId?: string | null }
+  /**
+   * Em vez de texto, o veredito de quem atende sobre uma urgencia (17/10/2026,
+   * ver _shared/veredito.ts): o texto fixo vai ao paciente, a conversa muda
+   * de motivo e o veredito fica registrado. So owner ou clinician.
+   */
+  veredito?: string
 }
 
 Deno.serve(async (req) => {
@@ -97,7 +111,10 @@ Deno.serve(async (req) => {
     const querMenu = body.menu === true
     const querQuestionario = body.questionario === true
     const querHorarios = Boolean(body.horarios?.unidade)
-    let texto = (body.text ?? '').trim()
+    const veredito = body.veredito === undefined ? null : vereditoValido(body.veredito)
+    if (body.veredito !== undefined && !veredito) return json({ error: 'Veredito inválido.' }, 400)
+    // O texto do veredito e o fixo, montado aqui: o que a tela mandar e ignorado.
+    let texto = veredito ? '' : (body.text ?? '').trim()
     if (!body.conversationId) return json({ error: 'Conversa não informada.' }, 400)
 
     // Arquivo da equipe para a familia (24/09/2026): receita, pedido de exame,
@@ -124,7 +141,7 @@ Deno.serve(async (req) => {
     // questionario chegam aqui sem texto de proposito: quem monta a mensagem e
     // o robo, mais abaixo. Sem esta ressalva o botao Questionario batia nesta
     // linha e voltava "Escreva a mensagem antes de enviar" sem nunca enviar.
-    if (!texto && !querMenu && !querQuestionario && !querHorarios && !arquivo) {
+    if (!texto && !querMenu && !querQuestionario && !querHorarios && !arquivo && !veredito) {
       return json({ error: 'Escreva a mensagem antes de enviar.' }, 400)
     }
     if (texto.length > LIMITE_CARACTERES) {
@@ -136,7 +153,7 @@ Deno.serve(async (req) => {
     const scoped = userClient(authorization)
     const { data: visivel, error: visivelError } = await scoped
       .from('whatsapp_conversations')
-      .select('id,clinic_id,patient_id,wa_id,status')
+      .select('id,clinic_id,patient_id,wa_id,status,needs_attention,attention_reason')
       .eq('id', body.conversationId)
       .maybeSingle()
 
@@ -146,6 +163,18 @@ Deno.serve(async (req) => {
     }
     if (!visivel) {
       return json({ error: 'Esta conversa não pertence à sua clínica.', code: 'NOT_VISIBLE' }, 403)
+    }
+
+    // O veredito (17/10/2026): so quem atende, e so em conversa acesa como
+    // urgencia. A segunda trava impede o duplo clique de mandar duas vezes.
+    if (veredito) {
+      if (!(await clinicaDeQuemAtende(scoped, visivel.clinic_id))) {
+        return json({ error: 'O veredito da urgência é de quem atende.', code: 'SEM_PERMISSAO' }, 403)
+      }
+      if (!visivel.needs_attention || !MOTIVOS_COM_VEREDITO.includes(String(visivel.attention_reason ?? ''))) {
+        return json({ error: 'Esta conversa não está marcada como urgência.', code: 'SEM_URGENCIA' }, 409)
+      }
+      texto = textoDoVeredito(veredito, visivel.clinic_id)
     }
     if (visivel.status === 'opted_out') {
       return json({
@@ -460,8 +489,22 @@ Deno.serve(async (req) => {
         unread_count: 0,
         last_message_at: agora,
         ...(visivel.status === 'resolved' ? { status: 'open' } : {}),
+        // Nao urgente promete a equipe: a conversa fica acesa como "atendente".
+        ...(veredito ? conversaDepoisDoVeredito(veredito) : {}),
       })
       .eq('id', visivel.id)
+
+    // O veredito registrado para comparar com a nota do Jev e com a regra.
+    // Falhar aqui nao desfaz o envio: avisa no log, e o texto ja esta na conversa.
+    if (veredito) {
+      const { error: erroDoRegistro } = await admin.from('whatsapp_bot_events').insert({
+        clinic_id: visivel.clinic_id,
+        conversation_id: visivel.id,
+        evento: 'veredito_urgencia',
+        detalhe: detalheDoVeredito(veredito, visivel.attention_reason as string | null),
+      })
+      if (erroDoRegistro) console.error('whatsapp-reply: veredito enviado, mas nao registrado', erroDoRegistro)
+    }
 
     return json({ ok: true, message: salva, windowClosesAt: fechaEm.toISOString() })
   } catch (error) {

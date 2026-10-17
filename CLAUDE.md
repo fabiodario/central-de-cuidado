@@ -117,6 +117,19 @@ robô como sempre.
   privacidade (seção 4), com o OK do Dr. Fábio.
 - Testes em `tests/segunda-leitura.test.mjs`, dentro do `npm run test:bot`.
 
+## Veredito da urgência (17/10/2026)
+
+Conversa acesa como urgência ou sangramento ganha, na tela de Respostas, os
+botões "É urgente" e "Não é urgente", só para owner e clinician
+(`VereditoDaUrgencia.tsx`). O `whatsapp-reply` (campo `veredito`) monta no
+servidor o texto fixo em nome do médico (`_shared/veredito.ts`), manda ao
+paciente, muda a conversa (urgente sai da lista; não urgente fica como
+"atendente") e registra `veredito_urgencia` em `whatsapp_bot_events`, para
+comparar com a nota do Jev e com a regra. O paciente nunca espera o clique: a
+orientação de segurança já saiu na hora. Os textos falam em nome do médico:
+mudar a redação é decisão dele. Testes em `tests/veredito.test.mjs`; o
+simulador tem os mesmos botões no painel da equipe.
+
 ## Simulador (reuniões)
 
 `src/simulador`: o robô de verdade com banco falso no navegador. Identidade em

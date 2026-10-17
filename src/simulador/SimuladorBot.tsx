@@ -633,6 +633,14 @@ export default function SimuladorBot() {
     setVersao((v) => v + 1)
   }
 
+  /** O veredito do medico sobre a urgencia (17/10/2026), como na tela de Respostas. */
+  function darVeredito(veredito: 'urgente' | 'nao_urgente') {
+    const r = simAtual.current.darVeredito(veredito)
+    if (r.mensagem) setMensagens((m) => [...m, r.mensagem as Mensagem])
+    setRegistros((g) => [...g, ...r.registros])
+    setVersao((v) => v + 1)
+  }
+
   function concluir() {
     const novos = simAtual.current.concluir()
     setRegistros((g) => [...g, ...novos])
@@ -1060,6 +1068,31 @@ export default function SimuladorBot() {
               </div>
 
               <div className="border-t border-slate-100 bg-[#f6f4ef] px-4 py-3">
+                {sim.pedeVeredito && (
+                  <div className="mb-2 rounded-xl border border-[#b42318]/25 bg-[#fff5f4] px-3 py-2">
+                    <p className="text-[12px] font-bold text-[#7a1a12]">
+                      Urgência: o que o médico acha? O paciente já recebeu a orientação de procurar atendimento.
+                    </p>
+                    <div className="mt-1.5 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        disabled={travado}
+                        onClick={() => darVeredito('urgente')}
+                        className="rounded-xl bg-[#b42318] px-3 py-1.5 text-[12.5px] font-bold text-white disabled:opacity-40"
+                      >
+                        É urgente
+                      </button>
+                      <button
+                        type="button"
+                        disabled={travado}
+                        onClick={() => darVeredito('nao_urgente')}
+                        className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-[12.5px] font-bold text-[#1d1d1b] disabled:opacity-40"
+                      >
+                        Não é urgente
+                      </button>
+                    </div>
+                  </div>
+                )}
                 {situacao === 'equipe' && (
                   <p className="mb-2 text-[12px] font-semibold text-[#8a5a43]">
                     O robô está em silêncio enquanto a {IDENTIDADE.equipe} conversa. Concluir devolve a conversa para ele.

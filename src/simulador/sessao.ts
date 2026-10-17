@@ -26,6 +26,12 @@ import {
   type Leitura,
   type ModoDaSegundaLeitura,
 } from '../../supabase/functions/_shared/segunda-leitura.ts'
+import {
+  conversaDepoisDoVeredito,
+  MOTIVOS_COM_VEREDITO,
+  textoDoVeredito,
+  type Veredito,
+} from '../../supabase/functions/_shared/veredito.ts'
 
 /**
  * Quem pergunta ao Jev no simulador (17/10/2026): no sistema, a funcao
@@ -586,6 +592,38 @@ export class Simulacao {
     this.banco.linhas('whatsapp_messages').push({
       conversation_id: CONVERSA, direction: 'outbound', automatic: false, body: texto, created_at: agora.toISOString(),
     })
+    return { mensagem: this.mensagem('equipe', texto, agora), registros }
+  }
+
+  /** A conversa esta acesa como urgencia: o medico pode dar o veredito. */
+  get pedeVeredito(): boolean {
+    return MOTIVOS_COM_VEREDITO.includes(this.motivo ?? '')
+  }
+
+  /**
+   * O veredito do medico sobre a urgencia (17/10/2026), como o whatsapp-reply
+   * faz: o texto fixo vai ao paciente como mensagem da equipe, e a conversa
+   * muda de motivo. Fora de uma urgencia, nao faz nada.
+   */
+  darVeredito(veredito: Veredito): { mensagem: Mensagem | null; registros: Registro[] } {
+    if (!this.pedeVeredito) return { mensagem: null, registros: [] }
+    const agora = this.relogio()
+    const texto = textoDoVeredito(veredito, this.identidade.clinicId)
+    this.equipeConversando = true
+    Object.assign(this.conversa, conversaDepoisDoVeredito(veredito), { status: 'open' })
+    this.banco.linhas('whatsapp_messages').push({
+      conversation_id: CONVERSA, direction: 'outbound', automatic: false, body: texto, created_at: agora.toISOString(),
+    })
+    const registros = [
+      this.registro(
+        'evento',
+        veredito === 'urgente'
+          ? 'Veredito do médico: é urgente. O paciente foi orientado a ir ao pronto-socorro.'
+          : 'Veredito do médico: não é urgente. A conversa volta para a equipe.',
+        veredito === 'urgente' ? 'alerta' : 'bom',
+        agora,
+      ),
+    ]
     return { mensagem: this.mensagem('equipe', texto, agora), registros }
   }
 

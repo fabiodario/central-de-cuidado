@@ -67,6 +67,7 @@ import {
 import { lugaresDoRobo } from '@/lib/lugares'
 import MandarHorarios from '@/sections/MandarHorarios'
 import SimuladorNasRespostas from '@/sections/SimuladorNasRespostas'
+import VereditoDaUrgencia from '@/sections/VereditoDaUrgencia'
 import { useDialogos } from '@/components/dialogos-contexto'
 import { useVoltarDoCelular } from '@/lib/voltar-do-celular'
 import { publicoDaClinica } from '@/lib/publico'
@@ -615,6 +616,8 @@ export default function Conversations({
   const [destravando, setDestravando] = useState<string | null>(null)
   // Destravar e do dono da conta (14/10/2026). Ver o comentario no botao.
   const [souDono, setSouDono] = useState(false)
+  // O veredito da urgencia e de quem atende: owner ou clinician (17/10/2026).
+  const [podeDarVeredito, setPodeDarVeredito] = useState(false)
 
   useEffect(() => {
     const timer = window.setInterval(() => setAgora(Date.now()), 60_000)
@@ -787,6 +790,7 @@ export default function Conversations({
       if (!membership) throw new Error('Não foi possível identificar a clínica do seu usuário.')
       setClinicId(membership.clinicId)
       setSouDono(membership.role === 'owner')
+      setPodeDarVeredito(membership.role === 'owner' || membership.role === 'clinician')
       const [lista, automatica] = await Promise.all([
         listConversations(membership.clinicId),
         getAutoReply(membership.clinicId),
@@ -1092,6 +1096,14 @@ export default function Conversations({
    * sucesso: se a Meta recusar, o que foi escrito continua ali para tentar de
    * novo ou encurtar.
    */
+  /** Depois do veredito da urgencia: a mensagem nova na conversa e o motivo novo na lista. */
+  async function aposVeredito() {
+    if (!selectedId) return
+    acabamosDeEnviar.current = true
+    setMessages(await listConversationMessages(selectedId))
+    void load(true)
+  }
+
   async function responderPorModelo() {
     if (!selectedId || !resposta.trim()) return
     setEnviandoModelo(true)
@@ -2255,6 +2267,15 @@ export default function Conversations({
                     </button>
                   </div>
                 )}
+                <VereditoDaUrgencia
+                  key={selected.id}
+                  conversationId={selected.id}
+                  clinicId={clinicId}
+                  motivo={selected.needsAttention ? selected.attentionReason ?? null : null}
+                  podeDar={podeDarVeredito}
+                  janelaAberta={janelaAberta}
+                  aoEnviar={aposVeredito}
+                />
                 {/* Respiro na base do bloco travado, para a primeira mensagem
                     nao encostar nele quando a conversa rola por baixo. */}
                 <div className="h-3" />
@@ -3052,6 +3073,17 @@ export default function Conversations({
               dentro do modelo aprovado - a Meta nao aceita texto livre -, e o
               aviso de cima diz isso antes de a pessoa escrever. */}
           <div className="bg-transparent px-1.5 pt-1" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 6px)' }}>
+            <div className="mx-1 mb-1.5">
+              <VereditoDaUrgencia
+                key={selected.id}
+                conversationId={selected.id}
+                clinicId={clinicId}
+                motivo={selected.needsAttention ? selected.attentionReason ?? null : null}
+                podeDar={podeDarVeredito}
+                janelaAberta={janelaAberta}
+                aoEnviar={aposVeredito}
+              />
+            </div>
             {!janelaAberta && (
               <div className="mx-1 mb-1.5 rounded-[10px] bg-white px-3 py-2 text-[12.5px] text-[#54656f] shadow-[0_1px_0.5px_rgba(11,20,26,.13)]">
                 <p>
