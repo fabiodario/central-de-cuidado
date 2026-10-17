@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { ShieldAlert, ShieldCheck } from 'lucide-react'
 import { useDialogos } from '@/components/dialogos-contexto'
 import { sendUrgencyVerdict } from '@/lib/repository'
-import { MOTIVOS_COM_VEREDITO, textoDoVeredito, type Veredito } from '../../supabase/functions/_shared/veredito.ts'
+import { botoesDoVeredito, MOTIVOS_COM_VEREDITO, textoDoVeredito, type Veredito } from '../../supabase/functions/_shared/veredito.ts'
 
 /**
  * O veredito de quem atende sobre uma urgencia (17/10/2026, pedido do Edu):
@@ -36,7 +36,8 @@ export default function VereditoDaUrgencia({
     if (enviando) return
     const certeza = await perguntar({
       titulo: veredito === 'urgente' ? 'Confirmar que é urgente?' : 'Não é urgente?',
-      detalhe: `O paciente recebe: "${textoDoVeredito(veredito, clinicId)}"`,
+      // O botao de marcar do "nao e urgente" (17/10/2026) tambem aparece aqui.
+      detalhe: `O paciente recebe: "${textoDoVeredito(veredito, clinicId)}"${botoesDoVeredito(veredito) ? ', com o botão Marcar uma consulta' : ''}`,
       confirmar: 'Enviar ao paciente',
       perigo: veredito === 'urgente',
     })

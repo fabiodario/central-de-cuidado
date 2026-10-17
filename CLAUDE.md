@@ -124,11 +124,43 @@ botões "É urgente" e "Não é urgente", só para owner e clinician
 (`VereditoDaUrgencia.tsx`). O `whatsapp-reply` (campo `veredito`) monta no
 servidor o texto fixo em nome do médico (`_shared/veredito.ts`), manda ao
 paciente, muda a conversa (urgente sai da lista; não urgente fica como
-"atendente") e registra `veredito_urgencia` em `whatsapp_bot_events`, para
-comparar com a nota do Jev e com a regra. O paciente nunca espera o clique: a
+"atendente", na etapa da fila, com o botão "Marcar uma consulta") e registra
+`veredito_urgencia` em `whatsapp_bot_events`, para comparar com a nota do Jev
+e com a regra. O mesmo veredito vem também pelo WhatsApp do médico (abaixo). O paciente nunca espera o clique: a
 orientação de segurança já saiu na hora. Os textos falam em nome do médico:
 mudar a redação é decisão dele. Testes em `tests/veredito.test.mjs`; o
 simulador tem os mesmos botões no painel da equipe.
+
+## Alerta de urgência no WhatsApp do médico (17/10/2026)
+
+Quando a conversa **entra** em urgência ou sangramento (`deveAlertar`), o
+`meta-webhook` manda, a qualquer hora, um modelo aprovado da Meta para cada
+número de `clinic_settings.alerta_urgencia_telefones` (Preferências; o
+primeiro é o do médico), depois da resposta ao paciente e junto da
+notificação do navegador, que continua. Envio em
+`_shared/alerta-de-urgencia.ts`: modelo `alerta_urgencia_botoes`, com recuo
+para `alerta_urgencia` enquanto o com botões não é aprovado; cada alerta
+registrado antes em `alertas_de_urgencia`, com o id nos botões
+(`URG:<id>:urgente|nao_urgente|responde`).
+
+- A volta (`_shared/resposta-ao-alerta.ts`) roda no webhook **antes** do robô
+  do paciente: toque nos botões, resposta citando o alerta ou texto até 6 h
+  depois. "É urgente" e "Pode aguardar" são o mesmo veredito da tela de
+  Respostas (`veredito.ts`: mesmo texto, mesma mudança na conversa, mesmo
+  evento `veredito_urgencia`). Só o primeiro número classifica; vale o
+  primeiro veredito (update condicional), pelo WhatsApp ou pela tela
+  (`marcarVereditoDaTela` no `whatsapp-reply`); texto livre só vai depois do
+  "Enviar"; envio que não chega desfaz a marca.
+- Falha grita: todo envio e toda resposta viram nota na conversa e evento.
+- Os textos dos modelos estão em `_shared/modelos.ts` e no LEIA-ME (que o
+  teste confere); mudou na Meta, muda nos dois.
+- O simulador usa as mesmas peças, com a Meta de mentira (`peloWhatsApp` em
+  `sessao.ts`): o cartão "WhatsApp do Dr. Fábio Dario" mostra o alerta e deixa
+  tocar nos botões e responder como ele.
+- Testes em `tests/alerta-de-urgencia.test.mjs` e
+  `tests/resposta-ao-alerta.test.mjs`. Para provar que um caso pega o defeito
+  sem mexer no código, `DESLIGAR` (ver `tests/montar-para-teste.mjs`) troca um
+  trecho na hora de montar.
 
 ## Simulador (reuniões)
 

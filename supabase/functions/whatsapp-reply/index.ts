@@ -5,12 +5,14 @@ import { variantesDoTelefone } from '../_shared/telefone-br.ts'
 import { chaveDoWhatsApp } from '../_shared/whatsapp-teste.ts'
 import { clinicaDeQuemAtende } from '../_shared/papel.ts'
 import {
+  botoesDoVeredito,
   conversaDepoisDoVeredito,
   detalheDoVeredito,
   MOTIVOS_COM_VEREDITO,
   textoDoVeredito,
   vereditoValido,
 } from '../_shared/veredito.ts'
+import { marcarVereditoDaTela } from '../_shared/resposta-ao-alerta.ts'
 
 /**
  * Resposta livre da equipe para um paciente, a partir da tela de Conversas.
@@ -223,6 +225,9 @@ Deno.serve(async (req) => {
     // escreve "menu", e a conversa volta para o estado inicial. A partir daqui
     // o robo responde ao que a pessoa tocar.
     let toques: Parameters<typeof montarConteudo>[1] | undefined
+    // "Nao e urgente" leva o botao de marcar (17/10/2026), igual ao "Pode
+    // aguardar" do alerta no WhatsApp do medico. Ver botoesDoVeredito.
+    if (veredito && botoesDoVeredito(veredito)) toques = { botoes: botoesDoVeredito(veredito) }
     if (querMenu) {
       const menu = await mostrarMenu(admin, visivel.id, (settings?.whatsapp_autoreply_text ?? '').trim())
       texto = menu?.resposta ?? ''
@@ -504,6 +509,10 @@ Deno.serve(async (req) => {
         detalhe: detalheDoVeredito(veredito, visivel.attention_reason as string | null),
       })
       if (erroDoRegistro) console.error('whatsapp-reply: veredito enviado, mas nao registrado', erroDoRegistro)
+      // Fecha o alerta do WhatsApp do medico (17/10/2026): um "pode aguardar"
+      // tocado depois la nao manda um segundo veredito ao paciente. Ver
+      // marcarVereditoDaTela; nunca lanca.
+      await marcarVereditoDaTela(admin, visivel.id, veredito, new Date())
     }
 
     return json({ ok: true, message: salva, windowClosesAt: fechaEm.toISOString() })

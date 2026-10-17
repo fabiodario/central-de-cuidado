@@ -36,7 +36,11 @@ await caso('os dois textos, em nome do medico da clinica, sem travessao', () => 
   const urgente = V.textoDoVeredito('urgente', FABIO)
   const calmo = V.textoDoVeredito('nao_urgente', FABIO)
   assert.match(urgente, /^🚨 O Dr\. Fábio viu a sua mensagem e orienta: \*procure o pronto-socorro agora\*/)
-  assert.match(calmo, /^💙 O Dr\. Fábio viu a sua mensagem e, pelo que você contou, não parece urgência\. A nossa equipe continua com você por aqui\.$/)
+  // Desde 17/10/2026 o "nao e urgente" leva o botao de marcar e o "se
+  // piorar", igual ao "Pode aguardar" do alerta no WhatsApp do medico.
+  assert.match(calmo, /^💙 O Dr\. Fábio viu a sua mensagem e, pelo que você contou, não parece urgência\. A nossa equipe continua com você por aqui\.\n\nSe quiser, toque em \*Marcar uma consulta\* para ver os horários mais próximos\. Se piorar, é só escrever aqui\.$/)
+  assert.deepEqual(V.botoesDoVeredito('nao_urgente'), [{ id: 'MARCAR_AGORA', titulo: 'Marcar uma consulta' }])
+  assert.equal(V.botoesDoVeredito('urgente'), undefined)
   assert.match(V.textoDoVeredito('urgente', 'c1'), /O Dr\. Marcello/, 'o nome vem do perfil da clinica')
   for (const t of [urgente, calmo]) assert.doesNotMatch(t, /[\u2013\u2014]/)
   assert.doesNotMatch(urgente, /192/, 'o 192 nao vai na mensagem padrao (decisao de 16/10/2026)')
@@ -47,7 +51,14 @@ await caso('so dois vereditos valem; a conversa depois de cada um; o registro se
   assert.equal(V.vereditoValido('nao_urgente'), 'nao_urgente')
   for (const ruim of [undefined, '', 'sim', 'URGENTE', 1]) assert.equal(V.vereditoValido(ruim), null)
   assert.deepEqual(V.conversaDepoisDoVeredito('urgente'), { needs_attention: false, attention_reason: null })
-  assert.deepEqual(V.conversaDepoisDoVeredito('nao_urgente'), { needs_attention: true, attention_reason: 'atendente' })
+  // A etapa da fila da equipe (17/10/2026): e nela que o toque em "Marcar uma
+  // consulta" abre o agendamento com a equipe na conversa.
+  assert.deepEqual(V.conversaDepoisDoVeredito('nao_urgente'), {
+    needs_attention: true,
+    attention_reason: 'atendente',
+    booking_state: 'atendente',
+    booking_options: null,
+  })
   assert.equal(V.detalheDoVeredito('nao_urgente', 'urgencia'), 'nao_urgente motivo=urgencia')
   assert.ok(V.detalheDoVeredito('urgente', 'x'.repeat(300)).length <= 120)
   assert.deepEqual(V.MOTIVOS_COM_VEREDITO, ['urgencia', 'sangramento'])
@@ -62,27 +73,27 @@ await caso('simulador: nao e urgente manda o texto como equipe e devolve a conve
   const s = simulacao()
   await s.enviarDaFamilia({ texto: 'Meu nariz está sangrando muito e não para' })
   assert.ok(s.pedeVeredito, 'sangramento pede veredito')
-  const r = s.darVeredito('nao_urgente')
+  const r = await s.darVeredito('nao_urgente')
   assert.equal(r.mensagem.autor, 'equipe')
   assert.equal(r.mensagem.texto, V.textoDoVeredito('nao_urgente', IDENTIDADES.fabio.clinicId))
   assert.equal(s.motivo, 'atendente')
   assert.equal(s.situacao, 'equipe', 'o robo fica calado: a equipe assumiu')
   assert.match(r.registros[0].titulo, /não é urgente/)
   assert.equal(s.pedeVeredito, false)
-  assert.equal(s.darVeredito('urgente').mensagem, null, 'o segundo clique nao manda nada')
+  assert.equal((await s.darVeredito('urgente')).mensagem, null, 'o segundo clique nao manda nada')
 })
 
 await caso('simulador: e urgente orienta o pronto-socorro e tira a conversa da lista; sem urgencia, nada', async () => {
   const s = simulacao()
   await s.enviarDaFamilia({ texto: 'Meu nariz está sangrando muito e não para' })
-  const r = s.darVeredito('urgente')
+  const r = await s.darVeredito('urgente')
   assert.match(r.mensagem.texto, /procure o pronto-socorro agora/)
   assert.equal(s.motivo, null)
   assert.match(r.registros[0].titulo, /é urgente/)
   const calma = simulacao()
   await calma.enviarDaFamilia({ texto: 'Oi, tudo bem?' })
   assert.equal(calma.pedeVeredito, false)
-  assert.deepEqual(calma.darVeredito('urgente'), { mensagem: null, registros: [] })
+  assert.deepEqual(await calma.darVeredito('urgente'), { mensagem: null, registros: [] })
 })
 
 await caso('o servidor: so quem atende, so em urgencia, texto montado la, conversa mudada e veredito registrado', () => {
@@ -101,7 +112,7 @@ await caso('a tela: so owner e clinician dao o veredito, nas duas versoes da con
   assert.match(c, /setPodeDarVeredito\(membership\.role === 'owner' \|\| membership\.role === 'clinician'\)/)
   assert.equal((c.match(/<VereditoDaUrgencia/g) ?? []).length, 2, 'computador e celular')
   const v = ler('src', 'sections', 'VereditoDaUrgencia.tsx')
-  assert.match(v, /detalhe: `O paciente recebe: "\$\{textoDoVeredito\(veredito, clinicId\)\}"`/)
+  assert.match(v, /detalhe: `O paciente recebe: "\$\{textoDoVeredito\(veredito, clinicId\)\}"\$\{botoesDoVeredito\(veredito\)/)
   assert.match(v, /if \(!motivo \|\| !MOTIVOS_COM_VEREDITO\.includes\(motivo\)\) return null/)
   const repo = ler('src', 'lib', 'repository.ts')
   const envio = repo.slice(repo.indexOf('export async function sendUrgencyVerdict'), repo.indexOf('export async function sendUrgencyVerdict') + 400)

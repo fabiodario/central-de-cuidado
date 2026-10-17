@@ -9,6 +9,15 @@ import { chaveDoWhatsApp } from '../_shared/whatsapp-teste.ts'
 import { montarAviso } from '../_shared/aviso-da-equipe.ts'
 import { avisarEquipe } from '../_shared/push-da-equipe.ts'
 import {
+  deveAlertar,
+  enviarAlertaDeUrgencia,
+  lerNumeros as lerNumerosDoAlerta,
+  type MotivoDoAlerta,
+  quemNoAlerta,
+  whatsAppPelaApi,
+} from '../_shared/alerta-de-urgencia.ts'
+import { tratarRespostaDaEquipe } from '../_shared/resposta-ao-alerta.ts'
+import {
   BOTOES_URGENCIA_OU_DUVIDA,
   contextoDaLeitura,
   decidirSegundaLeitura,
@@ -303,6 +312,10 @@ Deno.serve(async (req) => {
           if (id && nome) nomePorWaId.set(id, nome.slice(0, 120))
         }
 
+        // Os numeros do alerta de urgencia (17/10/2026), lidos uma vez por
+        // lote e so quando chega mensagem: ver resposta-ao-alerta.ts.
+        let numerosDoAlerta: string[] | null | undefined
+
         for (const message of value.messages ?? []) {
           // A mensagem anterior do lote terminou (inclusive pelos continue).
           registro.concluir()
@@ -330,6 +343,33 @@ Deno.serve(async (req) => {
           }
 
           const waId = digits(String(message.from ?? ''))
+
+          // O medico respondendo ao alerta de urgencia pelo WhatsApp dele
+          // (17/10/2026, ver _shared/resposta-ao-alerta.ts): o toque ou o texto
+          // dele vai para o paciente, e nao para o robo, que responderia o menu
+          // como se ele fosse paciente. Antes de tudo o mais, para a mensagem
+          // dele nao virar conversa de paciente. Falhando aqui, segue o caminho
+          // de sempre, e grita no log.
+          try {
+            if (numerosDoAlerta === undefined) numerosDoAlerta = await lerNumerosDoAlerta(admin, clinicId)
+            if (numerosDoAlerta?.length) {
+              const tratada = await tratarRespostaDaEquipe(
+                {
+                  admin,
+                  clinicId,
+                  agora: new Date(),
+                  numeros: numerosDoAlerta,
+                  enviarWhatsApp: whatsAppPelaApi(phoneNumberId, chaveDoWhatsApp(phoneNumberId)),
+                },
+                waId,
+                message,
+              )
+              if (tratada) continue
+            }
+          } catch (erro) {
+            console.error('Resposta ao alerta de urgencia falhou; segue como mensagem comum', erro)
+          }
+
           // Com e sem o nono digito (ver telefone-br.ts): numero antigo chega
           // da Meta sem o 9, e o cadastro guarda com ele.
           const grafias = variantesDoTelefone(waId)
@@ -1205,6 +1245,27 @@ Deno.serve(async (req) => {
                 const envio = avisarEquipe(admin, clinicId, aviso)
                 if (typeof EdgeRuntime !== 'undefined') EdgeRuntime.waitUntil(envio)
                 else await envio
+              }
+              // Alerta no WhatsApp pessoal do medico, com botoes (17/10/2026),
+              // a qualquer hora, so quando a conversa ENTRA em urgencia ou
+              // sangramento. A notificacao de cima continua. Ver
+              // _shared/alerta-de-urgencia.ts.
+              const motivoAntes = (conversaAnterior?.attention_reason as string | null) ?? null
+              if (deveAlertar({ atencaoAntes: Boolean(conversaAnterior?.needs_attention), motivoAntes, motivoAgora })) {
+                const alerta = enviarAlertaDeUrgencia(admin, {
+                  clinicId,
+                  motivo: motivoAgora as MotivoDoAlerta,
+                  quem: quemNoAlerta({
+                    pacientes,
+                    nomeDoPerfil: nomeDoPerfil || String(conversaAnterior?.profile_name ?? ''),
+                    telefone: waId,
+                  }),
+                  texto: body,
+                  agora: new Date(),
+                  conversationId: conversation.id,
+                })
+                if (typeof EdgeRuntime !== 'undefined') EdgeRuntime.waitUntil(alerta)
+                else await alerta
               }
             } catch (erro) {
               console.warn('Notificacao no celular: nao consegui montar o aviso', erro)

@@ -28,6 +28,7 @@ import {
   Smile,
   Sparkles,
   Square,
+  Stethoscope,
   UserPlus,
   Video,
   X,
@@ -230,6 +231,7 @@ function BalaoNoCelular({
   destaque,
   onTocar,
   onAbrirLista,
+  doDono,
 }: {
   m: Mensagem
   comRabinho: boolean
@@ -237,8 +239,10 @@ function BalaoNoCelular({
   destaque: string | null
   onTocar: (opcao: Toque) => void
   onAbrirLista: () => void
+  /** No WhatsApp do medico (17/10/2026), o dono do celular e ele, e nao o paciente. */
+  doDono?: boolean
 }) {
-  const doPaciente = m.autor === 'familia'
+  const doPaciente = doDono ?? m.autor === 'familia'
   const cor = doPaciente ? '#d9fdd3' : '#ffffff'
   return (
     <div className={`flex ${doPaciente ? 'justify-end' : 'justify-start'} ${comRabinho ? 'mt-1.5' : 'mt-0.5'}`}>
@@ -354,7 +358,7 @@ function BalaoNaClinica({ m, comRabinho }: { m: Mensagem; comRabinho: boolean })
         {comRabinho && !doPaciente && (
           <p className={`mb-0.5 flex items-center gap-1 text-[11px] font-bold ${m.autor === 'robo' ? 'text-[#4f7a63]' : 'text-[#9a6a52]'}`}>
             {m.autor === 'robo' ? <Bot className="h-3 w-3" /> : <Headset className="h-3 w-3" />}
-            {m.autor === 'robo' ? 'Robô' : IDENTIDADE.equipe}
+            {m.autor === 'robo' ? 'Robô' : (m.quem ?? IDENTIDADE.equipe)}
           </p>
         )}
         {m.anexo && <p className="mb-1 flex items-center gap-1 text-[12px] font-semibold text-[#3d5e4d]"><Paperclip className="h-3.5 w-3.5" /> Arquivo recebido</p>}
@@ -461,6 +465,10 @@ export default function SimuladorBot() {
   const [mensagens, setMensagens] = useState<Mensagem[]>([])
   const [registros, setRegistros] = useState<Registro[]>([])
   const [notificacoes, setNotificacoes] = useState<Alerta[]>([])
+  // O WhatsApp do medico (17/10/2026): o alerta de urgencia com os botoes, e o
+  // que ele responde. Ver Simulacao.responderComoMedico.
+  const [noMedico, setNoMedico] = useState<Mensagem[]>([])
+  const [rascunhoMedico, setRascunhoMedico] = useState('')
   const [digitando, setDigitando] = useState(false)
   const [ocupado, setOcupado] = useState(false)
   const [rascunho, setRascunho] = useState('')
@@ -479,6 +487,7 @@ export default function SimuladorBot() {
   const geracao = useRef(0)
   const celular = useRef<HTMLDivElement>(null)
   const clinica = useRef<HTMLDivElement>(null)
+  const celularDoMedico = useRef<HTMLDivElement>(null)
   const menu = useRef<HTMLDivElement>(null)
 
   const familia = FAMILIAS[chaveFamilia]
@@ -491,6 +500,11 @@ export default function SimuladorBot() {
   useEffect(() => {
     for (const el of [celular.current, clinica.current]) el?.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
   }, [mensagens.length, digitando])
+
+  useEffect(() => {
+    const el = celularDoMedico.current
+    el?.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+  }, [noMedico.length])
 
   useEffect(() => {
     if (!menuRoteiros) return
@@ -523,6 +537,8 @@ export default function SimuladorBot() {
     setMensagens([])
     setRegistros([])
     setNotificacoes([])
+    setNoMedico([])
+    setRascunhoMedico('')
     setDigitando(false)
     setOcupado(false)
     setRascunho('')
@@ -603,6 +619,8 @@ export default function SimuladorBot() {
     // medico toca enquanto o paciente ainda le o "digitando...".
     if (geracao.current !== minha) return null
     mostrarNotificacoes(r.alertas)
+    // O alerta no WhatsApp do medico chega junto da notificacao.
+    if (r.noMedico.length) setNoMedico((n) => [...n, ...r.noMedico])
     for (const resposta of r.respostas) {
       if (geracao.current !== minha) return null
       setDigitando(true)
@@ -634,11 +652,31 @@ export default function SimuladorBot() {
   }
 
   /** O veredito do medico sobre a urgencia (17/10/2026), como na tela de Respostas. */
-  function darVeredito(veredito: 'urgente' | 'nao_urgente') {
-    const r = simAtual.current.darVeredito(veredito)
+  async function darVeredito(veredito: 'urgente' | 'nao_urgente') {
+    const minha = geracao.current
+    const r = await simAtual.current.darVeredito(veredito)
+    if (geracao.current !== minha) return
     if (r.mensagem) setMensagens((m) => [...m, r.mensagem as Mensagem])
     setRegistros((g) => [...g, ...r.registros])
     setVersao((v) => v + 1)
+  }
+
+  /**
+   * O medico responde ao alerta pelo WhatsApp dele (17/10/2026): toque num
+   * botao ou texto. O que vai ao paciente aparece no celular dele e na tela.
+   */
+  async function responderComoMedico(entrada: { toque?: Toque; texto?: string }) {
+    if (ocupado || roteiroAtivo) return
+    const minha = geracao.current
+    setOcupado(true)
+    setRascunhoMedico('')
+    const r = await simAtual.current.responderComoMedico(entrada)
+    if (geracao.current !== minha) return
+    setNoMedico((n) => [...n, r.doMedico, ...r.noMedico])
+    if (r.paraOPaciente.length) setMensagens((m) => [...m, ...r.paraOPaciente])
+    setRegistros((g) => [...g, ...r.registros])
+    setVersao((v) => v + 1)
+    setOcupado(false)
   }
 
   function concluir() {
@@ -653,7 +691,7 @@ export default function SimuladorBot() {
   for (let i = mensagens.length - 1; i >= 0; i--) {
     const m = mensagens[i]
     if (m.autor === 'familia') break
-    if (m.autor === 'robo' && m.toques) {
+    if ((m.autor === 'robo' || m.autor === 'equipe') && m.toques) {
       ativa = m
       break
     }
@@ -1077,7 +1115,7 @@ export default function SimuladorBot() {
                       <button
                         type="button"
                         disabled={travado}
-                        onClick={() => darVeredito('urgente')}
+                        onClick={() => void darVeredito('urgente')}
                         className="rounded-xl bg-[#b42318] px-3 py-1.5 text-[12.5px] font-bold text-white disabled:opacity-40"
                       >
                         É urgente
@@ -1085,7 +1123,7 @@ export default function SimuladorBot() {
                       <button
                         type="button"
                         disabled={travado}
-                        onClick={() => darVeredito('nao_urgente')}
+                        onClick={() => void darVeredito('nao_urgente')}
                         className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-[12.5px] font-bold text-[#1d1d1b] disabled:opacity-40"
                       >
                         Não é urgente
@@ -1131,6 +1169,61 @@ export default function SimuladorBot() {
 
             {/* Bastidores */}
             <aside className="min-h-0 space-y-3 overflow-y-auto border-t border-slate-100 bg-[#f6f4ef] p-4 xl:border-l xl:border-t-0">
+              {/* O alerta no WhatsApp pessoal do medico (17/10/2026), com os
+                  botoes de verdade: o toque volta ao paciente pela mesma peca
+                  do servidor (resposta-ao-alerta.ts). */}
+              <Cartao titulo={`WhatsApp do ${IDENTIDADE.medico}`}>
+                {noMedico.length === 0 ? (
+                  <p className="flex items-start gap-2 text-[13px] text-slate-400">
+                    <Stethoscope className="mt-0.5 h-4 w-4 shrink-0" />
+                    Quando a conversa entra em urgência ou sangramento, o alerta que ele recebe no WhatsApp aparece aqui, com os
+                    botões É urgente, Pode aguardar e Eu respondo.
+                  </p>
+                ) : (
+                  <>
+                    <div
+                      ref={celularDoMedico}
+                      className="-mx-1 max-h-[380px] overflow-y-auto rounded-xl px-2 py-1.5"
+                      style={FUNDO_WHATSAPP}
+                    >
+                      {noMedico.map((m, i) => (
+                        <BalaoNoCelular
+                          key={m.id}
+                          m={m}
+                          comRabinho={i === 0 || noMedico[i - 1].autor !== m.autor}
+                          ativo={!travado}
+                          destaque={null}
+                          doDono={m.autor === 'equipe'}
+                          onTocar={(o) => void responderComoMedico({ toque: o })}
+                          onAbrirLista={() => {}}
+                        />
+                      ))}
+                    </div>
+                    <div className="mt-2 flex items-center gap-1.5">
+                      <input
+                        value={rascunhoMedico}
+                        onChange={(e) => setRascunhoMedico(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && rascunhoMedico.trim() && !travado) void responderComoMedico({ texto: rascunhoMedico.trim() })
+                        }}
+                        placeholder="Responder como o médico..."
+                        aria-label="Responder ao alerta como o médico"
+                        className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-[13px] outline-none focus:border-[#76967f]"
+                      />
+                      <button
+                        type="button"
+                        disabled={travado || !rascunhoMedico.trim()}
+                        onClick={() => void responderComoMedico({ texto: rascunhoMedico.trim() })}
+                        aria-label="Enviar como o médico"
+                        className="rounded-xl bg-[#1daa61] p-2 text-white disabled:opacity-40"
+                      >
+                        <Send className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </>
+                )}
+              </Cartao>
+
               <Cartao titulo="Etapa do robô">
                 <p className="text-[16px] font-extrabold leading-snug">{etapa ? (ETAPAS[etapa] ?? etapa) : 'Esperando a primeira mensagem'}</p>
                 {etapa && <p className="mt-0.5 font-mono text-[11px] text-slate-400">{etapa}</p>}

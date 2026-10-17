@@ -1,4 +1,7 @@
-import type { Toque } from './atendimento.ts'
+// O mesmo Toque de atendimento.ts, escrito aqui (17/10/2026): importar o tipo
+// de la levava o robo inteiro (e o cliente do Supabase do Deno) para a
+// checagem da tela, que agora usa esta peca no alerta de urgencia do simulador.
+type Toque = { id: string; titulo: string; descricao?: string }
 
 /**
  * Monta o conteudo da mensagem: texto simples, botoes ou lista tocavel.

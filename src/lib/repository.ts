@@ -2386,6 +2386,77 @@ export async function getUltimaLeituraDoJev(clinicId: string): Promise<UltimaLei
 }
 
 /**
+ * Os celulares do alerta de urgencia no WhatsApp (17/10/2026, ver
+ * supabase/functions/_shared/alerta-de-urgencia.ts), o do medico primeiro. Em
+ * consulta separada: a coluna e nova, e o Postgres recusa a query inteira
+ * quando uma coluna nao existe.
+ */
+export async function getTelefonesDoAlerta(clinicId: string): Promise<string[]> {
+  const { data, error } = await (supabase as unknown as SupabaseClient)
+    .from('clinic_settings')
+    .select('alerta_urgencia_telefones')
+    .eq('clinic_id', clinicId)
+    .maybeSingle()
+  if (error) fail(error)
+  const lista = data?.alerta_urgencia_telefones
+  return Array.isArray(lista) ? lista.map(String) : []
+}
+
+export async function saveTelefonesDoAlerta(clinicId: string, numeros: string[]): Promise<void> {
+  const { data, error } = await (supabase as unknown as SupabaseClient)
+    .from('clinic_settings')
+    .update({ alerta_urgencia_telefones: numeros })
+    .eq('clinic_id', clinicId)
+    .select('alerta_urgencia_telefones')
+  if (error) fail(error)
+  // Mesma conferencia do modo do Jev: sem linha gravada de volta, a tela nao
+  // pode dizer "salvo".
+  if (!data?.length) throw new Error('Não foi possível salvar: só o responsável pela clínica muda os números do alerta.')
+}
+
+export interface ResultadoDoAlertaDeTeste {
+  nota: string
+  falhou: boolean
+}
+
+/** O alerta de teste, no WhatsApp dos numeros salvos (botao em Preferencias). */
+export async function testarAlertaDeUrgencia(clinicId: string): Promise<ResultadoDoAlertaDeTeste> {
+  const { data, error } = await supabase.functions.invoke('notificar-equipe', { body: { acao: 'alerta_teste', clinicId } })
+  if (error) throw new Error(await motivoDaFuncao(error, data, 'Não foi possível mandar o alerta de teste.'))
+  const r = data as { nota?: string; falhou?: boolean; error?: string } | null
+  if (r?.error) throw new Error(r.error)
+  return { nota: String(r?.nota ?? ''), falhou: Boolean(r?.falhou) }
+}
+
+export interface UltimoAlerta {
+  quem: string
+  quando: string
+  teste: boolean
+  veredito: string | null
+  enviado: boolean
+}
+
+/** O ultimo alerta de urgencia da clinica, para Preferencias mostrar se o alerta esta saindo. */
+export async function getUltimoAlerta(clinicId: string): Promise<UltimoAlerta | null> {
+  const { data, error } = await (supabase as unknown as SupabaseClient)
+    .from('alertas_de_urgencia')
+    .select('quem,criado_em,teste,veredito,mensagens')
+    .eq('clinic_id', clinicId)
+    .order('criado_em', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) fail(error)
+  if (!data) return null
+  return {
+    quem: String(data.quem ?? ''),
+    quando: String(data.criado_em),
+    teste: Boolean(data.teste),
+    veredito: (data.veredito as string | null) ?? null,
+    enviado: Array.isArray(data.mensagens) && data.mensagens.length > 0,
+  }
+}
+
+/**
  * Ate quando a equipe pode responder em texto livre nesta conversa.
  * A Meta so permite isso por 24h depois da ultima mensagem do paciente; depois
  * disso, apenas modelo aprovado. Devolve null quando o paciente nunca escreveu.

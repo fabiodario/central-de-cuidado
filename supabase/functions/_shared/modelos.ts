@@ -95,10 +95,30 @@ const MODELOS: Record<string, {
       'Olá, {{1}}. Aqui é o Consultório Central de Cuidado.\n\n{{2}}\n\n' +
       'Se precisar, é só responder por aqui.',
   },
+  // Com o nome do Dr. Fabio desde 17/10/2026: ate aqui era o texto herdado do
+  // Dr. Marcello. E o texto que o Edu cadastra na Meta da clinica, o mesmo da
+  // dica da tela de Respostas (consultorioNaResposta em src/lib/marca.ts).
   resposta_da_clinica: {
     corpo:
-      'Olá, {{1}}. Aqui é o consultório do Dr. Marcello Ruiz.\n\n{{2}}\n\n' +
+      'Olá, {{1}}. Aqui é o consultório do Dr. Fábio Dario.\n\n{{2}}\n\n' +
       'Se precisar, é só responder por aqui.',
+  },
+  // O alerta de urgencia no WhatsApp do medico (17/10/2026, ver
+  // alerta-de-urgencia.ts), categoria Utilidade, portugues (BR), validade de 12
+  // horas. Parametros: o motivo ("urgência" ou "sangramento"), quem, a hora e o
+  // trecho da mensagem. "O robo ja respondeu", e nao "ja orientou o
+  // pronto-socorro": a urgencia lida pelo Jev nao muda a resposta do robo.
+  // Estes textos sao os que o Edu cadastra na Meta (LEIA-ME): mudou la, muda aqui.
+  alerta_urgencia: {
+    corpo:
+      '🚨 Alerta de {{1}} na Central de Cuidado.\n\n{{2}} escreveu às {{3}}:\n"{{4}}"\n\n' +
+      'O robô já respondeu ao paciente. Veja a conversa na Central de Cuidado para avaliar e responder.',
+  },
+  alerta_urgencia_botoes: {
+    corpo:
+      '🚨 Alerta de {{1}} na Central de Cuidado.\n\n{{2}} escreveu às {{3}}:\n"{{4}}"\n\n' +
+      'O robô já respondeu ao paciente. Toque num botão ou responda a esta mensagem com a orientação, que eu repasso ao paciente.',
+    botoes: ['É urgente', 'Pode aguardar', 'Eu respondo'],
   },
 }
 

@@ -27,11 +27,35 @@ import {
   type ModoDaSegundaLeitura,
 } from '../../supabase/functions/_shared/segunda-leitura.ts'
 import {
+  botoesDoVeredito,
   conversaDepoisDoVeredito,
   MOTIVOS_COM_VEREDITO,
   textoDoVeredito,
   type Veredito,
 } from '../../supabase/functions/_shared/veredito.ts'
+import {
+  BOTOES_DO_ALERTA,
+  deveAlertar,
+  enviarAlertaDeUrgencia,
+  type EnviarWhatsApp,
+  type MotivoDoAlerta,
+  quemNoAlerta,
+} from '../../supabase/functions/_shared/alerta-de-urgencia.ts'
+import {
+  marcarVereditoDaTela,
+  type MensagemRecebida,
+  tratarRespostaDaEquipe,
+} from '../../supabase/functions/_shared/resposta-ao-alerta.ts'
+import { textoDoModelo } from '../../supabase/functions/_shared/modelos.ts'
+import { mesmoTelefone } from '../../supabase/functions/_shared/telefone-br.ts'
+
+/**
+ * Os celulares de mentira do alerta no WhatsApp (17/10/2026): o primeiro e o
+ * do medico, como em Preferencias. Nada sai daqui: o envio e o peloWhatsApp da
+ * simulacao, que so desenha a mensagem na tela.
+ */
+export const CELULAR_DO_MEDICO = '5513900000001'
+export const CELULAR_DA_EQUIPE = '5513900000002'
 
 /**
  * Quem pergunta ao Jev no simulador (17/10/2026): no sistema, a funcao
@@ -59,6 +83,8 @@ export type Mensagem = {
   /** Foto ou documento: o robo nao le, so sabe que veio. */
   anexo?: boolean
   toques?: Toques
+  /** Quem da equipe escreveu, quando nao e a recepcao: o medico pelo WhatsApp dele (17/10/2026). */
+  quem?: string
 }
 
 export type Tom = 'neutro' | 'bom' | 'atencao' | 'alerta'
@@ -251,6 +277,58 @@ export class Simulacao {
       auto_replies_while_waiting: 0,
       menu_sent_at: null,
     })
+    // O alerta no WhatsApp do medico (17/10/2026) le os numeros daqui, como
+    // o webhook le do banco.
+    for (const s of this.banco.linhas('clinic_settings')) {
+      Object.assign(s, { alerta_urgencia_telefones: [CELULAR_DO_MEDICO, CELULAR_DA_EQUIPE], whatsapp_template_language: 'pt_BR' })
+    }
+  }
+
+  // O que o WhatsApp de mentira entregou na acao em andamento: para o medico
+  // (o alerta, o "Enviado") e para o paciente (o veredito). Ver peloWhatsApp.
+  private caixaDoMedico: Mensagem[] = []
+  private caixaDoPaciente: Mensagem[] = []
+  private idsDaMeta = 0
+  private agoraDaAcao = new Date(0)
+
+  /**
+   * O envio pela Meta, de mentira: as mesmas pecas do servidor
+   * (alerta-de-urgencia.ts, resposta-ao-alerta.ts) chamam isto no lugar da
+   * API, e a mensagem vira balao na tela. Modelo aprovado vira o texto que a
+   * Meta montaria (modelos.ts), com os botoes de resposta rapida.
+   */
+  private readonly peloWhatsApp: EnviarWhatsApp = async (para, conteudo) => {
+    this.idsDaMeta += 1
+    const paraOPaciente = mesmoTelefone(para, this.familia.telefone)
+    const m = this.mensagemDoConteudo(conteudo, paraOPaciente ? 'equipe' : 'robo')
+    // A tela mostra so o celular do medico; o da Dayane recebe igual.
+    if (paraOPaciente) this.caixaDoPaciente.push({ ...m, quem: `${this.identidade.medico}, pelo WhatsApp` })
+    else if (mesmoTelefone(para, CELULAR_DO_MEDICO)) this.caixaDoMedico.push(m)
+    return { ok: true, id: `wamid.simulado.${this.idsDaMeta}` }
+  }
+
+  private mensagemDoConteudo(conteudo: Record<string, unknown>, autor: Autor): Mensagem {
+    const c = conteudo as {
+      type?: string
+      text?: { body?: string }
+      template?: { name: string; components?: { type: string; index?: string; parameters?: { text?: string; payload?: string }[] }[] }
+      interactive?: { body?: { text?: string }; action?: { buttons?: { reply: { id: string; title: string } }[] } }
+    }
+    if (c.type === 'template' && c.template) {
+      const componentes = c.template.components ?? []
+      const parametros = (componentes.find((x) => x.type === 'body')?.parameters ?? []).map((x) => String(x.text ?? ''))
+      // O texto do modelo sem a linha dos botoes, que aqui viram botoes de verdade.
+      const texto = (textoDoModelo(c.template.name, parametros) ?? c.template.name).replace(/\n\n\[[^\]]*\]$/, '')
+      const botoes = componentes
+        .filter((x) => x.type === 'button')
+        .map((x) => ({ id: String(x.parameters?.[0]?.payload ?? ''), titulo: BOTOES_DO_ALERTA[Number(x.index)]?.titulo ?? 'Botão' }))
+      return this.mensagem(autor, texto, this.agoraDaAcao, botoes.length ? { toques: { tipo: 'botoes', opcoes: botoes } } : {})
+    }
+    if (c.type === 'interactive' && c.interactive) {
+      const botoes = (c.interactive.action?.buttons ?? []).map((b) => ({ id: b.reply.id, titulo: b.reply.title }))
+      return this.mensagem(autor, String(c.interactive.body?.text ?? ''), this.agoraDaAcao, { toques: { tipo: 'botoes', opcoes: botoes } })
+    }
+    return this.mensagem(autor, String(c.text?.body ?? ''), this.agoraDaAcao)
   }
 
   get conversa(): Linha {
@@ -339,8 +417,11 @@ export class Simulacao {
     registros: Registro[]
     /** Notificacoes no celular de quem recebe o alerta de sangramento. */
     alertas: Alerta[]
+    /** O que chegou no WhatsApp do medico: o alerta de urgencia, com os botoes. */
+    noMedico: Mensagem[]
   }> {
     const agora = this.relogio()
+    this.agoraDaAcao = agora
     const familia = this.mensagem('familia', entrada.anexo ? entrada.texto || '📷 Foto' : entrada.texto, agora, {
       anexo: entrada.anexo,
     })
@@ -568,7 +649,94 @@ export class Simulacao {
       )
     }
 
-    return { familia, respostas, registros, alertas }
+    // O alerta no WhatsApp do medico (17/10/2026), como no webhook: so quando
+    // a conversa ENTRA em urgencia ou sangramento, pela mesma peca do servidor,
+    // com a Meta de mentira. A notificacao de cima continua.
+    const noMedico: Mensagem[] = []
+    if (deveAlertar({ atencaoAntes: atencaoAntes.ligada, motivoAntes: atencaoAntes.motivo, motivoAgora })) {
+      this.caixaDoMedico = []
+      const antesDoAlerta = this.banco.escritas.length
+      await enviarAlertaDeUrgencia(
+        this.banco,
+        {
+          clinicId: this.identidade.clinicId,
+          motivo: motivoAgora as MotivoDoAlerta,
+          quem: quemNoAlerta({
+            pacientes: this.pacientes().map((p) => ({ name: String(p.name ?? '') })),
+            nomeDoPerfil: this.familia.nomeDoPerfil,
+            telefone: this.familia.telefone,
+          }),
+          texto: familia.texto,
+          agora,
+          conversationId: CONVERSA,
+        },
+        this.peloWhatsApp,
+      )
+      noMedico.push(...this.caixaDoMedico)
+      registros.push(...this.traduzirEscritas(this.banco.escritas.slice(antesDoAlerta), agora))
+    }
+
+    return { familia, respostas, registros, alertas, noMedico }
+  }
+
+  /**
+   * O medico responde ao alerta pelo WhatsApp dele (17/10/2026): toque num
+   * botao do alerta ou da confirmacao, ou texto. A mesma peca do webhook
+   * (tratarRespostaDaEquipe), com o banco falso e a Meta de mentira. O que
+   * chega ao paciente entra na conversa como mensagem da equipe, igual ao
+   * veredito da tela.
+   */
+  async responderComoMedico(entrada: { toque?: Toque; texto?: string }): Promise<{
+    doMedico: Mensagem
+    noMedico: Mensagem[]
+    paraOPaciente: Mensagem[]
+    registros: Registro[]
+  }> {
+    const agora = this.relogio()
+    this.agoraDaAcao = agora
+    const t = entrada.toque
+    const recebida: MensagemRecebida = t
+      ? t.id.startsWith('URGTXT:')
+        ? { type: 'interactive', interactive: { button_reply: { id: t.id, title: t.titulo } } }
+        : { type: 'button', button: { payload: t.id, text: t.titulo } }
+      : { type: 'text', text: { body: entrada.texto ?? '' } }
+    const doMedico = this.mensagem('equipe', t ? t.titulo : (entrada.texto ?? ''), agora)
+    this.caixaDoMedico = []
+    this.caixaDoPaciente = []
+    const antes = this.banco.escritas.length
+    const motivoAntes = this.motivo
+    const tratada = await tratarRespostaDaEquipe(
+      {
+        admin: this.banco,
+        clinicId: this.identidade.clinicId,
+        agora,
+        numeros: [CELULAR_DO_MEDICO, CELULAR_DA_EQUIPE],
+        enviarWhatsApp: this.peloWhatsApp,
+      },
+      CELULAR_DO_MEDICO,
+      recebida,
+    )
+    const registros = this.traduzirEscritas(this.banco.escritas.slice(antes), agora)
+    if (!tratada) {
+      registros.push(
+        this.registro(
+          'evento',
+          'Mensagem do médico sem alerta nas últimas 6 horas: no WhatsApp de verdade, ela iria para o robô como a de um paciente',
+          'neutro',
+          agora,
+        ),
+      )
+    }
+    // Mensagem de gente ao paciente: o robo deixa de puxar assunto, como no
+    // veredito da tela.
+    if (this.caixaDoPaciente.length) this.equipeConversando = true
+    if (this.motivo !== motivoAntes) {
+      const m = this.motivo ? MOTIVOS[this.motivo] : null
+      registros.push(
+        this.registro('bandeira', m ? `Conversa na lista: ${m.rotulo}` : 'A conversa saiu da lista de urgência', m?.tom ?? 'bom', agora),
+      )
+    }
+    return { doMedico, noMedico: this.caixaDoMedico, paraOPaciente: this.caixaDoPaciente, registros }
   }
 
   /** O historico do banco falso como o webhook le para o Jev: da mais nova para a mais antiga. */
@@ -605,7 +773,7 @@ export class Simulacao {
    * faz: o texto fixo vai ao paciente como mensagem da equipe, e a conversa
    * muda de motivo. Fora de uma urgencia, nao faz nada.
    */
-  darVeredito(veredito: Veredito): { mensagem: Mensagem | null; registros: Registro[] } {
+  async darVeredito(veredito: Veredito): Promise<{ mensagem: Mensagem | null; registros: Registro[] }> {
     if (!this.pedeVeredito) return { mensagem: null, registros: [] }
     const agora = this.relogio()
     const texto = textoDoVeredito(veredito, this.identidade.clinicId)
@@ -614,6 +782,10 @@ export class Simulacao {
     this.banco.linhas('whatsapp_messages').push({
       conversation_id: CONVERSA, direction: 'outbound', automatic: false, body: texto, created_at: agora.toISOString(),
     })
+    // Fecha o alerta do WhatsApp do medico, como o whatsapp-reply (17/10/2026):
+    // o "pode aguardar" tocado depois no celular dele nao manda outro veredito.
+    await marcarVereditoDaTela(this.banco, CONVERSA, veredito, agora)
+    const botoes = botoesDoVeredito(veredito)
     const registros = [
       this.registro(
         'evento',
@@ -624,7 +796,10 @@ export class Simulacao {
         agora,
       ),
     ]
-    return { mensagem: this.mensagem('equipe', texto, agora), registros }
+    return {
+      mensagem: this.mensagem('equipe', texto, agora, botoes ? { toques: { tipo: 'botoes', opcoes: botoes } } : {}),
+      registros,
+    }
   }
 
   /** Concluir na tela de Respostas: a conversa sai da lista e o robo volta. */
@@ -678,6 +853,14 @@ export class Simulacao {
       }
       if (e.tabela === 'patients' && e.tipo === 'update') {
         registros.push(this.registro('cadastro', 'Cadastro do paciente completado', 'bom', agora, Object.keys(e.mudanca ?? {}).join(', ')))
+      }
+      // A nota interna da conversa (17/10/2026): o alerta no WhatsApp do
+      // medico e a resposta dele, como a equipe le na tela de Respostas.
+      if (e.tabela === 'conversation_notes' && e.tipo === 'insert') {
+        for (const n of e.linhas) {
+          const texto = String(n.texto ?? '')
+          registros.push(this.registro('alerta', texto, texto.startsWith('⚠️') ? 'alerta' : 'atencao', agora))
+        }
       }
     }
     return registros

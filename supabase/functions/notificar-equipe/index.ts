@@ -1,11 +1,15 @@
 import { adminClient, corsHeaders, json, userClient } from '../_shared/whatsapp.ts'
 import { chavesDaClinica, entregar } from '../_shared/push-da-equipe.ts'
+import { enviarAlertaDeUrgencia } from '../_shared/alerta-de-urgencia.ts'
+import { clinicaDeQuemAtende } from '../_shared/papel.ts'
 
 /**
  * Notificacoes no celular: o lado que o navegador chama (28/09/2026).
  *
  *   { acao: 'chave' }            -> chave publica VAPID, para o celular se inscrever
  *   { acao: 'teste', clinicId }  -> manda "teste" para os aparelhos DA PESSOA
+ *   { acao: 'alerta_teste', clinicId } -> o alerta de urgencia, no WhatsApp
+ *                                   dos numeros salvos em Preferencias
  *
  * O aviso de verdade (mensagem da familia) nao passa por aqui: sai do proprio
  * meta-webhook, por _shared/push-da-equipe.ts, sem uma segunda requisicao que
@@ -16,7 +20,7 @@ import { chavesDaClinica, entregar } from '../_shared/push-da-equipe.ts'
  * A pessoa aperta, ve (ou nao ve) chegar, e sabe na hora.
  */
 
-type Pedido = { acao?: 'chave' | 'teste'; clinicId?: string }
+type Pedido = { acao?: 'chave' | 'teste' | 'alerta_teste'; clinicId?: string }
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
@@ -59,6 +63,27 @@ Deno.serve(async (req) => {
         },
         chaves,
       )
+      return json(r)
+    }
+
+    // Alerta de urgencia de teste (17/10/2026): a mesma mensagem que o medico
+    // recebe, para os numeros salvos em Preferencias. E o jeito de saber, antes
+    // da primeira urgencia de verdade, se o modelo foi aprovado e se os numeros
+    // estao certos: o alerta que nao chega nao avisa que nao chegou. So quem
+    // atende (owner ou clinician): o teste toca o celular do medico.
+    if (corpo.acao === 'alerta_teste') {
+      if (!corpo.clinicId) return json({ error: 'Clínica não informada.' }, 400)
+      if (!(await clinicaDeQuemAtende(userClient(autorizacao), corpo.clinicId))) {
+        return json({ error: 'Só o médico ou o responsável pela clínica manda o alerta de teste.' }, 403)
+      }
+      const r = await enviarAlertaDeUrgencia(admin, {
+        clinicId: corpo.clinicId,
+        motivo: 'urgencia',
+        quem: 'Teste da Central',
+        texto: 'Este é um teste do alerta de urgência. Nenhum paciente foi afetado.',
+        agora: new Date(),
+      })
+      if (!r.envios.length) return json({ error: r.nota }, 404)
       return json(r)
     }
 
