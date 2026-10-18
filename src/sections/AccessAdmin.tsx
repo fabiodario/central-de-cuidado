@@ -8,12 +8,14 @@ import {
   approveAccessRequest,
   getCurrentMembership,
   listarAcessos,
+  listarUltimosAcessos,
   type AcessoDaClinica,
   listPendingAccessRequests,
   rejectAccessRequest,
   type AccessRequest,
   type ClinicRole,
 } from '@/lib/repository'
+import { textoDoUltimoAcesso } from '@/lib/ultimo-acesso'
 
 type AssignableRole = Exclude<ClinicRole, 'owner'>
 
@@ -40,6 +42,8 @@ export default function AccessAdmin() {
   // Quem ja tem acesso (24/09/2026). Antes a tela so tratava pedidos novos, e
   // nao havia como tirar o acesso de quem saiu da clinica.
   const [acessos, setAcessos] = useState<AcessoDaClinica[]>([])
+  // Ultimo acesso (18/10/2026): user_id -> data, ou null para quem nunca entrou.
+  const [ultimosAcessos, setUltimosAcessos] = useState<Record<string, string | null>>({})
   const [clinicId, setClinicId] = useState<string | null>(null)
   const { user } = useAuth()
   // Qualquer administrador promove a administrador; alterar um administrador
@@ -58,7 +62,7 @@ export default function AccessAdmin() {
         throw new Error('Somente o administrador da clínica pode ver os pedidos de acesso.')
       }
       setClinicId(membership.clinicId)
-      const [pending, vinculos] = await Promise.all([
+      const [pending, vinculos, ultimos] = await Promise.all([
         listPendingAccessRequests(membership.clinicId),
         // Se a funcao nova ainda nao existe no banco, a lista de pedidos
         // continua funcionando; so a secao de acessos fica vazia.
@@ -66,8 +70,14 @@ export default function AccessAdmin() {
           console.warn('Nao consegui listar os acessos', erro)
           return [] as AcessoDaClinica[]
         }),
+        // Mesmo cuidado: sem a funcao do ultimo acesso, a lista aparece sem a data.
+        listarUltimosAcessos(membership.clinicId).catch((erro) => {
+          console.warn('Nao consegui ler o ultimo acesso', erro)
+          return {} as Record<string, string | null>
+        }),
       ])
       setAcessos(vinculos)
+      setUltimosAcessos(ultimos)
       setRequests(pending)
       setRoles((current) => {
         const next = { ...current }
@@ -286,6 +296,9 @@ export default function AccessAdmin() {
               const travado = eu || acesso.protegido || (dono && !souResponsavel)
               const suspenso = acesso.situacao === 'suspended'
               const working = workingId === acesso.userId
+              const ultimoAcesso = textoDoUltimoAcesso(
+                acesso.userId in ultimosAcessos ? ultimosAcessos[acesso.userId] : undefined,
+              )
               return (
                 <div key={acesso.userId} className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
@@ -296,6 +309,9 @@ export default function AccessAdmin() {
                       {acesso.email}
                       {suspenso ? ' · suspenso' : ''}
                     </p>
+                    {ultimoAcesso && (
+                      <p className="mt-0.5 text-[11px] font-semibold text-slate-400">{ultimoAcesso}</p>
+                    )}
                   </div>
                   {travado ? (
                     <span className="text-xs font-bold text-[#1f4f78]">

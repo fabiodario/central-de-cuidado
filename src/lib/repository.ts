@@ -408,6 +408,26 @@ export async function listarAcessos(clinicId: string): Promise<AcessoDaClinica[]
 }
 
 /**
+ * Ultimo acesso de cada pessoa da clinica (18/10/2026). Funcao separada da
+ * lista, para a lista nao cair se esta falhar (migration 20261018120000).
+ * user_id -> data ISO, ou null para quem nunca entrou.
+ */
+export async function listarUltimosAcessos(clinicId: string): Promise<Record<string, string | null>> {
+  const { data, error } = await (supabase.rpc as unknown as (
+    nome: string,
+    args: Record<string, unknown>,
+  ) => PromiseLike<{ data: unknown; error: { message: string } | null }>)('ultimos_acessos_da_clinica', {
+    p_clinic: clinicId,
+  })
+  if (error) fail(error)
+  const mapa: Record<string, string | null> = {}
+  for (const l of (data ?? []) as { user_id: string; ultimo_acesso: string | null }[]) {
+    mapa[l.user_id] = l.ultimo_acesso ?? null
+  }
+  return mapa
+}
+
+/**
  * Muda perfil e/ou suspende. O banco recusa mexer no proprio acesso, no do
  * responsavel pelo sistema, e so deixa o responsavel promover administrador.
  */
