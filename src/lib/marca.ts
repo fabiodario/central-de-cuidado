@@ -60,9 +60,10 @@ const DR_FABIO: Marca = {
   src: logoDrFabio,
   srcFundoEscuro: logoDrFabioNoEscuro,
   nome: 'Dr. Fábio Dario',
-  // A etiqueta "Central de cuidado" embaixo do logo diz de que sistema se
-  // trata. Com o logo do produto, ela so repetiria o nome.
-  mostraEtiquetaDoProduto: true,
+  // Sem a etiqueta "Central de cuidado" embaixo do logo (20/10/2026, pedido do
+  // Edu): o escudo e o texto azul-claro nao combinavam com o logo dele, que e
+  // verde e terracota. As cores do menu ficam como estao; a versao continua.
+  mostraEtiquetaDoProduto: false,
   titulo: 'Central de Cuidado | Dr. Fábio Dario',
   // Sem nome fixo (16/10/2026): com "Dr. Fabio Dario" aqui, quem entrava sem
   // nome no cadastro (o Edu, criado pelo painel do Supabase) aparecia como

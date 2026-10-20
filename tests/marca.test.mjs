@@ -21,7 +21,8 @@ const OUTRA = '00000000-0000-0000-0000-000000000000'
 confere('clinica do Dr. Fabio com o logo dele', marcaDaClinica(FABIO).nome === 'Dr. Fábio Dario')
 confere('clinica nova entra com a marca do produto', marcaDaClinica(OUTRA).nome === 'Central de Cuidado')
 confere('logo do produto nao repete a etiqueta', marcaDaClinica(OUTRA).mostraEtiquetaDoProduto === false)
-confere('logo do Dr. Fabio mantem a etiqueta', marcaDaClinica(FABIO).mostraEtiquetaDoProduto === true)
+// Sem a etiqueta (20/10/2026, pedido do Edu): o selo azul nao combinava com o logo dele.
+confere('logo do Dr. Fabio sem a etiqueta "Central de cuidado"', marcaDaClinica(FABIO).mostraEtiquetaDoProduto === false)
 confere('clinica sem marca nao leva nome de medico no rodape', marcaDaClinica(OUTRA).nomeNoRodape === null)
 confere('Dr. Fabio na aba do navegador', /Fábio Dario/.test(marcaDaClinica(FABIO).titulo))
 // Rodape e foto do topo mostram quem entrou (16/10/2026): com o nome do medico
