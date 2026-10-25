@@ -1,4 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2.112.3'
+import { paraEnvio } from './telefone-br.ts'
 
 export const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -36,9 +37,10 @@ export function digits(value: string) {
   return value.replace(/\D/g, '')
 }
 
+// Com o nono digito (16/10/2026): celular gravado sem o 9 voltava "Message
+// undeliverable". A regra mora em telefone-br.ts para ter teste.
 export function toBrazilE164(value: string) {
-  const normalized = digits(value)
-  return normalized.startsWith('55') ? normalized : `55${normalized}`
+  return paraEnvio(value)
 }
 
 export function formatDateBR(value: string) {

@@ -5,6 +5,7 @@ import {
   Download,
   FileJson,
   ImageUp,
+  Check,
   Info,
   MessageCircleHeart,
   RefreshCw,
@@ -13,6 +14,8 @@ import {
   Upload,
 } from 'lucide-react'
 import type { Db, FollowupKey } from '@/types/patient'
+import { FOLLOWUP_LABEL } from '@/types/patient'
+import { FOLLOWUP_KEYS, etapasPorExtenso } from '@/lib/followup'
 import {
   atualizarDadosDoPerfil,
   atualizarFotoDoPerfil,
@@ -36,12 +39,19 @@ import { publicoDaClinica } from '@/lib/publico'
 interface Props {
   db: Db
   setTemplates: (templates: Record<FollowupKey, string>) => Promise<void>
+  setEtapas: (etapas: FollowupKey[]) => Promise<void>
   importDb: (data: unknown) => Promise<boolean>
   clearAll: () => Promise<void>
 }
 
-export default function Settings({ db, importDb, clearAll }: Props) {
+export default function Settings({ db, setEtapas, importDb, clearAll }: Props) {
   const [situacao, setSituacao] = useState<SituacaoDoNumero | null>(null)
+  // Etapas do acompanhamento (19/10/2026, vindo do sistema do Dr. Marcello):
+  // marcadas aqui, salvas no botao.
+  const [etapas, setEtapasNaTela] = useState<FollowupKey[]>(db.etapas)
+  const [salvandoEtapas, setSalvandoEtapas] = useState(false)
+  useEffect(() => setEtapasNaTela(db.etapas), [db.etapas])
+  const etapasMudaram = FOLLOWUP_KEYS.some((k) => etapas.includes(k) !== db.etapas.includes(k))
   const [erroSituacao, setErroSituacao] = useState('')
   const { avisar, perguntar } = useDialogos()
 
@@ -202,11 +212,11 @@ export default function Settings({ db, importDb, clearAll }: Props) {
             <div>
               <p className="text-[9px] font-extrabold uppercase tracking-[0.15em] text-[#1f4f78]">Acompanhamento automático</p>
               <h2 className="mt-1 text-base font-extrabold tracking-[-0.03em] text-[#081b2c]">
-                O que {geral ? 'o paciente' : 'a família'} recebe em 15, 30 e 90 dias
+                O que {geral ? 'o paciente' : 'a família'} recebe em {etapasPorExtenso(db.etapas)}
               </h2>
               <p className="mt-1.5 max-w-2xl text-[11px] leading-relaxed text-slate-400">
-                A mensagem sai sozinha às 9h, pelo WhatsApp da clínica. As três etapas usam o
-                mesmo texto, aprovado pela Meta.
+                A mensagem sai sozinha às 9h, pelo WhatsApp da clínica.{' '}
+                {db.etapas.length > 1 ? 'Todas as etapas usam o mesmo texto' : 'O texto é o mesmo'}, aprovado pela Meta.
               </p>
             </div>
           </div>
@@ -214,6 +224,66 @@ export default function Settings({ db, importDb, clearAll }: Props) {
 
         <div className="space-y-4 p-5 sm:p-6">
           <EnvioDoAcompanhamento />
+          {/* Quais etapas a clinica usa (19/10/2026, vindo do sistema do Dr.
+              Marcello, onde ele pediu so 30 e 90 dias). O banco tira da fila a
+              etapa desligada e devolve a religada (migration
+              etapas_do_acompanhamento). */}
+          <div className="rounded-[18px] border border-[#081b2c]/[0.07] bg-white p-4">
+            <p className="text-[11px] font-extrabold text-[#081b2c]">Quando {geral ? 'o paciente' : 'a família'} recebe</p>
+            <p className="mt-0.5 text-[10px] leading-relaxed text-slate-500">
+              Marque as etapas. A desligada sai da fila, inclusive o que ainda não foi enviado; ligar de novo vale
+              para as consultas cuja data ainda vai chegar.
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {FOLLOWUP_KEYS.map((key) => {
+                const ligada = etapas.includes(key)
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    aria-pressed={ligada}
+                    disabled={salvandoEtapas}
+                    onClick={() => {
+                      if (ligada && etapas.length === 1) {
+                        avisar(
+                          `Deixe pelo menos uma etapa ligada. Para parar o acompanhamento de ${geral ? 'um paciente' : 'uma família'}, use o SAIR da conversa.`,
+                        )
+                        return
+                      }
+                      setEtapasNaTela(ligada ? etapas.filter((k) => k !== key) : [...etapas, key])
+                    }}
+                    className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-[11px] font-extrabold transition ${
+                      ligada
+                        ? 'bg-[#081b2c] text-white'
+                        : 'border border-[#081b2c]/10 bg-[#f8f7f4] text-slate-400 line-through hover:text-slate-600'
+                    }`}
+                  >
+                    {ligada && <Check className="h-3.5 w-3.5" />}
+                    {FOLLOWUP_LABEL[key]}
+                  </button>
+                )
+              })}
+              {etapasMudaram && (
+                <button
+                  type="button"
+                  disabled={salvandoEtapas}
+                  onClick={async () => {
+                    setSalvandoEtapas(true)
+                    try {
+                      await setEtapas(etapas)
+                    } catch (erro) {
+                      avisar(erro instanceof Error ? erro.message : 'Não consegui salvar as etapas.')
+                    } finally {
+                      setSalvandoEtapas(false)
+                    }
+                  }}
+                  className="rounded-xl bg-[#2f7fc1] px-3.5 py-2 text-[11px] font-extrabold text-white transition hover:bg-[#256aa3] disabled:opacity-60"
+                >
+                  {salvandoEtapas ? 'Salvando...' : 'Salvar'}
+                </button>
+              )}
+            </div>
+          </div>
           <div className="rounded-[22px] border border-[#081b2c]/[0.07] bg-[#efeae2] p-4 sm:p-5">
             <div className="max-w-md rounded-[14px] rounded-tl-none bg-white p-3.5 text-xs leading-relaxed text-[#203546] shadow-sm">
               {marcaSemClinicaConhecida(clinicId).acompanhamentoV2 ? (

@@ -63,6 +63,10 @@ export type OpcoesDaConversa = {
 
 export function tratarConversa(opcoes: OpcoesDaConversa): Promise<Resultado>
 export function colherEventos(conversationId: string): EventoDoRobo[]
+export function etiquetaQueFica(
+  antes: { needs_attention?: boolean | null; attention_reason?: string | null } | null | undefined,
+  nova: string,
+): string
 
 export type ConteudoEnviado =
   | { type: 'text'; text: { preview_url: boolean; body: string } }

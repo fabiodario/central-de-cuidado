@@ -13,7 +13,7 @@
 import { BancoFalso, type Escrita, type Linha } from './banco-falso'
 import { horariosLivres, tabelasDaAgenda, type AgendaDaClinica } from './agenda'
 import { bancoInicial, type Familia, type Identidade } from './dados'
-import { colherEventos, montarMensagens, tratarConversa, type Toque } from './motor.js'
+import { colherEventos, etiquetaQueFica, montarMensagens, tratarConversa, type Toque } from './motor.js'
 import {
   BOTOES_URGENCIA_OU_DUVIDA,
   contextoDaLeitura,
@@ -539,7 +539,11 @@ export class Simulacao {
       if (resultado.concluida && !resultado.atencao && !atencaoAntes.ligada) {
         Object.assign(conversa, { status: 'resolved', needs_attention: false, attention_reason: null })
       }
-      if (resultado.atencao) Object.assign(conversa, { needs_attention: true, attention_reason: resultado.atencao })
+      // A etiqueta nao desce: igual ao webhook (ver etiquetaQueFica).
+      if (resultado.atencao) {
+        const etiqueta = etiquetaQueFica({ needs_attention: atencaoAntes.ligada, attention_reason: atencaoAntes.motivo }, resultado.atencao)
+        Object.assign(conversa, { needs_attention: true, attention_reason: etiqueta })
+      }
       if (resultado.atencao) eventos.push({ evento: 'chamou_equipe', detalhe: resultado.atencao })
       if (resultado.concluida) eventos.push({ evento: 'concluiu_sozinho' })
     } else {

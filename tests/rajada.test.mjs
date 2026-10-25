@@ -1,7 +1,7 @@
 // Mensagens em rajada (supabase/functions/_shared/rajada.ts). Caso real de
 // 30/09/2026: duas mensagens com 2 segundos de diferenca, processadas juntas.
 import assert from 'node:assert/strict'
-import { precisaEsperar, JANELA_DA_RAJADA_MS, complementoDaRajada, rajadaJaRespondida, qualquerMensagem } from './rajada.build.mjs'
+import { precisaEsperar, JANELA_DA_RAJADA_MS, complementoDaRajada, rajadaJaRespondida, qualquerMensagem, anteriorEmCurso } from './rajada.build.mjs'
 
 let ok = 0
 function caso(nome, fn) {
@@ -82,6 +82,25 @@ caso('a ultima e da familia, sem resposta ainda: nao conta como respondida', () 
 })
 caso('conversa vazia', () => {
   assert.equal(rajadaJaRespondida([], agora), false)
+})
+
+// A fila (24/10/2026, caso do sistema do Dr. Marcello): eventos 8073 e 8074 registrados as
+// 08:25:05 e 08:25:08; a primeira mensagem so foi gravada as 08:25:11.
+const ev = (id, concluido = null) => ({ id, chave: `message:wamid.${id}`, concluidoEm: concluido })
+caso('fila: a anterior ainda em curso, a minha espera', () => {
+  assert.equal(anteriorEmCurso([ev(8073), ev(8074)], 'message:wamid.8074'), true)
+})
+caso('fila: a anterior concluiu, segue', () => {
+  assert.equal(anteriorEmCurso([ev(8073, '2026-10-24T11:25:17Z'), ev(8074)], 'message:wamid.8074'), false)
+})
+caso('fila: a primeira nao espera a que chegou depois', () => {
+  assert.equal(anteriorEmCurso([ev(8073), ev(8074)], 'message:wamid.8073'), false)
+})
+caso('fila: sem o meu registro na lista, nao espera', () => {
+  assert.equal(anteriorEmCurso([ev(8073)], 'message:wamid.8074'), false)
+})
+caso('fila: tres seguidas, a terceira espera a segunda', () => {
+  assert.equal(anteriorEmCurso([ev(1, 'x'), ev(2), ev(3)], 'message:wamid.3'), true)
 })
 
 console.log(`rajada: ${ok} verificacoes ok`)

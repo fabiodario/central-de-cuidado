@@ -189,3 +189,15 @@ export async function testarNotificacao(clinicId: string): Promise<{ enviados: n
   const r = data as { enviados?: number; falhas?: string[] }
   return { enviados: r?.enviados ?? 0, falhas: r?.falhas ?? [] }
 }
+
+/**
+ * A conversa, como pedido, no WhatsApp dos numeros do alerta (18/10/2026,
+ * vindo do sistema do Dr. Marcello). A resposta de la volta para o paciente; o
+ * resultado vira nota na conversa.
+ */
+export async function mandarParaOCelular(clinicId: string, conversaId: string): Promise<{ nota: string; falhou: boolean }> {
+  const { data, error } = await supabase.functions.invoke('notificar-equipe', { body: { acao: 'encaminhar', clinicId, conversaId } })
+  if (error) throw new Error(await erroDaFuncao(error))
+  const r = data as { nota?: string; falhou?: boolean }
+  return { nota: r?.nota ?? 'Sem resposta do servidor.', falhou: Boolean(r?.falhou) }
+}

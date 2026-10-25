@@ -1,3 +1,5 @@
+import { montarConteudo } from './conteudo.ts'
+import { textoDoModelo } from './modelos.ts'
 import { quemAtende } from './quem-atende.ts'
 import { chaveDoWhatsApp } from './whatsapp-teste.ts'
 import { MOTIVOS_COM_VEREDITO } from './veredito.ts'
@@ -42,6 +44,20 @@ export const MODELO_COM_BOTOES = 'alerta_urgencia_botoes'
  * o celular do medico desligado por algumas horas. Ver o LEIA-ME do projeto.
  */
 export const VALIDADE_DO_ALERTA_S = 12 * 3600
+
+/**
+ * Pedido que nao e urgencia, nos mesmos celulares (18/10/2026 no sistema do
+ * Dr. Marcello, trazido em 25/10/2026): "Mandar para o celular", na conversa
+ * aberta da Central, manda a conversa ao WhatsApp do medico e da Dayane, e a
+ * resposta de la volta ao paciente pelo mesmo caminho do alerta
+ * (resposta-ao-alerta.ts): texto em cima da mensagem, ou o botao "Eu respondo".
+ *
+ * Aqui so sai pela mao de alguem da equipe. No Dr. Marcello o robo tambem
+ * encaminha sozinho o que depende do medico (receita, foto de exame, duvida de
+ * conduta); no Dr. Fabio isso espera ele e a Cintia decidirem o que vai ao
+ * celular dele - o relatorio da Cintia so pede o aviso do sangramento.
+ */
+export const MODELO_DO_PEDIDO = 'pedido_equipe'
 
 export type VereditoDoAlerta = 'urgente' | 'nao_urgente' | 'responde'
 
@@ -164,6 +180,8 @@ function parametro(texto: string, limite: number): string {
 }
 
 export type MotivoDoAlerta = 'urgencia' | 'sangramento'
+/** O que vai aos celulares: o alerta (urgencia, sangramento) ou o pedido. */
+export type MotivoDoAviso = MotivoDoAlerta | 'pedido'
 
 const NOME_DO_MOTIVO: Record<MotivoDoAlerta, string> = { urgencia: 'urgência', sangramento: 'sangramento' }
 
@@ -174,6 +192,15 @@ const NOME_DO_MOTIVO: Record<MotivoDoAlerta, string> = { urgencia: 'urgência', 
 export function parametrosDoAlerta(e: { motivo: MotivoDoAlerta; quem: string; texto: string; agora: Date }): string[] {
   const hora = e.agora.toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' })
   return [NOME_DO_MOTIVO[e.motivo] ?? 'urgência', parametro(e.quem, 60), hora, parametro(semDadosPessoais(e.texto), 300)]
+}
+
+/**
+ * Os quatro parametros do pedido: quem, a hora, o assunto e o trecho. Sem o
+ * canal do Dr. Marcello (la tambem vem do Instagram).
+ */
+export function parametrosDoPedido(e: { quem: string; texto: string; agora: Date; assunto?: string }): string[] {
+  const hora = e.agora.toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' })
+  return [parametro(e.quem, 60), hora, parametro(e.assunto ?? 'pedido para a equipe', 80), parametro(semDadosPessoais(e.texto), 300)]
 }
 
 /**
@@ -199,8 +226,9 @@ const final = (numero: string) => `final ${numero.slice(-4)}`
 export function descreverEnvio(
   envios: EnvioDoAlerta[],
   clinicId: string | null | undefined,
-  motivo: MotivoDoAlerta = 'urgencia',
+  motivo: MotivoDoAviso = 'urgencia',
 ): { detalhe: string; nota: string; falhou: boolean } {
+  if (motivo === 'pedido') return descreverPedido(envios)
   const medico = quemAtende(clinicId).o
   const nome = NOME_DO_MOTIVO[motivo] ?? 'urgência'
   if (!envios.length) {
@@ -233,6 +261,45 @@ export function descreverEnvio(
 }
 
 /**
+ * A nota do pedido. Sem telefonema: a fila da Central continua sendo o
+ * caminho. Deu certo tambem vira nota (no Dr. Marcello so a falha vira; aqui
+ * o "Mandar para o celular" mostra a nota embaixo do botao, e em branco
+ * parecia que nada tinha acontecido).
+ */
+function descreverPedido(envios: EnvioDoAlerta[]): { detalhe: string; nota: string; falhou: boolean } {
+  if (!envios.length) {
+    return {
+      detalhe: 'sem numero cadastrado',
+      nota: '⚠️ A conversa NÃO foi para o celular: nenhum número cadastrado em Preferências (Alerta de urgência no WhatsApp do médico). Responda o paciente por aqui.',
+      falhou: true,
+    }
+  }
+  const certos = envios.filter((e) => e.ok)
+  const errados = envios.filter((e) => !e.ok)
+  if (!errados.length) {
+    return {
+      detalhe: `enviado ${certos.length}/${envios.length}`,
+      nota: `📲 Conversa enviada para o WhatsApp de ${envios.length === 1 ? '1 número' : `${envios.length} números`} (${certos.map((e) => final(e.numero)).join(', ')}). A resposta de lá volta para o paciente.`,
+      falhou: false,
+    }
+  }
+  const motivoDoErro = errados[0].erro ?? 'sem detalhe'
+  // Sem o modelo aprovado, o pedido vai como texto livre, que so chega a quem
+  // escreveu para o numero da clinica nas ultimas 24 horas (131047).
+  const foraDaJanela = /131047|re-engagement|24 hours|132001|template name does not exist|does not exist in/i.test(motivoDoErro)
+  const explicacao = foraDaJanela
+    ? `o modelo ${MODELO_DO_PEDIDO} ainda não foi aprovado na Meta, e esse celular não escreveu para o número da clínica nas últimas 24 horas`
+    : motivoDoErro
+  return {
+    detalhe: `falhou ${errados.length}/${envios.length}: ${motivoDoErro}`.slice(0, 120),
+    nota:
+      `⚠️ A conversa NÃO chegou ao celular ${errados.map((e) => final(e.numero)).join(', ')}: ${explicacao}. Responda o paciente por aqui.` +
+      (certos.length ? ` Chegou a ${certos.map((e) => final(e.numero)).join(', ')}.` : ''),
+    falhou: true,
+  }
+}
+
+/**
  * Os numeros salvos na clinica. null = nao deu para ler (a coluna ainda nao
  * existe): diferente de lista vazia, e o log grita.
  */
@@ -254,7 +321,10 @@ function modeloInexistente(envio: Enviado): boolean {
 
 export type PedidoDeAlerta = {
   clinicId: string
-  motivo: MotivoDoAlerta
+  /** 'pedido' (25/10/2026): o "Mandar para o celular", pelo modelo pedido_equipe. */
+  motivo: MotivoDoAviso
+  /** A linha "Assunto" do pedido. */
+  assunto?: string
   quem: string
   texto: string
   agora: Date
@@ -303,6 +373,11 @@ async function registrarAlerta(admin: Admin, p: PedidoDeAlerta): Promise<string 
  * numero e a chave da clinica.
  */
 export async function enviarAlertaDeUrgencia(admin: Admin, p: PedidoDeAlerta, enviar?: EnviarWhatsApp): Promise<ResultadoDoAlerta> {
+  const pedido = p.motivo === 'pedido'
+  const naoSaiu = (porque: string) =>
+    pedido
+      ? `⚠️ A conversa NÃO foi para o celular: ${porque}. Responda o paciente por aqui.`
+      : `⚠️ O alerta de ${NOME_DO_MOTIVO[p.motivo as MotivoDoAlerta] ?? 'urgência'} no WhatsApp NÃO saiu: ${porque}. Avise ${quemAtende(p.clinicId).o} por telefone.`
   const registrarNaConversa = async (nota: string, detalhe: string) => {
     if (!p.conversationId) return
     // Cada parte no seu try: perder a nota nao pode custar o evento, e vice-versa.
@@ -315,7 +390,7 @@ export async function enviarAlertaDeUrgencia(admin: Admin, p: PedidoDeAlerta, en
     try {
       const { error } = await admin
         .from('whatsapp_bot_events')
-        .insert({ clinic_id: p.clinicId, conversation_id: p.conversationId, evento: 'alerta_urgencia', detalhe: detalhe.slice(0, 120) })
+        .insert({ clinic_id: p.clinicId, conversation_id: p.conversationId, evento: pedido ? 'pedido_equipe' : 'alerta_urgencia', detalhe: detalhe.slice(0, 120) })
       if (error) console.error('Alerta de urgencia: evento nao gravado', error)
     } catch (erro) {
       console.error('Alerta de urgencia: evento nao gravado', erro)
@@ -325,7 +400,7 @@ export async function enviarAlertaDeUrgencia(admin: Admin, p: PedidoDeAlerta, en
   try {
     const lidos = p.numeros ?? (await lerNumeros(admin, p.clinicId))
     if (lidos === null) {
-      const nota = `⚠️ O alerta de ${NOME_DO_MOTIVO[p.motivo]} no WhatsApp NÃO saiu: não consegui ler os números do alerta. Avise ${quemAtende(p.clinicId).o} por telefone.`
+      const nota = naoSaiu('não consegui ler os números do alerta')
       await registrarNaConversa(nota, 'falhou: sem a lista de numeros')
       return { envios: [], alertaId: null, detalhe: 'falhou: sem a lista de numeros', nota, falhou: true }
     }
@@ -345,14 +420,40 @@ export async function enviarAlertaDeUrgencia(admin: Admin, p: PedidoDeAlerta, en
     const numeroDoRobo = (ajustes as { whatsapp_phone_number_id?: string } | null)?.whatsapp_phone_number_id
     const idioma = (ajustes as { whatsapp_template_language?: string } | null)?.whatsapp_template_language || 'pt_BR'
     const mandar = enviar ?? (numeroDoRobo ? whatsAppPelaApi(numeroDoRobo, chaveDoWhatsApp(numeroDoRobo)) : null)
-    const corpoDoModelo = { type: 'body', parameters: parametrosDoAlerta(p).map((text) => ({ type: 'text', text })) }
+    const parametros = pedido ? parametrosDoPedido(p) : parametrosDoAlerta({ ...p, motivo: p.motivo as MotivoDoAlerta })
+    const corpoDoModelo = { type: 'body', parameters: parametros.map((text) => ({ type: 'text', text })) }
 
     // Sem a tabela (migration nao chegou), sai sem botoes: o medico ainda e avisado.
     const alertaId = await registrarAlerta(admin, p)
     // Com botoes so com alerta registrado; se a Meta disser que o modelo com
     // botoes nao existe (ainda em analise), o resto vai pelo sem botoes.
-    let comBotoes = Boolean(alertaId)
-    const modelo = (botoes: boolean) => ({
+    // No pedido, "com botoes" e o modelo pedido_equipe; sem ele aprovado, vai
+    // o mesmo texto com o botao "Eu respondo", que chega a quem escreveu para
+    // o numero da clinica nas ultimas 24 horas (quem acabou de responder um
+    // alerta). Fora disso a Meta recusa, e a nota diz.
+    let comBotoes = pedido || Boolean(alertaId)
+    const eurespondo = alertaId ? [{ id: payloadDoVeredito(alertaId, 'responde'), titulo: 'Eu respondo' }] : undefined
+    const doPedido = (modeloAprovado: boolean): Record<string, unknown> =>
+      modeloAprovado
+        ? {
+            type: 'template',
+            template: {
+              name: MODELO_DO_PEDIDO,
+              language: { code: idioma },
+              components: [
+                corpoDoModelo,
+                ...(alertaId
+                  ? [{ type: 'button', sub_type: 'quick_reply', index: '0', parameters: [{ type: 'payload', payload: payloadDoVeredito(alertaId, 'responde') }] }]
+                  : []),
+              ],
+            },
+          }
+        : montarConteudo(
+            // Sem a linha "[Eu respondo]" do registro: o botao vai de verdade.
+            (textoDoModelo(MODELO_DO_PEDIDO, parametros) ?? parametros.join(' · ')).replace(/\n\n\[[^\]\n]*\]$/, ''),
+            eurespondo ? { botoes: eurespondo } : undefined,
+          )
+    const doAlerta = (botoes: boolean): Record<string, unknown> => ({
       type: 'template',
       template: botoes
         ? {
@@ -370,6 +471,7 @@ export async function enviarAlertaDeUrgencia(admin: Admin, p: PedidoDeAlerta, en
           }
         : { name: MODELO_DO_ALERTA, language: { code: idioma }, components: [corpoDoModelo] },
     })
+    const modelo = (botoes: boolean) => (pedido ? doPedido(botoes) : doAlerta(botoes))
 
     const envios: EnvioDoAlerta[] = []
     const mensagens: string[] = []
@@ -381,7 +483,11 @@ export async function enviarAlertaDeUrgencia(admin: Admin, p: PedidoDeAlerta, en
       try {
         let r = await mandar(numero, modelo(comBotoes))
         if (comBotoes && modeloInexistente(r)) {
-          console.warn(`Alerta de urgencia: ${MODELO_COM_BOTOES} ainda nao aprovado; vai o modelo sem botoes`)
+          console.warn(
+            pedido
+              ? `Pedido para o celular: ${MODELO_DO_PEDIDO} ainda nao aprovado; vai como texto`
+              : `Alerta de urgencia: ${MODELO_COM_BOTOES} ainda nao aprovado; vai o modelo sem botoes`,
+          )
           comBotoes = false
           r = await mandar(numero, modelo(false))
         }
@@ -410,7 +516,7 @@ export async function enviarAlertaDeUrgencia(admin: Admin, p: PedidoDeAlerta, en
     return { envios, alertaId, ...descricao }
   } catch (erro) {
     console.error('Alerta de urgencia: falhou antes de enviar', erro)
-    const nota = `⚠️ O alerta de ${NOME_DO_MOTIVO[p.motivo] ?? 'urgência'} no WhatsApp NÃO saiu: ${String(erro).slice(0, 120)}. Avise ${quemAtende(p.clinicId).o} por telefone.`
+    const nota = naoSaiu(String(erro).slice(0, 120))
     await registrarNaConversa(nota, `falhou: ${String(erro)}`)
     return { envios: [], alertaId: null, detalhe: `falhou: ${String(erro)}`.slice(0, 120), nota, falhou: true }
   }

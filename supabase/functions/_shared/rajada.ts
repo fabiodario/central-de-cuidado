@@ -101,3 +101,39 @@ export function rajadaJaRespondida(recentes: MensagemRecente[], agora: number): 
   const idade = agora - new Date(pergunta.criadaEm).getTime()
   return idade >= 0 && idade < JANELA_DA_RAJADA_MS
 }
+
+/**
+ * A mensagem anterior desta pessoa ainda esta sendo atendida? (24/10/2026)
+ *
+ * O caso, no sistema do Dr. Marcello: "Ah infelizmente so consigo passar pelo convenio" e,
+ * tres segundos depois, "Mas obrigada". Cada webhook leva 5 a 6 segundos entre
+ * chegar e GRAVAR a mensagem (le paciente, agenda, conversa), e a espera da
+ * rajada acima so enxerga mensagem gravada. A segunda chegou quando a primeira
+ * ainda nao estava no banco, nao esperou nada, e as duas foram a IA ao mesmo
+ * tempo: saiu a mesma explicacao do reembolso duas vezes, com 1 s de
+ * diferenca, e "Mas obrigada" (fechamento) nem devia ter resposta.
+ *
+ * O registro de eventos do webhook (whatsapp_webhook_events) e gravado logo na
+ * chegada e ganha concluded_at quando a resposta ja saiu. Entao: se ha um
+ * evento de mensagem desta mesma pessoa registrado ANTES do meu (id menor) e
+ * ainda sem conclusao, espero ele terminar, e so depois leio a conversa - que
+ * ja tem a mensagem anterior E a resposta dela.
+ *
+ * Evento de uma execucao que morreu fica sem conclusao para sempre: por isso
+ * a espera tem limite (ESPERA_PELA_ANTERIOR_MS) e o webhook so olha eventos
+ * recentes (JANELA_DA_FILA_MS).
+ */
+export type EventoDeMensagem = { id: number; chave: string; concluidoEm: string | null }
+
+/** Quanto a mensagem espera a anterior terminar. O atendimento com IA leva ate ~12 s do registro a conclusao. */
+export const ESPERA_PELA_ANTERIOR_MS = 20_000
+/** So conta como fila evento registrado neste intervalo. */
+export const JANELA_DA_FILA_MS = 60_000
+
+export function anteriorEmCurso(eventos: EventoDeMensagem[], minhaChave: string): boolean {
+  const minha = eventos.find((e) => e.chave === minhaChave)
+  // Sem o meu registro na lista (consulta atrasada, chave diferente), nao ha
+  // como saber quem veio antes: segue como antes.
+  if (!minha) return false
+  return eventos.some((e) => e.chave !== minhaChave && e.id < minha.id && !e.concluidoEm)
+}

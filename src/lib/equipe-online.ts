@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { RealtimeChannel, SupabaseClient } from '@supabase/supabase-js'
 import { supabase } from '@/lib/supabase'
+import { aparelhoDaTela, aparelhosDe, type Aparelho } from '@/lib/aparelho'
 
 /**
  * Foto da equipe e "quem esta online" (01/10/2026).
@@ -19,7 +20,7 @@ const BUCKET = 'fotos-da-equipe'
 /** Disparado quando o responsavel muda a chave, para a tela reler na hora. */
 export const EVENTO_PRESENCA_MUDOU = 'central:presenca-mudou'
 
-export type PessoaOnline = { userId: string; nome: string; foto: string | null }
+export type PessoaOnline = { userId: string; nome: string; foto: string | null; aparelhos: Aparelho[] }
 
 export function iniciais(nome: string): string {
   const partes = nome
@@ -137,6 +138,25 @@ export function useEquipeOnline(clinicId: string | null, userId: string | null, 
   const [foto, setFoto] = useState<string | null>(null)
   const [outros, setOutros] = useState<PessoaOnline[]>([])
   const canalRef = useRef<RealtimeChannel | null>(null)
+  // O que vai na presenca, sempre o valor de agora (21/10/2026). O canal guardava
+  // a foto do instante em que foi criado - ainda nula, porque ela carrega depois
+  // - e a atualizacao chegava antes da inscricao e se perdia: os colegas viam as
+  // iniciais da pessoa mesmo com a foto no perfil (no sistema do Dr. Marcello).
+  const presencaRef = useRef({ nome, foto: null as string | null, aparelho: 'computador' as Aparelho })
+
+  // Foto ou nome mudou: guarda e atualiza o que os colegas veem, no mesmo canal.
+  // Vem antes do efeito do canal: na abertura, o canal ja encontra o valor certo.
+  useEffect(() => {
+    presencaRef.current = {
+      nome,
+      foto,
+      aparelho: aparelhoDaTela({
+        toquePrincipal: window.matchMedia?.('(pointer: coarse)').matches === true,
+        userAgent: navigator.userAgent,
+      }),
+    }
+    canalRef.current?.track(presencaRef.current).catch(() => undefined)
+  }, [nome, foto])
 
   useEffect(() => {
     if (!userId) return
@@ -167,27 +187,28 @@ export function useEquipeOnline(clinicId: string | null, userId: string | null, 
   }, [clinicId])
 
   useEffect(() => {
-    if (!clinicId || !userId || !ligada) {
-      setOutros([])
-      return
-    }
+    // Sem canal, ninguem aparece: o retorno abaixo ja devolve a lista vazia.
+    if (!clinicId || !userId || !ligada) return
     const canal = supabase.channel(`presenca:${clinicId}`, {
       config: { private: true, presence: { key: userId } },
     })
     canalRef.current = canal
     canal.on('presence', { event: 'sync' }, () => {
-      const estado = canal.presenceState<{ nome?: string; foto?: string | null }>()
+      const estado = canal.presenceState<{ nome?: string; foto?: string | null; aparelho?: string | null }>()
       const lista: PessoaOnline[] = []
       for (const [chave, entradas] of Object.entries(estado)) {
         if (chave === userId || !entradas.length) continue
         const ultima = entradas[entradas.length - 1]
-        lista.push({ userId: chave, nome: String(ultima.nome ?? 'Equipe'), foto: ultima.foto ?? null })
+        // Foto de qualquer aba da pessoa: uma aba aberta antes da foto nova ainda
+        // manda nula.
+        const foto = [...entradas].reverse().find((e) => e.foto)?.foto ?? null
+        lista.push({ userId: chave, nome: String(ultima.nome ?? 'Equipe'), foto, aparelhos: aparelhosDe(entradas) })
       }
       lista.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'))
       setOutros(lista)
     })
     canal.subscribe((status) => {
-      if (status === 'SUBSCRIBED') void canal.track({ nome, foto })
+      if (status === 'SUBSCRIBED') void canal.track(presencaRef.current)
       if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
         console.warn('Presenca da equipe recusada ou fora do ar', status)
         setOutros([])
@@ -197,14 +218,8 @@ export function useEquipeOnline(clinicId: string | null, userId: string | null, 
       canalRef.current = null
       void supabase.removeChannel(canal)
     }
-    // nome e foto entram pelo efeito de baixo, sem refazer o canal
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // nome e foto entram pelo efeito de baixo (presencaRef), sem refazer o canal
   }, [clinicId, userId, ligada])
 
-  // Foto ou nome mudou: atualiza o que os colegas veem, no mesmo canal.
-  useEffect(() => {
-    canalRef.current?.track({ nome, foto }).catch(() => undefined)
-  }, [nome, foto])
-
-  return { ligada, foto, setFoto, outros }
+  return { ligada, foto, setFoto, outros: ligada && clinicId && userId ? outros : [] }
 }

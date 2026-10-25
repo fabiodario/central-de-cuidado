@@ -9,5 +9,5 @@
 // Copiar o robo para dentro do simulador nao era opcao: a demonstracao tem de
 // responder exatamente o que a familia recebe no WhatsApp, inclusive depois da
 // proxima correcao do robo.
-export { tratarConversa, colherEventos } from '../../supabase/functions/_shared/atendimento.ts'
+export { tratarConversa, colherEventos, etiquetaQueFica } from '../../supabase/functions/_shared/atendimento.ts'
 export { montarMensagens } from '../../supabase/functions/_shared/conteudo.ts'

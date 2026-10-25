@@ -157,6 +157,12 @@ export function interpretarResposta(
   dentroDaJanela: boolean,
   /** Lembrete nas ultimas 48h, mesmo que nao seja a ultima mensagem. Ver lembreteRecente. */
   comLembreteRecente = false,
+  /**
+   * A ultima mensagem nossa foi o LEMBRETE (modelo ligado a uma consulta, sem
+   * acompanhamento). Separado de dentroDaJanela, que tambem vale depois do
+   * acompanhamento: "sim" ali e "estou bem", nao confirmacao de consulta.
+   */
+  ultimaFoiLembrete = false,
 ): Resposta {
   const r = normalizarResposta(escolhido)
 
@@ -209,16 +215,41 @@ export function interpretarResposta(
   // Remarcar pode: ele nao muda nada na agenda, so chama a equipe.
   const duvida = /(^|\s)nao sei(\s|$)/.test(r)
 
+  // "Confirma" e o "sim" (20/10/2026 no sistema do Dr. Marcello, trazido em
+  // 25/10/2026). La, um paciente respondeu o lembrete digitando "Confirma": a
+  // lista so tinha confirmar/confirmo/confirmado, a mensagem foi para outro
+  // caminho, e na agenda a consulta seguiu "lembrete enviado, sem resposta".
+  // "confirma" contido cobre confirma, confirmada, confirmamos; "confirmei"
+  // vem a parte.
+  //
+  // O lembrete pergunta "Podemos confirmar sua presenca?", e "sim", "ok", "vou
+  // sim", "estarei la" respondem isso. So com o lembrete como ultima mensagem
+  // nossa (fora dela "ok" e so um ok), sem "nao" na frase, e nunca por cima de
+  // um pedido de remarcar ou cancelar na mesma mensagem.
+  const so = r.replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim()
+  const afirma =
+    dentroDaJanela &&
+    ultimaFoiLembrete &&
+    !/\bnao\b/.test(so) &&
+    (/^(sim|ok|okay|certo|combinado|positivo|claro|com certeza|perfeito|beleza)\b/.test(so) ||
+      /^(sim )?(vou|vamos|estarei|estaremos|irei|iremos)( sim)?( la| ai| presente| presentes)?( sim)?( obrigad[oa])?$/.test(so))
   // O numero so vale dentro da janela para nao roubar as opcoes do menu.
-  const confirma =
+  const confirmaAntes =
     !duvida &&
     ((dentroDaJanela && r === '1') ||
-      ((dentroDaJanela || comLembreteRecente) && semNegacao('confirmar', 'confirmo', 'confirmado')))
+      ((dentroDaJanela || comLembreteRecente) && semNegacao('confirma', 'confirmo', 'confirmei')) ||
+      afirma)
+  // "Escolher outra data" e o texto do botao da confirmacao (15/10/2026, no
+  // Dr. Marcello): nao era reconhecido, e o toque caia no cadastro pela metade
+  // como nome.
   const remarca =
     dentroDaJanela &&
-    (r === '2' || semNegacao('remarcar', 'reagendar', 'trocar a data', 'outro horario'))
+    (r === '2' ||
+      semNegacao('remarcar', 'reagendar', 'trocar a data', 'outro horario', 'outra data', 'mudar a data', 'trocar o dia', 'mudar o dia'))
   const cancela =
     dentroDaJanela && !duvida && (r === '3' || semNegacao('cancelar', 'cancelo', 'desmarcar'))
+  // "Sim, mas preciso remarcar": o pedido manda, o "sim" so respondia a pergunta.
+  const confirma = confirmaAntes && !remarca && !cancela
 
   const pediuAjuda = tem('preciso de ajuda', 'preciso falar')
 

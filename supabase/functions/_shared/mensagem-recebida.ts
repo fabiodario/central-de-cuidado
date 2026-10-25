@@ -42,3 +42,29 @@ export function textoDosContatos(contatos: Contato[] | undefined): string {
 export function semRespostaDoRobo(tipo: string | undefined | null): boolean {
   return tipo === 'sticker'
 }
+
+/**
+ * Mensagem que o WhatsApp nao mostra: chega como "[unsupported]" (16/10/2026).
+ *
+ * E o que a Meta entrega quando a pessoa manda algo que a API nao le - muito
+ * provavelmente uma LIGACAO pelo WhatsApp para o numero da clinica, ou foto de
+ * visualizacao unica, enquete. No sistema do Dr. Marcello, um contato fez isso em 22/09 e
+ * em 16/10 sem nunca escrever texto: o robo respondeu o menu as duas vezes e
+ * as duas voltaram "Message undeliverable". O modelo de retomar, mandado pela
+ * equipe em 23/09, chegou. Isso mostrou que esse tipo de mensagem NAO abre a
+ * janela de 24 horas para texto livre.
+ *
+ *   - janela aberta (a pessoa escreveu texto nas ultimas 24h): o robo pede
+ *     para ela escrever, em vez de mandar o menu como se nada tivesse chegado;
+ *   - janela fechada: o robo nao responde (falharia) e a conversa vai para a
+ *     equipe com etiqueta propria, que diz para usar um modelo.
+ */
+export type DestinoDaNaoSuportada = 'normal' | 'pedir_texto' | 'so_equipe'
+
+export function destinoDaNaoSuportada(tipo: string | undefined | null, janelaAberta: boolean): DestinoDaNaoSuportada {
+  if (tipo !== 'unsupported') return 'normal'
+  return janelaAberta ? 'pedir_texto' : 'so_equipe'
+}
+
+export const TEXTO_NAO_SUPORTADA =
+  'Não consegui abrir o que você enviou por aqui. Pode escrever em texto? (Ligações pelo WhatsApp não chegam até nós.)'

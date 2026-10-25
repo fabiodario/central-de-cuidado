@@ -34,6 +34,8 @@ const COR_DA_ETAPA: Record<FollowupKey, string> = { d15: AZUL, d30: '#6f9d91', m
 
 interface Props {
   patients: Patient[]
+  /** Etapas ligadas em Preferencias (19/10/2026). */
+  etapas?: FollowupKey[]
   templates: Record<FollowupKey, string>
   setFollowup: (id: string, key: FollowupKey, status: FollowupStatus) => Promise<void>
   /** Leva direto para a conversa do paciente, sem passar pelo menu Respostas. */
@@ -135,11 +137,11 @@ function Group({
   )
 }
 
-export default function Followups({ patients, setFollowup, onAbrirConversa }: Props) {
+export default function Followups({ patients, etapas, setFollowup, onAbrirConversa }: Props) {
   const [sending, setSending] = useState<string | null>(null)
   const { avisar, perguntar } = useDialogos()
   const [situacoes, setSituacoes] = useState<Map<string, SituacaoDoEnvio | null>>(new Map())
-  const items = pendingFollowups(patients)
+  const items = pendingFollowups(patients, etapas)
   // Quem recebe e responde: o paciente no otorrino, a familia na pediatria
   // (15/10/2026, ver publico.ts).
   const geral = publicoDaClinica() === 'geral'
@@ -297,7 +299,19 @@ export default function Followups({ patients, setFollowup, onAbrirConversa }: Pr
                 )}
                 {/* Sem isto a equipe olha a fila e acha que precisa clicar em
                     tudo, sem saber que o sistema envia sozinho no dia certo. */}
-                {!wasSent && (
+                {/* Consulta sem prontuario nem presenca (23/10/2026, vindo do
+                    sistema do Dr. Marcello): o servidor segura o envio, e a tela nao pode
+                    prometer o contrario. */}
+                {!wasSent && patient.followups[item.key].semConsulta && (
+                  <span
+                    title={`A consulta não tem prontuário nem presença marcada na agenda. Se ${geral ? 'o paciente' : 'a criança'} foi atendid${geral ? 'o' : 'a'}, marque a presença ou escreva o prontuário; se não foi, conclua.`}
+                    className="inline-flex items-center gap-1 rounded-full bg-[#fff4e5] px-2 py-1 text-[8px] font-extrabold uppercase tracking-[0.1em] text-[#b45309]"
+                  >
+                    <Clock3 className="h-2.5 w-2.5" strokeWidth={3} />
+                    não sai sozinho: sem prontuário nem presença
+                  </span>
+                )}
+                {!wasSent && !patient.followups[item.key].semConsulta && (
                   <span className="inline-flex items-center gap-1 rounded-full bg-[#f2f5f4] px-2 py-1 text-[8px] font-extrabold uppercase tracking-[0.1em] text-[#6b7c86]">
                     <Clock3 className="h-2.5 w-2.5" strokeWidth={3} />
                     {isOverdue || isToday

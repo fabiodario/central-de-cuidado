@@ -36,6 +36,40 @@ export function variantesDoTelefone(numero: string): string[] {
   return [...variantes].filter((v) => v.length >= 8)
 }
 
+/**
+ * Celular sem o nono digito ganha o 9; o resto volta so com os digitos
+ * (16/10/2026).
+ *
+ * Um paciente de Santos foi cadastrado com o celular em 8 digitos, sem o 9
+ * (o repositorio e publico: o numero dele nao vai aqui). O sistema mandava
+ * para "55 13 + 8 digitos" e a Meta devolvia "Message undeliverable": os
+ * acompanhamentos de 01/10 e de 16/10 falharam.
+ *
+ * Desde 2016 todo celular brasileiro tem 9 digitos, entao 8 digitos comecando
+ * por 6 a 9 e celular faltando o 9, nunca outro numero. Com o 9, a Meta acha
+ * tambem a conta antiga que ela identifica sem ele; sem o 9, a conta nova nao
+ * existe. O 55 fica como veio: o cadastro grava o que a equipe digitou.
+ */
+export function comNonoDigito(numero: string): string {
+  const digitos = String(numero ?? '').replace(/\D/g, '')
+  const comPais = digitos.startsWith('55') && digitos.length >= 12
+  const semPais = comPais ? digitos.slice(2) : digitos
+  if (semPais.length !== 10 || !/^[6-9]/.test(semPais.slice(2))) return digitos
+  return `${comPais ? '55' : ''}${semPais.slice(0, 2)}9${semPais.slice(2)}`
+}
+
+/**
+ * O numero para mandar a Meta: 55 + DDD + celular com o 9.
+ *
+ * Antes era so "55 na frente se nao tiver", e isso tambem errava o DDD 55
+ * (Santa Maria, RS): "55991234567" ja comecava por 55 e saia sem o codigo do
+ * pais. Agora o 55 so e codigo do pais quando sobram 12 ou 13 digitos.
+ */
+export function paraEnvio(numero: string): string {
+  const digitos = comNonoDigito(numero)
+  return digitos.startsWith('55') && digitos.length >= 12 ? digitos : `55${digitos}`
+}
+
 /** Os dois numeros sao o mesmo telefone? */
 export function mesmoTelefone(a: string, b: string): boolean {
   const deA = new Set(variantesDoTelefone(a))

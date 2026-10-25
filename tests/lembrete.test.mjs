@@ -5,6 +5,7 @@
 // chegou na plataforma, e a causa so foi encontrada garimpando o banco de
 // producao. Cada caso abaixo existe para que um erro desses falhe aqui, em dois
 // segundos, e nao la, em silencio.
+import { readFileSync } from 'node:fs'
 import {
   acompanhamentoEncerraConversa,
   avisoDaResposta,
@@ -533,6 +534,34 @@ conferir('Pedido de sair: fica fora da lista', depoisDoPedidoDeSair('open', true
 conferir('"Ok, obrigado" depois de sair: continua fora', depoisDoPedidoDeSair('opted_out', false, 'Ok, obrigado!') === 'opted_out')
 conferir('Volta meses depois para marcar: conversa reabre e o robô atende', depoisDoPedidoDeSair('opted_out', false, 'Oi, queria marcar o retorno do Vicente') === 'open')
 conferir('Conversa comum: continua aberta', depoisDoPedidoDeSair('resolved', false, 'oi') === 'open')
+
+// "Confirma" e o "sim" depois do lembrete (20/10/2026 no sistema do Dr.
+// Marcello, trazido em 25/10/2026): la, "Confirma" deixou a consulta "sem resposta".
+for (const texto of ['Confirma', 'confirma!', 'Confirmada', 'confirmamos sim', 'Confirmei']) {
+  conferir(`"${texto}" depois do lembrete confirma`, interpretarResposta(texto, true, false, true).confirma === true)
+}
+conferir('"Confirma" com lembrete recente (não a última) confirma', interpretarResposta('Confirma', false, true, false).confirma === true)
+// O lembrete pergunta "Podemos confirmar sua presença?": "sim" responde.
+for (const texto of ['Sim', 'sim!', 'Ok', 'ok, obrigada', 'Sim, estarei lá', 'Vou sim', 'estarei lá', 'Com certeza 👍', 'Certo']) {
+  conferir(`"${texto}" logo depois do lembrete confirma`, interpretarResposta(texto, true, false, true).confirma === true)
+}
+// ... mas so depois do PROPRIO lembrete: depois do acompanhamento, "sim" e outra conversa.
+conferir('"Sim" depois do acompanhamento não confirma consulta', interpretarResposta('Sim', true, false, false).confirma === false)
+conferir('"ok" sem o lembrete como última mensagem não confirma', interpretarResposta('ok', false, true, false).confirma === false)
+// "nao" na frase e o pedido junto mandam mais que o "sim".
+conferir('"sim, não vou conseguir" não confirma', interpretarResposta('sim, não vou conseguir', true, false, true).confirma === false)
+conferir('"Sim, mas preciso remarcar" é remarcar', (() => { const r = interpretarResposta('Sim, mas preciso remarcar', true, false, true); return r.remarca && !r.confirma })())
+conferir('"Não posso confirmar" continua não confirmando', interpretarResposta('Não posso confirmar', true, false, true).confirma === false)
+conferir('"sim" no meio de outra frase não confirma', interpretarResposta('tem estacionamento sim?', true, false, true).confirma === false)
+// O botao "Escolher outra data" da confirmacao e pedido de remarcar.
+conferir('"Escolher outra data" remarca', interpretarResposta('Escolher outra data', true).remarca === true)
+conferir('"não quero outra data" não remarca', interpretarResposta('não quero outra data, está ótimo', true).remarca === false)
+// O webhook passa a ultima mensagem nossa: so o lembrete (consulta, sem acompanhamento, modelo).
+{
+  const webhook = readFileSync(new URL('../supabase/functions/meta-webhook/index.ts', import.meta.url), 'utf8')
+  conferir('Webhook: ultimaFoiLembrete pelo modelo da consulta', /ultimaFoiLembrete = respondendoEnvioNosso && Boolean\(u\?\.appointment_id && !u\.followup_id && u\.template_name\)/.test(webhook))
+  conferir('Webhook: interpretarResposta recebe ultimaFoiLembrete', /comLembreteRecente && !equipeFalouRecentemente,\s*ultimaFoiLembrete,\s*\)/.test(webhook))
+}
 
 console.log(`VERIFICAÇÕES QUE PASSARAM: ${passou}`)
 console.log(`FALHAS: ${falhas.length}`)

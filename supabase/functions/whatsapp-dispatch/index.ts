@@ -1,5 +1,6 @@
 import { adminClient, corsHeaders, json } from '../_shared/whatsapp.ts'
 import { sendFollowup } from '../_shared/sendFollowup.ts'
+import { consultasQueNaoAconteceram } from '../_shared/consulta-aconteceu.ts'
 import { escolherParaEnviar } from '../_shared/disparo-do-acompanhamento.ts'
 
 /**
@@ -55,7 +56,7 @@ Deno.serve(async (req) => {
 
     const { data: vencidos, error } = await admin
       .from('followups')
-      .select('id,clinic_id,patient_id,followup_key,due_date,whatsapp_failed_at')
+      .select('id,clinic_id,patient_id,consultation_id,followup_key,due_date,whatsapp_failed_at')
       .lte('due_date', today)
       .gte('due_date', limite.toISOString().slice(0, 10))
       .eq('status', 'pending')
@@ -89,12 +90,77 @@ Deno.serve(async (req) => {
     if (erroDaOpcao) console.warn('whatsapp-dispatch: opcao do acompanhamento ainda nao existe no banco; todas ligadas')
     for (const linha of desligadas ?? []) clinicasDesligadas.add(String(linha.clinic_id))
 
-    const { enviar: due, desligados } = escolherParaEnviar(vencidos ?? [], { clinicasDesligadas, tresDiasAtras })
+    // Etapas ligadas em Preferencias (19/10/2026, vindo do sistema do Dr.
+    // Marcello). Coluna nova, lida a parte: sem ela, as tres etapas, como antes.
+    const etapasPorClinica = new Map<string, string[]>()
+    try {
+      const clinicas = [...new Set((vencidos ?? []).map((f) => String(f.clinic_id)))]
+      if (clinicas.length) {
+        const { data: ajustes, error: erroDasEtapas } = await admin
+          .from('clinic_settings')
+          .select('clinic_id,followup_etapas')
+          .in('clinic_id', clinicas)
+        if (erroDasEtapas) throw erroDasEtapas
+        for (const a of (ajustes ?? []) as { clinic_id: string; followup_etapas?: string[] | null }[]) {
+          if (a.followup_etapas?.length) etapasPorClinica.set(a.clinic_id, a.followup_etapas)
+        }
+      }
+    } catch (erro) {
+      console.warn('whatsapp-dispatch: sem clinic_settings.followup_etapas; todas as etapas valem', erro)
+    }
 
-    const resumo = { vencidos: due.length, enviados: 0, pulados: 0, falhas: 0, desligados }
+    const { enviar: due, desligados, etapaDesligada } = escolherParaEnviar(vencidos ?? [], {
+      clinicasDesligadas,
+      tresDiasAtras,
+      etapasPorClinica,
+    })
+
+    // Consulta que nao aconteceu nao ganha acompanhamento (23/10/2026, vindo do
+    // sistema do Dr. Marcello; ver _shared/consulta-aconteceu.ts). Se a
+    // conferencia falhar, nada sai hoje: melhor um dia de atraso que "como
+    // esta depois da consulta?" para quem nunca veio. Fica pendente e tenta
+    // amanha.
+    const semConsulta = new Set<string>()
+    try {
+      const idsDasConsultas = [...new Set(due.map((f) => f.consultation_id).filter(Boolean))] as string[]
+      type Consulta = { id: string; clinic_id: string; patient_id: string; consultation_date: string; chief_complaint: string | null; clinical_history: string | null; assessment: string | null; plan: string | null }
+      const consultas: Consulta[] = []
+      for (let i = 0; i < idsDasConsultas.length; i += 100) {
+        const { data, error: erroDaConsulta } = await admin
+          .from('consultations')
+          .select('id,clinic_id,patient_id,consultation_date,chief_complaint,clinical_history,assessment,plan')
+          .in('id', idsDasConsultas.slice(i, i + 100))
+        if (erroDaConsulta) throw erroDaConsulta
+        consultas.push(...((data ?? []) as Consulta[]))
+      }
+      const pacientes = [...new Set(consultas.map((c) => c.patient_id))]
+      const agenda: { patient_id: string; clinic_id: string; starts_at: string; status: string }[] = []
+      for (let i = 0; i < pacientes.length; i += 100) {
+        const { data, error: erroDaAgenda } = await admin
+          .from('appointments')
+          .select('patient_id,clinic_id,starts_at,status')
+          .in('patient_id', pacientes.slice(i, i + 100))
+        if (erroDaAgenda) throw erroDaAgenda
+        agenda.push(...((data ?? []) as typeof agenda))
+      }
+      for (const id of consultasQueNaoAconteceram(consultas, agenda)) semConsulta.add(id)
+      if (semConsulta.size) {
+        console.warn(`whatsapp-dispatch: ${semConsulta.size} consulta(s) sem prontuario nem presenca; acompanhamento segurado`)
+      }
+    } catch (erro) {
+      console.error('whatsapp-dispatch: nao consegui conferir se as consultas aconteceram; nenhum acompanhamento sai hoje', erro)
+      return json({ error: 'Não consegui conferir as consultas; nenhum acompanhamento enviado.' }, 500)
+    }
+
+    const resumo = { vencidos: due.length, enviados: 0, pulados: 0, falhas: 0, desligados, etapaDesligada }
     const detalhes: { followupId: string; resultado: string }[] = []
 
     for (const followup of due) {
+      if (followup.consultation_id && semConsulta.has(followup.consultation_id)) {
+        resumo.pulados += 1
+        detalhes.push({ followupId: followup.id, resultado: 'SEM_CONSULTA' })
+        continue
+      }
       const result = await sendFollowup(followup.id, {
         consentConfirmed: true,
         consentSource: 'clinic_care_relationship',

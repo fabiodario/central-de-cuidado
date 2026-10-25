@@ -144,7 +144,8 @@ export default function AlertaDeUrgencia() {
             <p className="mt-1.5 max-w-2xl text-[11px] leading-relaxed text-slate-400">
               Quando uma conversa entra em urgência ou sangramento, estes números recebem um alerta no WhatsApp, a qualquer
               hora, com os botões É urgente, Pode aguardar e Eu respondo. A resposta volta ao paciente. A notificação no
-              celular continua.
+              celular continua. Os mesmos números recebem a conversa quando alguém toca em Mandar para o celular, na
+              tela de Conversas.
             </p>
           </div>
         </div>

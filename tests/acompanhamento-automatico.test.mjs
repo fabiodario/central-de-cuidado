@@ -49,15 +49,35 @@ await caso('recusado pela Meta ha menos de 3 dias espera; mais antigo tenta de n
 
 await caso('o disparo le quem desligou em consulta separada, e sem conseguir ler nao envia nada', () => {
   const disparo = ler('supabase', 'functions', 'whatsapp-dispatch', 'index.ts')
-  assert.match(disparo, /\.select\('id,clinic_id,patient_id,followup_key,due_date,whatsapp_failed_at'\)/, 'a clinica de cada vencido')
+  assert.match(disparo, /\.select\('id,clinic_id,patient_id,consultation_id,followup_key,due_date,whatsapp_failed_at'\)/, 'a clinica e a consulta de cada vencido')
   assert.match(disparo, /\.eq\('acompanhamento_automatico', false\)/)
-  assert.match(disparo, /escolherParaEnviar\(vencidos \?\? \[\], \{ clinicasDesligadas, tresDiasAtras \}\)/)
+  assert.match(disparo, /escolherParaEnviar\(vencidos \?\? \[\], \{\s*clinicasDesligadas,\s*tresDiasAtras,\s*etapasPorClinica,\s*\}\)/)
   // Coluna nova so na consulta propria: na dos vencidos, derrubaria o disparo
   // inteiro enquanto a migration nao rodou.
   const consultaDosVencidos = disparo.slice(disparo.indexOf(".from('followups')"), disparo.indexOf('.limit(500)'))
   assert.doesNotMatch(consultaDosVencidos, /acompanhamento_automatico/)
   // Erro que nao e "coluna ainda nao existe" para o envio do dia.
   assert.match(disparo, /erroDaOpcao && erroDaOpcao\.code !== '42703'\) \{[\s\S]{0,200}return json\([\s\S]{0,160}, 500\)/)
+})
+
+// Vindo do sistema do Dr. Marcello (25/10/2026): etapas e consulta que aconteceu.
+await caso('etapa desligada em Preferencias nao sai; clinica sem escolha manda as tres', () => {
+  const comEtapa = (id, clinica, etapa) => ({ ...vencido(id, clinica), followup_key: etapa })
+  const vencidos = [comEtapa('15a', 'c', 'd15'), comEtapa('30a', 'c', 'd30'), comEtapa('15b', 'outra', 'd15')]
+  const r = escolherParaEnviar(vencidos, {
+    clinicasDesligadas: new Set(),
+    tresDiasAtras: TRES_DIAS_ATRAS,
+    etapasPorClinica: new Map([['c', ['d30', 'm90']]]),
+  })
+  assert.deepEqual(r.enviar.map((v) => v.id), ['30a', '15b'])
+  assert.equal(r.etapaDesligada, 1)
+})
+
+await caso('consulta sem prontuario nem presenca segura o envio, e sem conferir nao sai nada', () => {
+  const disparo = ler('supabase', 'functions', 'whatsapp-dispatch', 'index.ts')
+  assert.match(disparo, /consultasQueNaoAconteceram\(consultas, agenda\)/)
+  assert.match(disparo, /semConsulta\.has\(followup\.consultation_id\)\) \{[\s\S]{0,120}SEM_CONSULTA/)
+  assert.match(disparo, /nenhum acompanhamento sai hoje', erro\)\s*return json\([\s\S]{0,120}, 500\)/)
 })
 
 await caso('o banco: ligado por padrao, e a tela pode gravar (grant da coluna)', () => {

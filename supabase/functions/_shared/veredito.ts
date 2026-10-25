@@ -32,9 +32,13 @@ export function vereditoValido(valor: unknown): Veredito | null {
  * para marcar, e de saber que pode voltar a escrever.
  */
 export function textoDoVeredito(veredito: Veredito, clinicId: string | null | undefined): string {
-  const medico = quemAtende(clinicId).O
+  const { O: medico, prontoSocorro } = quemAtende(clinicId)
+  // "E urgente" leva a mesma frase do robo sobre qual pronto-socorro (25/10/2026,
+  // relatorio da Cintia: o mais proximo que atenda ao plano do paciente, sem
+  // hospital fixo).
   return veredito === 'urgente'
-    ? `🚨 ${medico} viu a sua mensagem e orienta: *procure o pronto-socorro agora*, sem esperar a consulta.`
+    ? `🚨 ${medico} viu a sua mensagem e orienta: *procure o pronto-socorro agora*, sem esperar a consulta.` +
+        (prontoSocorro ? `\n\n${prontoSocorro}` : '')
     : `💙 ${medico} viu a sua mensagem e, pelo que você contou, não parece urgência. A nossa equipe continua com você por aqui.\n\n` +
         'Se quiser, toque em *Marcar uma consulta* para ver os horários mais próximos. Se piorar, é só escrever aqui.'
 }

@@ -12,6 +12,16 @@ import type {
 import type { PatientDraft } from '@/lib/store'
 import type { Database } from '@/types/database'
 import { buscarTodas } from '@/lib/paginar'
+import { comNonoDigito } from '../../supabase/functions/_shared/telefone-br.ts'
+import {
+  consultasQueNaoAconteceram,
+  diaEmSaoPaulo,
+  temProntuario,
+  type ConsultaDaAgenda,
+  type ConsultaDoAcompanhamento,
+  type HorarioDaAgenda,
+} from '../../supabase/functions/_shared/consulta-aconteceu.ts'
+import { pacientesAtendidos } from '@/lib/paciente-atendido'
 
 type PatientInsert = Database['public']['Tables']['patients']['Insert']
 type PatientUpdate = Database['public']['Tables']['patients']['Update']
@@ -64,6 +74,8 @@ type FollowupRow = {
   followup_key: FollowupKey
   status: 'pending' | 'opened' | 'completed' | 'pendente' | 'enviado' | 'concluido'
   opened_at: string | null
+  consultation_id?: string | null
+  semConsulta?: boolean
 }
 
 type SettingsRow = {
@@ -142,6 +154,7 @@ function mapPatient(row: PatientRow, followupRows: FollowupRow[]): Patient {
       id: item.id,
       status: toUiStatus(item.status),
       enviadoEm: item.opened_at ?? undefined,
+      ...(item.semConsulta ? { semConsulta: true } : {}),
     }
   }
 
@@ -163,6 +176,7 @@ function mapPatient(row: PatientRow, followupRows: FollowupRow[]): Patient {
     observacoes: row.notes ?? '',
     criadoEm: row.created_at,
     criadoAutomaticamenteEm: (row as { auto_created_at?: string | null }).auto_created_at ?? '',
+    nomeDoContatoEm: (row as { name_from_contact_at?: string | null }).name_from_contact_at ?? '',
     followups,
   }
 }
@@ -255,7 +269,10 @@ function patientCreatePayload(
     guardian_name: draft.responsavel.trim(),
     birth_date: draft.nascimento || null,
     sex: draft.sexo,
-    phone: draft.telefone.replace(/\D/g, ''),
+    // Celular sem o 9 ganha o 9 ao gravar (16/10/2026, vindo do sistema do Dr.
+    // Marcello): o envio para o numero de 8 digitos voltava "Message
+    // undeliverable". Ver telefone-br.ts.
+    phone: comNonoDigito(draft.telefone),
     city: draft.cidade.trim(),
     neighborhood: draft.bairro.trim(),
     insurance: draft.convenio.trim(),
@@ -274,7 +291,7 @@ function patientUpdatePayload(patch: Partial<Patient>): PatientUpdate & ColunasN
   if (patch.responsavel !== undefined) payload.guardian_name = patch.responsavel.trim()
   if (patch.nascimento !== undefined) payload.birth_date = patch.nascimento || null
   if (patch.sexo !== undefined) payload.sex = patch.sexo
-  if (patch.telefone !== undefined) payload.phone = patch.telefone.replace(/\D/g, '')
+  if (patch.telefone !== undefined) payload.phone = comNonoDigito(patch.telefone)
   if (patch.cidade !== undefined) payload.city = patch.cidade.trim()
   if (patch.bairro !== undefined) payload.neighborhood = patch.bairro.trim()
   if (patch.convenio !== undefined) payload.insurance = patch.convenio.trim()
@@ -1486,7 +1503,7 @@ export async function updateAppointmentDetails(
     .from('appointments')
     .update({
       contact_name: dados.contactName.trim().slice(0, 160),
-      contact_phone: dados.contactPhone.replace(/\D/g, '').slice(0, 20),
+      contact_phone: comNonoDigito(dados.contactPhone).slice(0, 20),
       staff_note: dados.staffNote.trim(),
       patient_id: dados.patientId,
     })
@@ -1557,6 +1574,26 @@ export async function confirmAppointment(appointmentId: string) {
   if (error) fail(error)
 }
 
+/**
+ * A equipe registra que o paciente confirmou presenca (20/10/2026, vindo do
+ * sistema do Dr. Marcello).
+ *
+ * Ate aqui so o lembrete gravava confirmed_at. La, um paciente respondeu
+ * "Confirma" - palavra que o robo ainda nao reconhecia - e a consulta ficou
+ * "lembrete enviado, sem resposta" na vespera, sem botao nenhum para a equipe
+ * corrigir. Serve tambem para quem confirma por ligacao. Diferente de
+ * confirmAppointment, que e a clinica aceitando a marcacao e avisando: aqui
+ * ninguem e avisado, so fica registrado. So vale para consulta ainda marcada.
+ */
+export async function registrarPresencaConfirmada(appointmentId: string, confirmada: boolean) {
+  const { error } = await semTipo
+    .from('appointments')
+    .update(confirmada ? { confirmed_at: new Date().toISOString(), reschedule_requested_at: null } : { confirmed_at: null })
+    .eq('id', appointmentId)
+    .eq('status', 'scheduled')
+  if (error) fail(error)
+}
+
 export async function createAppointment(
   clinicId: string,
   unitId: string,
@@ -1583,7 +1620,7 @@ export async function createAppointment(
     source: 'clinic',
     staff_note: staffNote.trim(),
     contact_name: contato.nome.trim(),
-    contact_phone: contato.telefone.replace(/\D/g, ''),
+    contact_phone: comNonoDigito(contato.telefone),
   })
   // O indice unico do banco e a garantia real contra dois pacientes no mesmo
   // horario. Traduzimos o erro tecnico para algo que a recepcao entenda.
@@ -1846,6 +1883,8 @@ export interface Conversation {
     | 'numero_errado'
     // Alerta de sangramento do Dr. Fabio (15/10/2026).
     | 'sangramento'
+    // Talvez uma ligacao, sem a janela de 24h (16/10/2026, vindo do sistema do Dr. Marcello).
+    | 'nao_suportada'
     | null
   /** Etapa em que o robo parou nesta conversa. Nulo quando nao ha nada aberto. */
   bookingState: string | null
@@ -1874,6 +1913,16 @@ export interface Conversation {
    * mensagem humana (automatic = false), que o banco separa desde 30/08/2026.
    */
   respondidaPelaEquipe: boolean
+  /**
+   * Nome dado pela equipe (botao Renomear, 20/10/2026, vindo do sistema do Dr.
+   * Marcello). Quando existe, ja vem em patientName; este campo diz que o nome
+   * e da equipe, e nao do cadastro.
+   */
+  nomePersonalizado?: string | null
+  /** Nome do paciente do cadastro ligado a conversa, mesmo com nome da equipe. */
+  nomeDoCadastro?: string | null
+  /** A equipe desligou o robo so nesta conversa (23/10/2026). */
+  roboDesligado?: boolean
 }
 
 export interface ConversationMessage {
@@ -1890,6 +1939,8 @@ export interface ConversationMessage {
   anexoMime: string | null
   /** Caminho no acervo, para gerar um link novo na hora de abrir. */
   anexoPath: string | null
+  /** Mensagem que esta responde, citada como no WhatsApp (20/10/2026). */
+  respondeA?: string | null
 }
 
 /**
@@ -1943,11 +1994,44 @@ export async function listConversations(clinicId: string): Promise<Conversation[
         console.warn('Sem patients.followup_opt_out_at; a etiqueta "Sem acompanhamento" fica de fora', erro)
       }
     }
+    // Nome dado pela equipe (20/10/2026, vindo do sistema do Dr. Marcello):
+    // coluna nova, lida a parte - sem ela, vale o nome do cadastro, como antes.
+    const nomeDaEquipe = new Map<string, string>()
+    try {
+      const { data: renomeadas, error } = await semTipo
+        .from('whatsapp_conversations')
+        .select('id,nome_personalizado')
+        .eq('clinic_id', clinicId)
+        .not('nome_personalizado', 'is', null)
+      if (error) throw error
+      for (const c of (renomeadas ?? []) as { id: string; nome_personalizado: string }[]) {
+        if (c.nome_personalizado.trim()) nomeDaEquipe.set(c.id, c.nome_personalizado.trim())
+      }
+    } catch (erro) {
+      console.warn('Sem whatsapp_conversations.nome_personalizado; vale o nome do cadastro', erro)
+    }
+    // Robo desligado so nesta conversa (23/10/2026): coluna nova, lida a
+    // parte - sem ela, o botao mostra o robo ligado, como o webhook o trata.
+    const roboDesligado = new Set<string>()
+    try {
+      const { data: desligadas, error } = await semTipo
+        .from('whatsapp_conversations')
+        .select('id')
+        .eq('clinic_id', clinicId)
+        .not('robo_desligado_em', 'is', null)
+      if (error) throw error
+      for (const c of (desligadas ?? []) as { id: string }[]) roboDesligado.add(c.id)
+    } catch (erro) {
+      console.warn('Sem whatsapp_conversations.robo_desligado_em; o botao do robo por conversa fica como ligado', erro)
+    }
     return linhas.map((row) => ({
       id: row.id,
       patientId: row.patient_id,
       semAcompanhamento: Boolean(row.patient_id && semAcompanhamento.has(row.patient_id)),
-      patientName: (row.patient_id && nomePorId.get(row.patient_id)) || 'Contato sem cadastro',
+      patientName:
+        nomeDaEquipe.get(row.id) || (row.patient_id && nomePorId.get(row.patient_id)) || 'Contato sem cadastro',
+      nomePersonalizado: nomeDaEquipe.get(row.id) ?? null,
+      nomeDoCadastro: (row.patient_id && nomePorId.get(row.patient_id)) || null,
       profileName: row.profile_name ?? '',
       phone: formatarTelefone(row.display_phone || row.wa_id || ''),
       phoneDigits: (row.display_phone || row.wa_id || '').replace(/\D/g, ''),
@@ -1961,6 +2045,7 @@ export async function listConversations(clinicId: string): Promise<Conversation[
       // A busca no texto agora e feita no banco (buscarNasConversas).
       textoBusca: '',
       respondidaPelaEquipe: row.respondida,
+      roboDesligado: roboDesligado.has(row.id),
     })) as Conversation[]
   } catch (causa) {
     console.warn('Resumo das conversas indisponível; usando o caminho antigo (baixa todas as mensagens)', causa)
@@ -2141,6 +2226,20 @@ export async function listConversationMessages(conversationId: string): Promise<
   if (error) fail(error)
   const linhas = data ?? []
   const anexos = await anexosDasMensagens(conversationId)
+  // Citacao (20/10/2026, vindo do sistema do Dr. Marcello): coluna nova, lida a
+  // parte - sem ela, so a citacao some.
+  const citada = new Map<string, string>()
+  try {
+    const { data: comCitacao, error: erroDaCitacao } = await semTipo
+      .from('whatsapp_messages')
+      .select('id,responde_a')
+      .eq('conversation_id', conversationId)
+      .not('responde_a', 'is', null)
+    if (erroDaCitacao) throw erroDaCitacao
+    for (const m of (comCitacao ?? []) as { id: string; responde_a: string }[]) citada.set(m.id, m.responde_a)
+  } catch (erro) {
+    console.warn('Sem whatsapp_messages.responde_a; as citacoes ficam de fora', erro)
+  }
 
   return linhas.map((row) => ({
     id: row.id,
@@ -2153,6 +2252,7 @@ export async function listConversationMessages(conversationId: string): Promise<
     anexoUrl: anexos.get(row.id)?.url ?? null,
     anexoMime: anexos.get(row.id)?.mime ?? null,
     anexoPath: anexos.get(row.id)?.path ?? null,
+    respondeA: citada.get(row.id) ?? null,
   }))
 }
 
@@ -2477,16 +2577,40 @@ export async function getUltimoAlerta(clinicId: string): Promise<UltimoAlerta | 
 }
 
 /**
+ * Liga ou desliga o robo inteiro de uma vez (23/10/2026, vindo do sistema do
+ * Dr. Marcello, onde o Edu pediu um botao de emergencia depois que o robo
+ * ofereceu horario e preco para quem so tinha dito "eu nao passei em
+ * consulta"). A chave e a mesma do menu automatico, mas grava SO ela:
+ * saveAutoReply regravaria tambem os textos, e um rascunho meio editado no
+ * painel iria para o ar junto com o clique. Devolve o valor que ficou no banco,
+ * para a tela mostrar o que vale de fato.
+ */
+export async function ligarRobo(clinicId: string, ligado: boolean): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('clinic_settings')
+    .update({ whatsapp_autoreply_enabled: ligado })
+    .eq('clinic_id', clinicId)
+    .select('whatsapp_autoreply_enabled')
+    .single()
+  if (error) fail(error)
+  return Boolean(data?.whatsapp_autoreply_enabled)
+}
+
+/**
  * Ate quando a equipe pode responder em texto livre nesta conversa.
  * A Meta so permite isso por 24h depois da ultima mensagem do paciente; depois
  * disso, apenas modelo aprovado. Devolve null quando o paciente nunca escreveu.
  */
 export async function getReplyWindow(conversationId: string): Promise<string | null> {
+  // "[unsupported]" (talvez uma ligacao) nao abre a janela de 24h: responder
+  // texto livre ali volta "Message undeliverable" (16/10/2026, vindo do sistema
+  // do Dr. Marcello).
   const { data, error } = await supabase
     .from('whatsapp_messages')
     .select('created_at')
     .eq('conversation_id', conversationId)
     .eq('direction', 'inbound')
+    .neq('message_type', 'unsupported')
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle()
@@ -2608,11 +2732,12 @@ export async function sendConversationQuestionnaire(conversationId: string) {
  * legenda. Mesma funcao do texto, em formulario: o servidor revalida a janela
  * de 24h, guarda o arquivo no acervo e manda pela Meta (24/09/2026).
  */
-export async function sendConversationFile(conversationId: string, arquivo: File, legenda: string) {
+export async function sendConversationFile(conversationId: string, arquivo: File, legenda: string, respondeA: string | null = null) {
   const corpo = new FormData()
   corpo.append('conversationId', conversationId)
   corpo.append('text', legenda)
   corpo.append('arquivo', arquivo)
+  if (respondeA) corpo.append('respondeA', respondeA)
   await invokeWithFormData('whatsapp-reply', corpo)
 }
 
@@ -2622,9 +2747,11 @@ export async function sendConversationReply(
   text: string,
   /** Verdadeiro para aviso do sistema; falso para o que a equipe digitou. */
   automatico = false,
+  /** Mensagem citada, como o "responder" do WhatsApp (20/10/2026). */
+  respondeA: string | null = null,
 ) {
   const { data, error } = await supabase.functions.invoke('whatsapp-reply', {
-    body: { conversationId, text, automatico },
+    body: { conversationId, text, automatico, ...(respondeA ? { respondeA } : {}) },
   })
   if (error) {
     // O corpo da resposta traz a mensagem em portugues; o error do invoke traz
@@ -2634,6 +2761,61 @@ export async function sendConversationReply(
   if ((data as { error?: string } | null)?.error) {
     throw new Error((data as { error: string }).error)
   }
+}
+
+/**
+ * Da um nome a conversa, na tela (20/10/2026, vindo do sistema do Dr.
+ * Marcello). Vazio volta ao nome do cadastro ou do WhatsApp. O cadastro do
+ * paciente nao muda.
+ */
+export async function renomearConversa(conversationId: string, nome: string) {
+  const limpo = nome.trim().replace(/\s+/g, ' ').slice(0, 120)
+  const { error } = await semTipo
+    .from('whatsapp_conversations')
+    .update({ nome_personalizado: limpo || null })
+    .eq('id', conversationId)
+  if (error) {
+    throw new Error(
+      /nome_personalizado/.test(error.message ?? '')
+        ? 'O sistema ainda está sendo atualizado. Tente renomear de novo em alguns minutos.'
+        : 'Não foi possível renomear a conversa.',
+    )
+  }
+}
+
+/**
+ * Liga ou desliga o robo so nesta conversa (23/10/2026, vindo do sistema do
+ * Dr. Marcello). O botao geral calava o robo para todos os pacientes; o Edu
+ * queria por conversa. Grava so a coluna nova e confere o que ficou no banco:
+ * botao dizendo "desligado" com o robo ainda falando e o pior resultado
+ * possivel aqui.
+ */
+export async function desligarRoboNaConversa(conversationId: string, desligar: boolean): Promise<boolean> {
+  const { data, error } = await semTipo
+    .from('whatsapp_conversations')
+    .update({ robo_desligado_em: desligar ? new Date().toISOString() : null })
+    .eq('id', conversationId)
+    .select('robo_desligado_em')
+    .single()
+  if (error) {
+    throw new Error(
+      /robo_desligado_em/.test(error.message ?? '')
+        ? 'O sistema ainda está sendo atualizado. Tente de novo em alguns minutos.'
+        : 'Não foi possível mudar o robô desta conversa.',
+    )
+  }
+  return Boolean((data as { robo_desligado_em?: string | null } | null)?.robo_desligado_em)
+}
+
+/**
+ * "Este numero nao e do paciente": desliga a conversa do cadastro (20/10/2026).
+ * Ver desvincular_conversa_do_paciente.
+ */
+export async function desligarConversaDoPaciente(conversationId: string) {
+  const { error } = await semTipo.rpc('desvincular_conversa_do_paciente', {
+    p_conversation_id: conversationId,
+  })
+  if (error) fail(error)
 }
 
 /**
@@ -2705,6 +2887,95 @@ export async function unresolveConversation(conversationId: string) {
   if (error) fail(error)
 }
 
+/**
+ * Marca os acompanhamentos pendentes cuja consulta nao aconteceu (23/10/2026,
+ * vindo do sistema do Dr. Marcello): o envio automatico os segura, e a tela
+ * dizia "sai automatico hoje as 9h". Mesma regra do servidor
+ * (consultasQueNaoAconteceram). Se a leitura falhar, a tela fica como antes - e
+ * o console diz.
+ */
+async function marcarSemConsulta(clinicId: string, linhas: FollowupRow[]) {
+  try {
+    const pendentes = linhas.filter((l) => toUiStatus(l.status) === 'pendente' && l.consultation_id)
+    const ids = [...new Set(pendentes.map((l) => String(l.consultation_id)))]
+    if (!ids.length) return
+    const consultas: ConsultaDaAgenda[] = []
+    for (let i = 0; i < ids.length; i += 100) {
+      const { data, error } = await semTipo
+        .from('consultations')
+        .select('id,clinic_id,patient_id,consultation_date,chief_complaint,clinical_history,assessment,plan')
+        .eq('clinic_id', clinicId)
+        .in('id', ids.slice(i, i + 100))
+      if (error) throw error
+      consultas.push(...((data ?? []) as ConsultaDaAgenda[]))
+    }
+    const pacientes = [...new Set(consultas.map((c) => c.patient_id))]
+    const agenda: HorarioDaAgenda[] = []
+    for (let i = 0; i < pacientes.length; i += 100) {
+      const { data, error } = await semTipo
+        .from('appointments')
+        .select('patient_id,clinic_id,starts_at,status')
+        .eq('clinic_id', clinicId)
+        .in('patient_id', pacientes.slice(i, i + 100))
+      if (error) throw error
+      agenda.push(...((data ?? []) as HorarioDaAgenda[]))
+    }
+    const fora = consultasQueNaoAconteceram(consultas, agenda)
+    for (const l of pendentes) if (fora.has(String(l.consultation_id))) l.semConsulta = true
+  } catch (erro) {
+    console.warn('Nao consegui conferir as consultas dos acompanhamentos; a etiqueta "nao sai sozinho" fica de fora', erro)
+  }
+}
+
+/**
+ * Separa atendidos de pre-agendados (25/10/2026, vindo do sistema do Dr.
+ * Marcello; ver lib/paciente-atendido.ts).
+ *
+ * Leitura a parte e em try/catch: se falhar, ninguem e marcado e a tela fica
+ * como antes, todo mundo junto - perder a separacao e arranhao, perder a lista
+ * de pacientes nao. O prontuario so e lido de quem a agenda nao resolveu, e so
+ * volta para quem enxerga consultas (a recepcao recebe vazio, sem erro).
+ */
+async function marcarAtendidos(clinicId: string, pacientes: Patient[]) {
+  try {
+    const { data: agenda, error } = await buscarTodas((de, ate) =>
+      supabase
+        .from('appointments')
+        .select('patient_id,starts_at,status')
+        .eq('clinic_id', clinicId)
+        .not('patient_id', 'is', null)
+        .order('id')
+        .range(de, ate),
+    )
+    if (error) throw error
+    const horarios = ((agenda ?? []) as { patient_id: string; starts_at: string; status: string }[]).map((a) => ({
+      patientId: a.patient_id,
+      startsAt: a.starts_at,
+      status: a.status,
+    }))
+    const hoje = diaEmSaoPaulo(new Date().toISOString())
+    let atendidos = pacientesAtendidos(pacientes, horarios, new Set(), hoje)
+
+    const restantes = pacientes.filter((p) => !atendidos.has(p.id)).map((p) => p.id)
+    const comProntuario = new Set<string>()
+    for (let i = 0; i < restantes.length; i += 100) {
+      const { data: consultas, error: erroDasConsultas } = await semTipo
+        .from('consultations')
+        .select('patient_id,chief_complaint,clinical_history,assessment,plan')
+        .eq('clinic_id', clinicId)
+        .in('patient_id', restantes.slice(i, i + 100))
+      if (erroDasConsultas) throw erroDasConsultas
+      for (const c of (consultas ?? []) as (ConsultaDoAcompanhamento & { patient_id: string })[]) {
+        if (temProntuario(c)) comProntuario.add(c.patient_id)
+      }
+    }
+    if (comProntuario.size) atendidos = pacientesAtendidos(pacientes, horarios, comProntuario, hoje)
+    for (const p of pacientes) p.atendido = atendidos.has(p.id)
+  } catch (erro) {
+    console.warn('Nao consegui separar atendidos de pre-agendados; a lista fica toda junta', erro)
+  }
+}
+
 export async function fetchDb(
   clinicId: string,
   defaults: Record<FollowupKey, string>,
@@ -2727,7 +2998,7 @@ export async function fetchDb(
     buscarTodas((de, ate) =>
       supabase
         .from('followups')
-        .select('id,patient_id,followup_key,status,opened_at')
+        .select('id,patient_id,followup_key,status,opened_at,consultation_id')
         .eq('clinic_id', clinicId)
         .is('archived_at', null)
         .order('id')
@@ -2745,6 +3016,7 @@ export async function fetchDb(
   if (settingsResult.error) fail(settingsResult.error)
 
   const followupRows = (followupsResult.data ?? []) as FollowupRow[]
+  await marcarSemConsulta(clinicId, followupRows)
   const byPatient = new Map<string, FollowupRow[]>()
   for (const item of followupRows) {
     const list = byPatient.get(item.patient_id) ?? []
@@ -2753,10 +3025,29 @@ export async function fetchDb(
   }
 
   const settings = settingsResult.data as SettingsRow | null
+  // Etapas ligadas (19/10/2026, vindo do sistema do Dr. Marcello): coluna nova,
+  // lida a parte - sem ela, as tres.
+  let etapas: FollowupKey[] = [...FOLLOWUP_KEYS]
+  try {
+    const { data: ajustes, error: erroDasEtapas } = await semTipo
+      .from('clinic_settings')
+      .select('followup_etapas')
+      .eq('clinic_id', clinicId)
+      .maybeSingle()
+    if (erroDasEtapas) throw erroDasEtapas
+    const lidas = ((ajustes as { followup_etapas?: string[] | null } | null)?.followup_etapas ?? [])
+      .filter((k): k is FollowupKey => (FOLLOWUP_KEYS as string[]).includes(k))
+    if (lidas.length) etapas = lidas
+  } catch (erro) {
+    console.warn('Sem clinic_settings.followup_etapas; as tres etapas valem', erro)
+  }
+  const patients = ((patientsResult.data ?? []) as PatientRow[]).map((patient) =>
+    mapPatient(patient, byPatient.get(patient.id) ?? []),
+  )
+  await marcarAtendidos(clinicId, patients)
   return {
-    patients: ((patientsResult.data ?? []) as PatientRow[]).map((patient) =>
-      mapPatient(patient, byPatient.get(patient.id) ?? []),
-    ),
+    etapas,
+    patients,
     templates: {
       d15: (settings as { template_d15?: string } | null)?.template_d15 ?? defaults.d15,
       d30: settings?.template_d30 ?? defaults.d30,
@@ -3010,6 +3301,18 @@ export async function editConsultation(
 }
 
 export async function editPatient(clinicId: string, id: string, patch: Partial<Patient>) {
+  // Salvou o nome pela tela: o aviso de "nome do contato" sai (ver a migration
+  // 20261025100400). Em consulta separada, antes do UPDATE principal: coluna
+  // nova que o banco ainda nao tem recusaria o UPDATE inteiro, e o cadastro nao
+  // salvaria. Perder o aviso e arranhao; perder a edicao, nao.
+  if (patch.nome !== undefined) {
+    const { error: erroDoAviso } = await supabase
+      .from('patients')
+      .update({ name_from_contact_at: null } as PatientUpdate)
+      .eq('clinic_id', clinicId)
+      .eq('id', id)
+    if (erroDoAviso) console.warn('Nao consegui tirar o aviso de nome do contato', erroDoAviso)
+  }
   const { data, error } = await supabase
     .from('patients')
     .update(patientUpdatePayload(patch) as PatientUpdate)
@@ -3114,6 +3417,19 @@ export async function saveTemplates(
       // Coluna nova; os tipos gerados ainda nao a conhecem.
       ...({ template_d15: templates.d15 } as Record<string, unknown>),
     })
+    .eq('clinic_id', clinicId)
+  if (error) fail(error)
+}
+
+/**
+ * Liga e desliga etapas do acompanhamento (19/10/2026, vindo do sistema do Dr.
+ * Marcello). O banco faz o resto: a etapa desligada sai da fila, a ligada volta
+ * para as consultas futuras (ver a migration etapas_do_acompanhamento).
+ */
+export async function saveEtapas(clinicId: string, etapas: FollowupKey[]) {
+  const { error } = await semTipo
+    .from('clinic_settings')
+    .update({ followup_etapas: FOLLOWUP_KEYS.filter((k) => etapas.includes(k)) })
     .eq('clinic_id', clinicId)
   if (error) fail(error)
 }

@@ -36,6 +36,7 @@ import {
   getCurrentMembership,
   getSchedulePreferences,
   confirmAppointment,
+  registrarPresencaConfirmada,
   notifyAppointmentConfirmed,
   listAppointments,
   listAppointmentHistory,
@@ -60,6 +61,7 @@ import {
 } from '@/lib/repository'
 import { useDialogos } from '@/components/dialogos-contexto'
 import { avisoDoBloqueio, consultasDeUmDia } from '@/lib/bloqueio-de-dia'
+import { telefoneDoLembrete } from '@/lib/telefone-do-lembrete'
 import { lugaresDoRobo } from '@/lib/lugares'
 import CartaoDaUnidade from '@/sections/agenda/CartaoDaUnidade'
 import { valorDaConsulta } from '../../supabase/functions/_shared/campos-do-texto.ts'
@@ -131,13 +133,11 @@ function diaEHora(iso: string) {
  * marcou sem cadastro. Vazio nos dois casos significa uma coisa so: essa pessoa
  * nao vai receber lembrete nenhum, e a tela precisa dizer isso antes da
  * vespera, e nao depois da falta.
+ *
+ * Desde 25/10/2026 a regra mora em lib/telefone-do-lembrete.ts (vinda do
+ * sistema do Dr. Marcello, 21/10/2026): sem o paciente na lista carregada, vale
+ * o telefone de quem marcou, como no lembrete de verdade.
  */
-function telefoneDoLembrete(item: Appointment, patients: Patient[]) {
-  if (item.patientId) {
-    return patients.find((p) => p.id === item.patientId)?.telefone?.trim() ?? ''
-  }
-  return item.contactPhone.trim()
-}
 
 /** Consulta marcada para alguem de fora da base, sem telefone utilizavel. */
 function telefoneCurto(escolha: { patientId: string; telefone: string }) {
@@ -2425,6 +2425,36 @@ export default function Agenda({
                     Confirmar consulta
                   </button>
                 )}
+                {/* O paciente confirmou fora do lembrete (20/10/2026, vindo do
+                    sistema do Dr. Marcello): por ligacao, ou por uma palavra que
+                    o robo nao entendeu. So registra, nao manda mensagem. Ver
+                    registrarPresencaConfirmada. */}
+                {emEdicao.status === 'scheduled' &&
+                  (emEdicao.confirmedAt ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const id = emEdicao.id
+                        setEmEdicao(null)
+                        void acao(() => registrarPresencaConfirmada(id, false), 'Confirmação de presença desfeita.')
+                      }}
+                      className="rounded-xl px-3 py-2.5 text-[11px] font-extrabold text-slate-500 transition hover:bg-slate-100"
+                    >
+                      Desfazer presença confirmada
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const id = emEdicao.id
+                        setEmEdicao(null)
+                        void acao(() => registrarPresencaConfirmada(id, true), 'Presença confirmada registrada.')
+                      }}
+                      className="rounded-xl border border-[#557f75]/30 bg-[#eef3f2] px-4 py-2.5 text-[11px] font-extrabold text-[#456a61] transition hover:bg-[#e5efec]"
+                    >
+                      Paciente confirmou presença
+                    </button>
+                  ))}
                 <button
                   type="button"
                   onClick={() => {

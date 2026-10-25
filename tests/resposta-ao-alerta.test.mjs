@@ -224,9 +224,10 @@ await caso('"ok", audio, dois alertas, nenhum alerta, fora da lista, sem a tabel
   assert.match(c.para(MEDICO).at(-1), /só consigo repassar texto/)
   assert.equal(c.para(PACIENTE).length, 0)
 
+  // Com dois avisos, o "ok" pergunta de qual (o texto vai para a escolha num toque, abaixo).
   const dois = cenario({ alertas: [alerta(), alerta({ id: A2, quem: 'Outro Paciente', mensagens: ['wamid.ALERTA2'], criado_em: haMinutos(5) })] })
-  await R.tratarRespostaDaEquipe(dois.amb, MEDICO, texto('pode fazer compressa'))
-  assert.match(dois.para(MEDICO).at(-1), /Há 2 alertas recentes \(Outro Paciente, Paciente de Teste\)\. Para eu saber de qual paciente é, segure a mensagem do alerta certo/)
+  await R.tratarRespostaDaEquipe(dois.amb, MEDICO, texto('ok'))
+  assert.match(dois.para(MEDICO).at(-1), /Há 2 avisos recentes \(Outro Paciente, Paciente de Teste\)\. Para eu saber de qual paciente é, segure a mensagem do aviso certo/)
 
   const velho = cenario({ alertas: [alerta({ criado_em: haMinutos(10 * 60) })] })
   assert.equal(await R.tratarRespostaDaEquipe(velho.amb, MEDICO, texto('oi, tudo bem?')), false, 'sem alerta em 6 horas: segue o robo')
@@ -286,6 +287,131 @@ await caso('a tela de Respostas: o "nao e urgente" leva o botao, e o veredito fe
   assert.match(f, /await marcarVereditoDaTela\(admin, visivel\.id, veredito, new Date\(\)\)/)
   assert.ok(f.indexOf('await marcarVereditoDaTela(') > f.indexOf("evento: 'veredito_urgencia',"), 'depois de o veredito chegar ao paciente')
   assert.match(ler('src', 'sections', 'VereditoDaUrgencia.tsx'), /botoesDoVeredito\(veredito\) \? ', com o botão Marcar uma consulta' : ''/)
+})
+
+// ---- 25/10/2026: as pecas do primeiro dia de uso do Dr. Marcello ----
+
+const B = '33333333-3333-4333-8333-333333333333'
+function doisAvisos(extra = {}) {
+  return cenario({
+    alertas: [alerta(), alerta({ id: A2, conversation_id: 'conv-2', quem: 'Outro Paciente', mensagens: ['wamid.ALERTA2'], criado_em: haMinutos(5) })],
+    ...extra,
+  })
+}
+function comSegundaConversa(c) {
+  c.banco.linhas('whatsapp_conversations').push({ id: 'conv-2', clinic_id: FABIO, wa_id: '5513900000008', patient_id: 'p2', status: 'open', needs_attention: true, attention_reason: 'urgencia' })
+  c.banco.linhas('whatsapp_messages').push({ conversation_id: 'conv-2', direction: 'inbound', message_type: 'text', created_at: haMinutos(6) })
+  return c
+}
+
+await caso('dois avisos: o texto pergunta para qual paciente, e o toque no nome ja envia', async () => {
+  const c = comSegundaConversa(doisAvisos())
+  await R.tratarRespostaDaEquipe(c.amb, MEDICO, texto('Pode fazer compressa fria'))
+  const pergunta = c.enviados.at(-1)
+  assert.equal(pergunta.para, MEDICO)
+  assert.match(c.textoDe(pergunta), /^Para qual paciente vai esta mensagem\?\n\n"Pode fazer compressa fria"/)
+  const botoes = pergunta.conteudo.interactive.action.buttons.map((b) => b.reply)
+  assert.deepEqual(botoes.map((b) => b.title), ['Outro Paciente', 'Paciente de Teste', 'Cancelar'], 'o aviso mais novo primeiro')
+  assert.equal(c.para(PACIENTE).length, 0, 'nada sai antes do toque')
+  await R.tratarRespostaDaEquipe(c.amb, MEDICO, toqueInterativo(botoes[0].id))
+  assert.deepEqual(c.para('5513900000008'), ['💬 Mensagem do Dr. Fábio: Pode fazer compressa fria'])
+  assert.equal(c.para(PACIENTE).length, 0, 'o outro paciente nao recebe')
+  assert.equal(c.linha(A1).rascunho, null, 'o texto sai do outro aviso tambem')
+  assert.equal(c.linha(A2).rascunho, null)
+  // A proxima, sem citar, segue para o mesmo paciente (a conversa ativa).
+  await R.tratarRespostaDaEquipe(c.amb, MEDICO, texto('E me avise em 1 hora'))
+  assert.match(c.para(MEDICO).at(-1), /^Vou mandar para Outro Paciente, como mensagem do Dr\. Fábio:/)
+})
+
+await caso('dois avisos e um novo depois da resposta: pergunta de novo; com tres, a lista', async () => {
+  const c = comSegundaConversa(doisAvisos())
+  await R.tratarRespostaDaEquipe(c.amb, MEDICO, toque('URG:' + A2 + ':responde'))
+  assert.equal(c.linha(A2).respondido_por, MEDICO)
+  c.banco.linhas('alertas_de_urgencia').push(alerta({ id: B, conversation_id: 'conv-3', quem: 'Terceiro Paciente', mensagens: ['wamid.ALERTA3'], criado_em: new Date(AGORA.getTime() + 1000).toISOString() }))
+  const depois = new Date(AGORA.getTime() + 60000)
+  await R.tratarRespostaDaEquipe({ ...c.amb, agora: depois }, MEDICO, texto('Como esta agora?'))
+  const lista = c.enviados.at(-1).conteudo.interactive
+  assert.equal(lista.type, 'list', 'com tres avisos, a lista')
+  assert.deepEqual(lista.action.sections[0].rows.map((r) => r.title), ['Terceiro Paciente', 'Outro Paciente', 'Paciente de Teste', 'Cancelar'])
+  // O toque na lista volta em list_reply.
+  const linha = lista.action.sections[0].rows[3].id
+  assert.equal(R.lerRespostaDaEquipe({ type: 'interactive', interactive: { list_reply: { id: linha, title: 'Cancelar' } } })?.tipo, 'confirmacao')
+  await R.tratarRespostaDaEquipe({ ...c.amb, agora: depois }, MEDICO, { type: 'interactive', interactive: { list_reply: { id: linha, title: 'Cancelar' } } })
+  assert.equal(c.para(MEDICO).at(-1), 'Cancelado: nada foi enviado ao paciente.')
+  assert.ok(c.banco.linhas('alertas_de_urgencia').every((a) => a.rascunho === null), 'cancelar apaga o texto de todos os avisos')
+})
+
+await caso('so o nome do paciente escolhe a conversa, e nada vai para ele', async () => {
+  const c = comSegundaConversa(doisAvisos())
+  await R.tratarRespostaDaEquipe(c.amb, MEDICO, texto('do Outro Paciente'))
+  assert.equal(c.para(MEDICO).at(-1), 'Certo: as próximas mensagens vão para Outro Paciente. Escreva o que quer mandar.')
+  assert.equal(c.para('5513900000008').length, 0)
+  await R.tratarRespostaDaEquipe(c.amb, MEDICO, texto('Pode tomar o remédio'))
+  assert.match(c.para(MEDICO).at(-1), /^Vou mandar para Outro Paciente/)
+  // Frase com o nome nao e escolha.
+  assert.equal(R.pacientePeloNome('Outro, pode tomar agua', [alerta({ quem: 'Outro Paciente' })]), null)
+  assert.equal(R.pacientePeloNome('outro paciente', [alerta({ quem: 'Outro Paciente' }), alerta({ id: A2, quem: 'Outro Paciente' })]), null, 'dois com o mesmo nome: nao escolhe')
+})
+
+await caso('"Mandar para o celular": o "Eu respondo" volta ao paciente, com nota e evento do pedido', async () => {
+  const c = cenario({ alertas: [alerta({ motivo: 'pedido' })] })
+  await R.tratarRespostaDaEquipe(c.amb, DAYANE, toque('URG:' + A1 + ':responde'))
+  assert.deepEqual(c.para(PACIENTE), ['💙 A nossa equipe viu a sua mensagem e vai falar com você por aqui.'])
+  assert.deepEqual(notas(c.banco), ['🩺 A equipe respondeu pelo celular: vai responder (pelo WhatsApp).'])
+  assert.deepEqual(eventos(c.banco), ['resposta_ao_pedido responde pelo=whatsapp equipe'], 'fora da conta das urgencias')
+  // A tela de Respostas nao fecha pedido.
+  await R.marcarVereditoDaTela(c.amb.admin, 'conv-1', 'urgente', AGORA)
+  assert.notEqual(c.linha().veredito_por, 'tela')
+})
+
+await caso('o paciente responde depois: vai aos dois celulares, e a resposta em cima volta para ele', async () => {
+  const c = cenario({ alertas: [alerta({ motivo: 'pedido' })] })
+  assert.equal(await R.repassarRespostaDoPaciente(c.amb, { conversationId: 'conv-1', quem: 'Paciente de Teste', texto: 'Obrigada' }), false, 'ninguem respondeu pelo celular ainda: nao repassa')
+  await R.tratarRespostaDaEquipe(c.amb, MEDICO, toque('URG:' + A1 + ':responde'))
+  const antes = c.enviados.length
+  assert.equal(await R.repassarRespostaDoPaciente(c.amb, { conversationId: 'conv-1', quem: 'Paciente de Teste', texto: 'Ainda esta sangrando um pouco' }), true)
+  const repasses = c.enviados.slice(antes)
+  assert.deepEqual(repasses.map((e) => e.para), [MEDICO, DAYANE], 'aos dois celulares')
+  assert.equal(c.textoDe(repasses[0]), '💬 Paciente de Teste respondeu:\n\n"Ainda esta sangrando um pouco"\n\nPara responder, escreva aqui: vai para Paciente de Teste.')
+  assert.equal(repasses[0].conteudo.interactive.action.buttons[0].reply.id, 'URG:' + A1 + ':responde')
+  const ids = c.linha().mensagens
+  assert.ok(ids.includes('wamid.' + (antes + 1)), 'a mensagem repassada entra nos ids do aviso')
+  // A resposta em cima do repasse volta para o mesmo paciente.
+  await R.tratarRespostaDaEquipe(c.amb, MEDICO, texto('Faça compressão por 10 minutos', 'wamid.' + (antes + 1)))
+  assert.match(c.para(MEDICO).at(-1), /^Vou mandar para Paciente de Teste/)
+  // Foto vira aviso legivel.
+  await R.repassarRespostaDoPaciente(c.amb, { conversationId: 'conv-1', quem: 'Paciente de Teste', texto: '[image]' })
+  assert.match(c.para(MEDICO).at(-1), /📷 Mandou uma foto \(veja na Central\)/)
+})
+
+await caso('repasse: texto livre recusado vira o modelo; sem a tabela ou alerta de teste, nao repassa', async () => {
+  const c = cenario({ alertas: [alerta({ respondido_em: haMinutos(10), respondido_por: MEDICO })] })
+  c.amb.enviarWhatsApp = async (para, conteudo) => {
+    c.enviados.push({ para, conteudo })
+    return conteudo.type === 'template' ? { ok: true, id: 'wamid.m' + c.enviados.length } : { ok: false, erro: '(#131047) Re-engagement message' }
+  }
+  assert.equal(await R.repassarRespostaDoPaciente(c.amb, { conversationId: 'conv-1', quem: '', texto: 'oi' }), true)
+  const modelos = c.enviados.filter((e) => e.conteudo.type === 'template')
+  assert.equal(modelos.length, 2)
+  assert.equal(modelos[0].conteudo.template.name, 'pedido_equipe')
+  assert.deepEqual(modelos[0].conteudo.template.components[0].parameters.map((p) => p.text).slice(2), ['respondeu à sua mensagem', 'oi'])
+  assert.equal(modelos[0].conteudo.template.components[1].parameters[0].payload, 'URG:' + A1 + ':responde')
+  assert.equal(await R.repassarRespostaDoPaciente(cenario({ semTabela: ['alertas_de_urgencia'] }).amb, { conversationId: 'conv-1', quem: 'x', texto: 'oi' }), false)
+  const teste = cenario({ alertas: [alerta({ teste: true, respondido_em: haMinutos(10), respondido_por: MEDICO })] })
+  assert.equal(await R.repassarRespostaDoPaciente(teste.amb, { conversationId: 'conv-1', quem: 'x', texto: 'oi' }), false)
+  const velho = cenario({ alertas: [alerta({ respondido_em: haMinutos(7 * 60), respondido_por: MEDICO })] })
+  assert.equal(await R.repassarRespostaDoPaciente(velho.amb, { conversationId: 'conv-1', quem: 'x', texto: 'oi' }), false, 'depois de 6 horas, nao')
+})
+
+await caso('o webhook: o repasse depois de gravar a mensagem do paciente, e a migration das colunas', () => {
+  const f = ler('supabase', 'functions', 'meta-webhook', 'index.ts')
+  const repasse = f.indexOf('await repassarRespostaDoPaciente(')
+  assert.ok(repasse > f.indexOf('if (messageError) throw messageError'), 'a mensagem ja esta gravada')
+  assert.ok(repasse > f.indexOf('const tratada = await tratarRespostaDaEquipe('), 'mensagem do medico nao e repassada')
+  assert.match(f.slice(repasse, repasse + 700), /conversationId: conversation\.id/)
+  const m = ler('supabase', 'migrations', '20261025100600_pedido_no_celular.sql')
+  assert.match(m, /add column if not exists respondido_por text/)
+  assert.match(m, /alertas_de_urgencia_respondido_idx/)
 })
 
 // ---- No simulador: o alerta que o medico receberia, e os botoes ----

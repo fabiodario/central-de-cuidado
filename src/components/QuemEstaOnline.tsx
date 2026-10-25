@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { Camera, RefreshCw } from 'lucide-react'
+import { Camera, Monitor, RefreshCw, Smartphone } from 'lucide-react'
 import { corDoNome, iniciais, linkDaFoto, type PessoaOnline } from '@/lib/equipe-online'
+import { descreverAparelhos } from '@/lib/aparelho'
 import AjustarFoto from '@/components/AjustarFoto'
 
 /**
@@ -96,15 +97,29 @@ export default function QuemEstaOnline({
 
   return (
     <div className="relative flex items-center">
-      {/* Colegas: lado a lado, com o ponto verde de "online". Sobrepostos
-          (ate 15/10/2026), um cobria o ponto verde do outro e a fileira
-          parecia intercalada. */}
+      {/* Colegas: lado a lado. Sobrepostos (ate 15/10/2026), um cobria o
+          selo do outro e a fileira parecia intercalada. O ponto verde saiu em
+          21/10/2026 (a foto ali ja diz que a pessoa esta online); no lugar, um
+          icone pequeno do aparelho: computador, celular ou os dois. */}
       {visiveis.length > 0 && (
         <div className="mr-2 flex items-center gap-1.5" aria-label={`${outros.length} colega(s) online`}>
           {visiveis.map((p) => (
-            <span key={p.userId} className="relative" title={`${p.nome} · online`}>
+            <span key={p.userId} className="relative" title={`${p.nome} · ${descreverAparelhos(p.aparelhos)}`}>
               <Avatar nome={p.nome} caminho={p.foto} tamanho={tamanho} anel={anel} />
-              <span className={`absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ${anel}`} />
+              {p.aparelhos.length > 0 && (
+                <span className="absolute -bottom-1 -right-1 flex gap-0.5">
+                  {p.aparelhos.map((a) => (
+                    <span
+                      key={a}
+                      className={`flex h-4 w-4 items-center justify-center rounded-full ring-2 ${anel} ${
+                        escuro ? 'bg-white text-[#081b2c]' : 'bg-[#081b2c] text-white'
+                      }`}
+                    >
+                      {a === 'celular' ? <Smartphone className="h-2.5 w-2.5" /> : <Monitor className="h-2.5 w-2.5" />}
+                    </span>
+                  ))}
+                </span>
+              )}
             </span>
           ))}
           {resto > 0 && (

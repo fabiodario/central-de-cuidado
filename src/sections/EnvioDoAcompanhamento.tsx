@@ -3,7 +3,9 @@ import { useDialogos } from '@/components/dialogos-contexto'
 import { getAcompanhamentoAutomatico, getCurrentMembership, saveAcompanhamentoAutomatico } from '@/lib/repository'
 
 const OPCOES = [
-  { ligado: true, rotulo: 'Ligado', explica: 'Sai sozinho às 9h, 15, 30 e 90 dias depois da consulta.' },
+  // Sem os dias no texto (25/10/2026): desde as etapas em Preferencias, a
+  // clinica pode ter desligado alguma, e o "15, 30 e 90" ficava errado.
+  { ligado: true, rotulo: 'Ligado', explica: 'Sai sozinho às 9h, nas etapas escolhidas abaixo.' },
   {
     ligado: false,
     rotulo: 'Desligado',

@@ -9,10 +9,12 @@
 //    menor de idade, ano com dois digitos;
 //  - as frases faladas com o proprio paciente.
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   falouDeSangramento, faltamNaFicha, sinalDeAlarme, falouDePosOperatorio,
   recusaDeEscolha, sangramentoAtivo, nomeDito, despedida, pediuAgendamento, horaEscrita,
-  chamandoAlguem, pediuAtendente, perguntouSeTemAlguem, naoFoiRespondida,
+  chamandoAlguem, pediuAtendente, perguntouSeTemAlguem, naoFoiRespondida, etiquetaQueFica,
+  avisoDoLembrete, negouConsulta, pareceBotao,
 } from './atendimento.build.mjs'
 import { Simulacao } from './simulador.build/sessao.mjs'
 import { IDENTIDADES, FAMILIAS } from './simulador.build/dados.mjs'
@@ -1469,6 +1471,76 @@ await caso('rodada 3: "sesta feira", "medico do ouvido" nao e queixa, e "da nota
   s = nova('nova')
   r = await conversar(s, ['da nota fiscal? quero pedir reembolso no bradesco'])
   assert.doesNotMatch(r.texto, /Anotei o pedido de \*nota fiscal/)
+})
+
+// ---------------------------------------------------------------
+// A etiqueta que fica (25/10/2026, vindo do sistema do Dr. Marcello)
+// ---------------------------------------------------------------
+
+await caso('etiqueta: sangramento e urgencia nao descem por outra; pendencia nao vira so informativa', () => {
+  const acesa = (motivo) => ({ needs_attention: true, attention_reason: motivo })
+  assert.equal(etiquetaQueFica(acesa('sangramento'), 'atendente'), 'sangramento')
+  assert.equal(etiquetaQueFica(acesa('sangramento'), 'cancelou_sozinho'), 'sangramento')
+  assert.equal(etiquetaQueFica(acesa('urgencia'), 'documento'), 'urgencia')
+  assert.equal(etiquetaQueFica(acesa('sangramento'), 'urgencia'), 'urgencia', 'de uma urgencia para outra, vale a nova')
+  assert.equal(etiquetaQueFica(acesa('atendente'), 'cancelou_sozinho'), 'atendente', 'o pedido nao some da fila')
+  assert.equal(etiquetaQueFica(acesa('cancelou_sozinho'), 'atendente'), 'atendente')
+  assert.equal(etiquetaQueFica({ needs_attention: false, attention_reason: 'sangramento' }, 'atendente'), 'atendente', 'apagada pela equipe: vale a nova')
+  assert.equal(etiquetaQueFica(null, 'anexo'), 'anexo')
+})
+
+await caso('etiqueta: no simulador, o sangramento continua no topo quando o robo levanta outra', async () => {
+  const s = nova('nova')
+  await conversar(s, ['Meu nariz está sangrando muito e não para'])
+  assert.equal(s.conversa.attention_reason, 'sangramento')
+  const r = await conversar(s, ['número errado, não sou essa pessoa'])
+  assert.ok(r.registros.some((x) => /Número errado/.test(x.titulo)), 'o robo levantou "numero errado" nesta mensagem')
+  assert.equal(s.conversa.attention_reason, 'sangramento', 'o numero errado nao tira a conversa do sangramento')
+  const webhook = readFileSync(new URL('../supabase/functions/meta-webhook/index.ts', import.meta.url), 'utf8')
+  assert.match(webhook, /const etiqueta = etiquetaQueFica\(conversaAnterior, resultado\.atencao\)/)
+  assert.match(webhook, /\.update\(\{ needs_attention: true, attention_reason: etiqueta \}\)/)
+})
+
+// ---------------------------------------------------------------
+// Correcoes do motor vindas do sistema do Dr. Marcello (25/10/2026)
+// ---------------------------------------------------------------
+
+await caso('lembrete da vespera: so promete quando ele vem', () => {
+  const tz = 'America/Sao_Paulo'
+  // Quarta 14/10 as 10h; o lembrete roda aos :20, das 9h20 as 19h20.
+  const dezDaManha = new Date(QUARTA_10H)
+  assert.equal(avisoDoLembrete('2026-10-14T18:00:00Z', tz, dezDaManha), '', 'consulta hoje: nao ha vespera')
+  assert.match(avisoDoLembrete('2026-10-15T18:00:00Z', tz, dezDaManha), /^\*Um dia antes da consulta enviamos/, 'amanha, marcada de manha: vem')
+  assert.match(avisoDoLembrete('2026-10-20T18:00:00Z', tz, dezDaManha), /Um dia antes/)
+  const depoisDaUltimaRodada = new Date('2026-10-14T22:30:00Z') // 19h30 em Brasilia
+  assert.equal(avisoDoLembrete('2026-10-15T18:00:00Z', tz, depoisDaUltimaRodada), '', 'amanha, marcada depois das 19h20: nao vem')
+  assert.match(avisoDoLembrete('2026-10-15T18:00:00Z', tz, new Date('2026-10-14T22:10:00Z')), /Um dia antes/, 'as 19h10 ainda da tempo')
+})
+
+await caso('"eu nao passei em consulta": desculpas e a equipe, nunca a agenda', async () => {
+  for (const frase of [
+    'Eu não passei em consulta',
+    'nunca fui no Dr. Fábio',
+    'não tive consulta nenhuma com o doutor',
+    'Não houve essa consulta',
+    'faltei, não deu pra ir',
+  ]) {
+    assert.equal(negouConsulta(frase), true, frase)
+  }
+  for (const frase of ['não consegui marcar consulta', 'quero marcar uma consulta', 'não sei se tenho consulta', 'a consulta foi ótima']) {
+    assert.equal(negouConsulta(frase), false, frase)
+  }
+  const s = nova('nova')
+  await conversar(s, ['Oi'])
+  const r = await conversar(s, ['Eu não passei em consulta'])
+  assert.match(r.texto, /^Desculpe pela mensagem! 🙏 Passei para a nossa equipe conferir o cadastro/)
+  assert.doesNotMatch(r.texto, /Em qual unidade|horários/i)
+  assert.equal(s.conversa.attention_reason, 'atendente')
+})
+
+await caso('botao velho no meio da ficha nao vira nome do paciente', () => {
+  for (const t of ['Escolher outra data', 'Falar com a equipe', 'Confirmar', 'Voltar ao menu']) assert.equal(pareceBotao(t), true, t)
+  for (const t of ['Ana Paula Ribeiro', 'Antônio Carlos', 'Fábio Dario']) assert.equal(pareceBotao(t), false, t)
 })
 
 console.log(`fabio.test: ${ok} casos ok`)

@@ -98,6 +98,29 @@ export type MotivoAtencao =
   | 'sangramento'
 
 /**
+ * A etiqueta que fica na conversa quando o robo levanta outra (17 e 18/10/2026
+ * no sistema do Dr. Marcello, trazido em 25/10/2026).
+ *
+ * Urgencia e sangramento nao descem por outra etiqueta: la, um pedido no meio
+ * da conversa trocou a urgencia por "atendente" com a crianca ainda vomitando,
+ * e a conversa desceu na lista da recepcao. Pendencia com a equipe tambem nao
+ * desce para uma etiqueta so informativa (o pedido estava com a equipe, a
+ * pessoa confirmou um cancelamento e a etiqueta virou "cancelou sozinho"; o
+ * pedido sumiu da fila). Quem baixa e a equipe. Usada pelo webhook e pelo
+ * simulador.
+ */
+export function etiquetaQueFica(
+  antes: { needs_attention?: boolean | null; attention_reason?: string | null } | null | undefined,
+  nova: string,
+): string {
+  if (!antes?.needs_attention || !antes.attention_reason) return nova
+  const urgentes = ['urgencia', 'sangramento']
+  if (urgentes.includes(antes.attention_reason) && !urgentes.includes(nova)) return antes.attention_reason
+  const informativas = ['cancelou_sozinho', 'anexo']
+  return informativas.includes(nova) && !informativas.includes(antes.attention_reason) ? antes.attention_reason : nova
+}
+
+/**
  * A telemedicina como "unidade" do fluxo.
  *
  * Ela nao tem agenda propria: usa os horarios das unidades fisicas, porque e o
@@ -595,6 +618,30 @@ export function soCumprimento(texto: string): boolean {
     'e', 'ai', 'vc', 'voce', 'voces', 'td', 'pessoal', 'doutor', 'dr', 'ate', 'amanha', 'mais', 'logo',
   ])
   return t.split(/\s+/).every((palavra) => cumprimento.has(palavra))
+}
+
+/**
+ * A pessoa diz que a consulta nao aconteceu (23/10/2026 no sistema do Dr.
+ * Marcello, trazido em 25/10/2026). La, o acompanhamento de 30 dias perguntou
+ * como a crianca estava "depois da consulta do dia 23/09", e a mae respondeu
+ * "Eu nao passei em consulta". A palavra "consulta" fez a frase parecer pedido
+ * de marcar, e ela recebeu horarios e preco em vez de um pedido de desculpas.
+ * Quem diz isso precisa da equipe: o cadastro esta errado. Pedido de marcar
+ * ("nao consegui marcar consulta") nao entra. Os nomes do medico vem do perfil
+ * da clinica (la, "marcello"; aqui, "fabio", "dario", "pavani").
+ */
+export function negouConsulta(texto: string): boolean {
+  const t = normalizar(texto).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim()
+  if (/\b(marcar|agendar|remarcar)\b/.test(t) && !/\b(nao|nunca) (passei|passamos|fui|fomos|tive|tivemos|compareci|comparecemos)\b/.test(t)) return false
+  const medico = ['consulta', 'medico', 'doutor', 'dr', 'ai', 'la', 'clinica', 'consultorio', ...perfil().nomesDoMedico].join('|')
+  return (
+    new RegExp(
+      `\\b(nao|nunca|nem) (cheguei a |chegamos a |chegou a )?(passei|passamos|passou|fui|fomos|foi|tive|tivemos|teve|fiz|fizemos|levei|levamos|compareci|comparecemos|consultei|consultamos|consultou)\\b.{0,30}\\b(${medico})\\b`,
+    ).test(t) ||
+    /\b(nao|nunca) (consultei|consultamos|consultou|compareci|comparecemos)\b/.test(t) ||
+    /\b(nao|nunca) (houve|teve|existiu) (essa |esta |nenhuma )?consulta\b/.test(t) ||
+    /\b(faltei|faltamos|nao deu para ir|nao deu pra ir|nao conseguimos ir|nao consegui ir)\b/.test(t)
+  )
 }
 
 /**
@@ -1376,6 +1423,30 @@ function formatarData(iso: string, timezone: string) {
 /** Chave estavel do dia no fuso da clinica, no formato AAAA-MM-DD. */
 function chaveDoDia(iso: string, timezone: string) {
   return new Date(iso).toLocaleDateString('en-CA', { timeZone: timezone })
+}
+
+/**
+ * A promessa do lembrete da vespera, so quando ele vai chegar (17/10/2026 no
+ * sistema do Dr. Marcello, trazido em 25/10/2026).
+ *
+ * La, consulta marcada para hoje as 15:00 saia com "Um dia antes da consulta
+ * enviamos uma mensagem para voce confirmar" - em nove conversas do painel. O
+ * lembrete daqui roda aos :20, das 9h20 as 19h20 (appointment-reminders), e
+ * avisa a consulta de amanha: marcada para hoje, ou para amanha depois da
+ * ultima rodada, nao ha vespera. Ai a frase sai, em vez de prometer o que nao
+ * vem.
+ */
+const ULTIMA_RODADA_DO_LEMBRETE_MIN = 19 * 60 + 20
+export function avisoDoLembrete(inicio: string, timezone: string, agora: Date): string {
+  const hoje = chaveDoDia(agora.toISOString(), timezone)
+  const amanha = chaveDoDia(new Date(agora.getTime() + 24 * 3600_000).toISOString(), timezone)
+  const dia = chaveDoDia(inicio, timezone)
+  const [hora, minuto] = agora
+    .toLocaleTimeString('en-GB', { timeZone: timezone, hour: '2-digit', minute: '2-digit', hour12: false })
+    .split(':')
+    .map(Number)
+  if (dia === hoje || (dia === amanha && hora * 60 + minuto >= ULTIMA_RODADA_DO_LEMBRETE_MIN)) return ''
+  return '*Um dia antes da consulta enviamos uma mensagem aqui pelo WhatsApp para você confirmar sua presença.*'
 }
 
 /**
@@ -2677,6 +2748,22 @@ async function chamarEquipe(admin: Admin, conversationId: string): Promise<Resul
       'vai ler tudo antes de responder.\n\n' +
       avisoDeHorario(relogioEmFoco ?? new Date()) + '\n\n' + VOLTA,
     atencao: 'atendente',
+  }
+}
+
+/**
+ * Quem diz que a consulta nao aconteceu (ver negouConsulta): desculpas e a
+ * equipe, nunca a agenda. Sem o texto longo da fila: a pessoa nao pediu nada,
+ * e quem precisa agir e a equipe, no cadastro.
+ */
+async function consultaQueNaoHouve(admin: Admin, conversationId: string): Promise<Resultado> {
+  registrar('negou_consulta')
+  const chamada = await chamarEquipe(admin, conversationId)
+  return {
+    ...chamada,
+    resposta:
+      'Desculpe pela mensagem! 🙏 Passei para a nossa equipe conferir o cadastro, ' +
+      'e ela corrige por aqui. Se quiser marcar uma consulta, é só me dizer.',
   }
 }
 
@@ -5255,10 +5342,11 @@ async function marcar(
   // Convenio ou particular no comprovante (16/10/2026, painel): quem marcou no
   // Tatuape pensando na Unimed so soube que era particular porque perguntou.
   const pagamento = geral() && !tele ? `💳 ${convenio || 'Particular'}\n` : ''
+  // A promessa do lembrete so quando ele vem (ver avisoDoLembrete).
+  const lembrete = avisoDoLembrete(slot.inicio, timezone, relogioEmFoco ?? new Date())
   const comprovante =
-    `✅ ${aviso}\n\n${deQuem}🗓️ ${quando}\n${tele ? "💻" : "📍"} ${onde}\n${pagamento}\n` +
-    '*Um dia antes da consulta enviamos uma mensagem aqui pelo WhatsApp para ' +
-    'você confirmar sua presença.*'
+    `✅ ${aviso}\n\n${deQuem}🗓️ ${quando}\n${tele ? "💻" : "📍"} ${onde}\n${pagamento}`.replace(/\n$/, '') +
+    (lembrete ? `\n\n${lembrete}` : '')
 
   if (faltam.length > 0 && criada?.id) {
     const abertura = await perguntarDados(admin, conversationId, criada.id, faltam)
@@ -5499,6 +5587,11 @@ function soDigitos(texto: string) {
  * escreveu com maiusculas do jeito dele fica como escreveu.
  */
 function nomeDaFicha(texto: string): string | null {
+  // Toque num botao velho no meio da ficha nao e nome (ver pareceBotao). So
+  // texto curto, que e como chega o titulo de um botao: "Daniela Mendes
+  // Carvalho. E o valor? Voce nao me respondeu" tem "nao" e nao e toque. O
+  // "nao sei" segue como a regra de baixo o trata.
+  if (pareceBotao(texto.replace(/^\s*(nao|não)\s+sei\b.*$/i, '')) && texto.trim().split(/\s+/).length <= 4) return null
   let t = texto.trim()
   // Hora ou data respondida fora de ordem (rodada 3 do painel): "17:20 entao"
   // foi gravado como o nome "17:20 Entao", e "as 8 da manha", como "As".
@@ -5705,10 +5798,10 @@ async function terminarDados(
             console.warn('Nao consegui ler o convenio para o comprovante', erro)
           }
         }
+        const lembrete = avisoDoLembrete(consulta.starts_at, timezone, relogioEmFoco ?? new Date())
         comprovante =
           `✅ *Consulta marcada!*\n\n${nomeDaCrianca ? `${iconeDoPaciente()} ${nomeDaCrianca}\n` : ''}🗓️ ${formatarData(consulta.starts_at, timezone)}\n${tele ? '💻' : '📍'} ${onde}\n${pagamento}\n` +
-          '*Um dia antes da consulta enviamos uma mensagem aqui pelo WhatsApp para ' +
-          'você confirmar sua presença.*\n\n'
+          (lembrete ? `${lembrete}\n\n` : '')
       }
     } catch (causa) {
       console.error('Nao consegui remontar o comprovante', causa)
@@ -5792,10 +5885,33 @@ async function fichaPendente(
  * pergunta. "Joao Pedro Silva" passa; "qual o endereco?", "ok obrigado" e
  * "12/03/2019" nao.
  */
+/**
+ * Texto de botao ou de comando, que ninguem tem no nome (15/10/2026 no sistema
+ * do Dr. Marcello, trazido em 25/10/2026).
+ *
+ * La, a familia tocou "Escolher outra data" na mensagem de confirmacao com o
+ * cadastro pela metade. Tres palavras, so letras: passou por nome. O robo
+ * gravou "Escolher outra data" como o nome do paciente, marcou a consulta com
+ * ele e mandou "Ola, Escolher! Precisamos cancelar sua consulta". A
+ * secretaria desfez na mao.
+ */
+const PALAVRAS_DE_BOTAO = new Set([
+  'escolher', 'outra', 'data', 'datas', 'horario', 'horarios', 'marcar', 'remarcar', 'desmarcar', 'cancelar',
+  'confirmar', 'confirmo', 'voltar', 'inicio', 'menu', 'opcoes', 'equipe', 'falar', 'consulta', 'agendar',
+  'duvidas', 'cadastro', 'completar', 'unidade', 'atendimento', 'quero', 'nao',
+])
+export function pareceBotao(texto: string): boolean {
+  return normalizar(texto)
+    .replace(/[^a-z\s]/g, ' ')
+    .split(/\s+/)
+    .some((p) => PALAVRAS_DE_BOTAO.has(p))
+}
+
 function pareceNome(texto: string) {
   const t = texto.trim()
   if (t.length < 5 || t.length > 80 || /[?0-9@]/.test(t)) return false
   if (!/^[\p{L}' .-]+$/u.test(t)) return false
+  if (pareceBotao(t)) return false
   const palavras = t.split(/\s+/).filter((p) => p.length >= 2)
   if (palavras.length < 2) return false
   const comuns = new Set(['ok', 'obrigado', 'obrigada', 'bom', 'boa', 'dia', 'tarde', 'noite', 'oi', 'ola', 'tudo', 'bem', 'sim', 'nao', 'quero', 'queria', 'gostaria', 'por', 'favor'])
@@ -7078,7 +7194,11 @@ async function tratarConversaPorDentro(opcoes: {
   async function retornoDistante(): Promise<{ pedido: { dias: number; mes: string }; horizonte: number } | null> {
     if (!pediuAgendamento(texto) && !/\bretorno\b/.test(normalizar(texto))) return null
     const horizonte = await horizonteDaAgenda(admin, clinicId)
-    const pedido = retornoAlemDaAgenda(texto, horizonte)
+    // relogioEmFoco (22/10/2026, vindo do sistema do Dr. Marcello): sem ele o
+    // mes saia do relogio real, e o teste de "daqui uns 40 dias" (fixo em
+    // 07/10) passou a dizer dezembro a partir de 22/10/2026, travando a
+    // publicacao. Em producao os dois relogios sao o mesmo.
+    const pedido = retornoAlemDaAgenda(texto, horizonte, relogioEmFoco ?? new Date())
     return pedido ? { pedido, horizonte } : null
   }
 
@@ -7370,6 +7490,10 @@ async function tratarConversaPorDentro(opcoes: {
     // sintoma e mostra o menu, de onde ela marca pelo *2*. Pular essa frase
     // seria o robo fingir que nao leu a parte que mais importava.
     // "...e volto pra marcar" e despedida, nao pedido de agora (14/10/2026).
+    // "Eu nao passei em consulta" (ver negouConsulta, 25/10/2026): desculpas e
+    // a equipe, nunca a agenda. Antes do atalho de agendamento, que leria o
+    // "consulta" como pedido de marcar.
+    if (negouConsulta(texto)) return await consultaQueNaoHouve(admin, conversationId)
     if (opcoes.jaViuOMenu && pediuAgendamento(texto) && !assuntoClinico(texto) && !despedida(texto)) {
       return await agendarDoPedido()
     }
@@ -7798,6 +7922,9 @@ async function tratarConversaPorDentro(opcoes: {
       const distante = await retornoDistante()
       if (distante) return await pedirRetornoDistante(admin, conversationId, distante.pedido, distante.horizonte, false)
     }
+
+    // "Eu nao passei em consulta", com o menu na tela (ver negouConsulta).
+    if (negouConsulta(texto)) return await consultaQueNaoHouve(admin, conversationId)
 
     if (pediuAgendamento(texto) && !assuntoClinico(texto) && !despedida(texto)) {
       return await agendarDoPedido()

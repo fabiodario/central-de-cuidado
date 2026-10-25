@@ -12,7 +12,7 @@ import {
   MessageCircle,
   UsersRound,
 } from 'lucide-react'
-import type { Patient } from '@/types/patient'
+import type { FollowupKey, Patient } from '@/types/patient'
 import type { PendingRequest } from '@/lib/repository'
 import { dueCount, idadeAnos, pendingFollowups } from '@/lib/followup'
 import { nomeDoCid } from '@/lib/cid'
@@ -302,10 +302,13 @@ function AvisoSolicitacoes({
 
 export default function Dashboard({
   patients,
+  etapas,
   solicitacoes = [],
   onAbrirAgenda,
 }: {
   patients: Patient[]
+  /** Etapas ligadas em Preferencias (19/10/2026, vindo do sistema do Dr. Marcello). */
+  etapas?: FollowupKey[]
   solicitacoes?: PendingRequest[]
   onAbrirAgenda?: () => void
 }) {
@@ -315,7 +318,7 @@ export default function Dashboard({
 
   const currentMonth = new Date().toISOString().slice(0, 7)
   const appointmentsThisMonth = patients.filter((patient) => patient.dataConsulta.startsWith(currentMonth)).length
-  const due = dueCount(patients)
+  const due = dueCount(patients, etapas)
   const completed = patients
     .flatMap((patient) => [patient.followups.d15, patient.followups.d30, patient.followups.m90])
     .filter((followup) => followup.status === 'concluido').length
@@ -360,7 +363,7 @@ export default function Dashboard({
     months.push({ label, value: patients.filter((patient) => patient.dataConsulta.startsWith(key)).length })
   }
   const maxMonth = Math.max(...months.map((month) => month.value), 1)
-  const pending = pendingFollowups(patients)
+  const pending = pendingFollowups(patients, etapas)
   // Ja enviados nao contam: nao ha o que fazer por eles nesta semana.
   const nextWeek = pending.filter((item) => item.dias >= -7 && item.urgencia !== 'aguardando').length
 

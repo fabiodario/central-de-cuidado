@@ -120,6 +120,18 @@ const MODELOS: Record<string, {
       'O robô já respondeu ao paciente. Toque num botão ou responda a esta mensagem com a orientação, que eu repasso ao paciente.',
     botoes: ['É urgente', 'Pode aguardar', 'Eu respondo'],
   },
+  // O "Mandar para o celular" da Central (25/10/2026, vindo do sistema do Dr.
+  // Marcello, ver alerta-de-urgencia.ts), categoria Utilidade, portugues (BR),
+  // validade de 12 horas. Parametros: quem, a hora, o assunto e o trecho da
+  // ultima mensagem do paciente. Enquanto nao e aprovado, o mesmo texto vai
+  // como mensagem comum, que so chega a quem escreveu para o numero da clinica
+  // nas ultimas 24 horas.
+  pedido_equipe: {
+    corpo:
+      '📋 Pedido para a equipe na Central de Cuidado.\n\n{{1}} escreveu às {{2}}.\nAssunto: {{3}}\n"{{4}}"\n\n' +
+      'Para responder ao paciente, responda a esta mensagem com o texto, que eu repasso. Ou toque em Eu respondo.',
+    botoes: ['Eu respondo'],
+  },
 }
 
 /**

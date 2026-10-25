@@ -287,6 +287,94 @@ await caso('o envio de verdade: token da clinica e o codigo do erro da Meta', as
   assert.equal(semToken.ok, false)
 })
 
+// ---- "Mandar para o celular" (25/10/2026, vindo do sistema do Dr. Marcello) ----
+
+const daCentral = { clinicId: FABIO, motivo: 'pedido', assunto: 'enviado pela Central', quem: 'Paciente de Teste', texto: 'Queria saber se posso viajar de avião', agora: AGORA, conversationId: 'conv-1' }
+
+await caso('pedido: o texto do modelo, sem travessao, com o assunto, e o LEIA-ME igual', () => {
+  const p = A.parametrosDoPedido(daCentral)
+  assert.deepEqual(p, ['Paciente de Teste', '23:14', 'enviado pela Central', 'Queria saber se posso viajar de avião'])
+  const t = textoDoModelo(A.MODELO_DO_PEDIDO, p)
+  assert.equal(
+    t,
+    '📋 Pedido para a equipe na Central de Cuidado.\n\nPaciente de Teste escreveu às 23:14.\nAssunto: enviado pela Central\n"Queria saber se posso viajar de avião"\n\n' +
+      'Para responder ao paciente, responda a esta mensagem com o texto, que eu repasso. Ou toque em Eu respondo.\n\n[Eu respondo]',
+  )
+  assert.doesNotMatch(t, new RegExp(`[${String.fromCharCode(0x2013, 0x2014)}]|crian[cç]a|fam[ií]lia`, 'i'))
+  assert.ok(t.length <= 1024)
+  const leiaMe = join(AQUI, '..', '..', 'LEIA-ME - Projeto Dr Fabio Dario.md')
+  if (existsSync(leiaMe)) {
+    const texto = readFileSync(leiaMe, 'utf8').replace(/\r\n/g, '\n')
+    for (const linha of ['📋 Pedido para a equipe na Central de Cuidado.', '{{1}} escreveu às {{2}}.', 'Assunto: {{3}}', 'Para responder ao paciente, responda a esta mensagem com o texto, que eu repasso. Ou toque em Eu respondo.']) {
+      assert.ok(texto.includes(linha), `o LEIA-ME tem o texto do pedido: ${linha}`)
+    }
+  }
+})
+
+await caso('pedido: o modelo pedido_equipe com o "Eu respondo" do aviso, registrado como pedido, nota que diz que foi', async () => {
+  const { banco, admin } = cenario()
+  const m = meta((corpo, n) => ({ ok: true, status: 200, corpo: { messages: [{ id: `wamid.${n}` }] } }))
+  const r = await A.enviarAlertaDeUrgencia(admin, daCentral, A.whatsAppPelaApi('123', 'token-de-teste', m.buscar))
+  assert.equal(r.falhou, false)
+  const aviso = banco.linhas('alertas_de_urgencia')[0]
+  assert.equal(aviso.motivo, 'pedido')
+  const t = m.pedidos[0].corpo.template
+  assert.equal(t.name, 'pedido_equipe')
+  assert.deepEqual(t.components.filter((c) => c.type === 'button').map((b) => b.parameters[0].payload), [`URG:${aviso.id}:responde`])
+  assert.deepEqual(m.pedidos.map((p) => p.corpo.to), [MEDICO, DAYANE], 'aos dois celulares')
+  assert.deepEqual(aviso.mensagens, ['wamid.1', 'wamid.2'])
+  // A nota em branco fazia o botao parecer que nao tinha feito nada.
+  assert.deepEqual(notas(banco), ['📲 Conversa enviada para o WhatsApp de 2 números (final 0001, final 0002). A resposta de lá volta para o paciente.'])
+  assert.deepEqual(eventos(banco).map((e) => [e.evento, e.detalhe]), [['pedido_equipe', 'enviado 2/2']], 'evento proprio, fora da conta das urgencias')
+})
+
+await caso('pedido sem o modelo aprovado: vai como texto com o botao, e quem nao escreveu nas 24 horas fica sabendo', async () => {
+  const { banco, admin } = cenario()
+  const m = meta((corpo) =>
+    corpo.type === 'template'
+      ? { ok: false, status: 404, corpo: { error: { code: 132001, message: 'Template name does not exist in the translation' } } }
+      : corpo.to === DAYANE
+        ? { ok: false, status: 400, corpo: { error: { code: 131047, message: 'Re-engagement message' } } }
+        : { ok: true, status: 200, corpo: { messages: [{ id: 'wamid.t' }] } },
+  )
+  const r = await A.enviarAlertaDeUrgencia(admin, daCentral, A.whatsAppPelaApi('123', 'token-de-teste', m.buscar))
+  assert.deepEqual(m.pedidos.map((p) => p.corpo.type), ['template', 'interactive', 'interactive'], 'o modelo uma vez so; depois, texto')
+  const texto = m.pedidos[1].corpo.interactive
+  assert.match(texto.body.text, /^📋 Pedido para a equipe na Central de Cuidado\./)
+  assert.doesNotMatch(texto.body.text, /\[Eu respondo\]/, 'o botao vai de verdade, nao como texto')
+  assert.equal(texto.action.buttons[0].reply.id, `URG:${r.alertaId}:responde`)
+  assert.equal(r.falhou, true)
+  assert.match(notas(banco)[0], /^⚠️ A conversa NÃO chegou ao celular final 0002: o modelo pedido_equipe ainda não foi aprovado na Meta, e esse celular não escreveu para o número da clínica nas últimas 24 horas\. Responda o paciente por aqui\. Chegou a final 0001\.$/)
+})
+
+await caso('pedido sem numero salvo: nao chama a Meta, e a nota manda responder pela Central (sem telefonema)', async () => {
+  let chamou = false
+  const { banco, admin } = cenario({ numeros: [] })
+  const r = await A.enviarAlertaDeUrgencia(admin, daCentral, async () => {
+    chamou = true
+    return { ok: true, id: null }
+  })
+  assert.equal(chamou, false)
+  assert.equal(r.falhou, true)
+  assert.match(notas(banco)[0], /^⚠️ A conversa NÃO foi para o celular: nenhum número cadastrado em Preferências/)
+  assert.doesNotMatch(notas(banco)[0], /por telefone/)
+})
+
+await caso('o botao da Central: qualquer pessoa com acesso a conversa, pela sessao dela, como pedido', () => {
+  const f = ler('supabase', 'functions', 'notificar-equipe', 'index.ts')
+  const bloco = f.slice(f.indexOf("if (corpo.acao === 'encaminhar')"), f.indexOf("return json({ error: 'Ação desconhecida.' }, 400)"))
+  assert.match(bloco, /await userClient\(autorizacao\)\s*\.from\('whatsapp_conversations'\)/, 'a RLS decide quem ve a conversa')
+  assert.match(bloco, /if \(erroDaConversa \|\| !conversa\) return json\(\{ error: 'Sem acesso a esta conversa\.' \}, 403\)/)
+  assert.match(bloco, /motivo: 'pedido'/)
+  assert.match(bloco, /conversationId: conversa\.id/)
+  const tela = ler('src', 'sections', 'Conversations.tsx')
+  assert.match(tela, /await mandarParaOCelular\(clinicId, conversa\)/)
+  assert.match(tela, /\{doCelular && \(/, 'a nota do resultado aparece embaixo do botao')
+  const m = ler('supabase', 'migrations', '20261025100600_pedido_no_celular.sql')
+  assert.match(m, /check \(motivo in \('urgencia', 'sangramento', 'pedido'\)\)/)
+  assert.match(m, /add column if not exists respondido_em timestamptz/)
+})
+
 // ---- Onde as pecas entram ----
 
 await caso('o webhook: a resposta do medico antes do robo do paciente, e o alerta junto da notificacao', () => {
@@ -305,7 +393,7 @@ await caso('o webhook: a resposta do medico antes do robo do paciente, e o alert
 
 await caso('o teste da tela: so quem atende, e pelo mesmo envio', () => {
   const f = ler('supabase', 'functions', 'notificar-equipe', 'index.ts')
-  const bloco = f.slice(f.indexOf("if (corpo.acao === 'alerta_teste')"), f.indexOf("return json({ error: 'Ação desconhecida.' }, 400)"))
+  const bloco = f.slice(f.indexOf("if (corpo.acao === 'alerta_teste')"), f.indexOf("if (corpo.acao === 'encaminhar')"))
   assert.match(bloco, /clinicaDeQuemAtende\(userClient\(autorizacao\), corpo\.clinicId\)/)
   assert.match(bloco, /enviarAlertaDeUrgencia\(admin, \{/)
   assert.doesNotMatch(bloco, /conversationId/, 'o teste nao tem paciente do outro lado')

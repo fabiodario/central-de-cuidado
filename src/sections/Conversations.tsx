@@ -25,10 +25,16 @@ import {
   List as ListIcon,
   Lock,
   MoreVertical,
+  Smartphone,
+  Pencil,
+  Reply,
+  Power,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { criarNota, listarNotas, type NotaDaConversa } from '@/lib/notas-da-conversa'
+import { mandarParaOCelular } from '@/lib/notificacoes'
 import { linhaDoTempo } from '@/lib/linha-do-tempo'
+import { respostasDaEquipe, type OpcaoDaEquipe } from '@/lib/respostas-da-equipe'
 import { CHAVE_DO_VISUAL, EVENTO_MODO_WHATSAPP } from '@/lib/modo-whatsapp'
 import { VisualizadorDeArquivo, type ArquivoAberto } from '@/components/VisualizadorDeArquivo'
 import { marcaSemClinicaConhecida } from '@/lib/marca'
@@ -55,6 +61,8 @@ import {
   unresolveConversation,
   voltarAEnviarMensagens,
   saveAutoReply,
+  ligarRobo,
+  desligarRoboNaConversa,
   sendConversationReply,
   sendConversationMenu,
   sendConversationQuestionnaire,
@@ -63,6 +71,8 @@ import {
   type Conversation,
   type ConversationMessage,
   type ResumoDoPaciente,
+  renomearConversa,
+  desligarConversaDoPaciente,
 } from '@/lib/repository'
 import { lugaresDoRobo } from '@/lib/lugares'
 import MandarHorarios from '@/sections/MandarHorarios'
@@ -236,6 +246,13 @@ const MOTIVO_ATENCAO: Record<
     classe: 'bg-[#fef3c7] text-[#92400e]',
     borda: 'border-[#f59e0b]',
   },
+  // Chegou algo que o WhatsApp nao mostra - talvez uma ligacao - e a janela
+  // de 24h nao abriu (16/10/2026). Texto livre falha; so um modelo chega.
+  nao_suportada: {
+    rotulo: '📵 Tentou falar (ligação?): mande um modelo',
+    classe: 'bg-[#fef3c7] text-[#92400e]',
+    borda: 'border-[#f59e0b]',
+  },
   urgencia: {
     rotulo: '🚨 Urgência: ligar agora',
     classe: 'bg-[#b42318] text-white',
@@ -291,6 +308,7 @@ const ORDEM_DOS_MOTIVOS: NonNullable<Conversation['attentionReason']>[] = [
   'documento',
   'farmacia',
   'numero_errado',
+  'nao_suportada',
   'remarcacao',
   'cancelamento',
   'cancelou_sozinho',
@@ -501,6 +519,80 @@ function horaLocal(iso: string) {
   })
 }
 
+/**
+ * A imagem do Ctrl+V (20/10/2026): print da tela ou imagem copiada da area de
+ * trabalho. O navegador entrega como "image.png"; o nome ganha a hora para o
+ * historico nao ficar cheio de "image.png" iguais.
+ */
+function imagemDaAreaDeTransferencia(dados: DataTransfer | null): File | null {
+  if (!dados) return null
+  for (const item of Array.from(dados.items ?? [])) {
+    if (item.kind !== 'file' || !/^image\/(png|jpeg)$/.test(item.type)) continue
+    const arquivo = item.getAsFile()
+    if (!arquivo) continue
+    const hora = horaLocal(new Date().toISOString()).replace(':', 'h')
+    const extensao = item.type === 'image/png' ? 'png' : 'jpg'
+    return new File([arquivo], `imagem-colada-${hora}.${extensao}`, { type: item.type })
+  }
+  return null
+}
+
+/** O assunto da mensagem citada, numa linha. */
+function resumoDaCitada(m: ConversationMessage) {
+  if (m.anexoUrl && (!m.body || /^\[/.test(m.body))) return m.anexoMime?.startsWith('image/') ? '📷 Foto' : '📎 Arquivo'
+  return (m.body || (m.templateName ? `[modelo: ${m.templateName}]` : '')).replace(/\s+/g, ' ').slice(0, 160)
+}
+
+/** A citacao em cima do balao, como no WhatsApp (20/10/2026, vindo do sistema do Dr. Marcello). */
+function Citacao({ mensagem }: { mensagem: ConversationMessage }) {
+  const nossa = mensagem.direction === 'outbound'
+  const deles = publicoDaClinica() === 'geral' ? 'Paciente' : 'Família'
+  return (
+    <div className={`mb-1 rounded-[6px] border-l-4 bg-black/[0.05] px-2 py-1 ${nossa ? 'border-[#06cf9c]' : 'border-[#53bdeb]'}`}>
+      <p className={`text-[11.5px] font-bold ${nossa ? 'text-[#06a17a]' : 'text-[#1f8fc4]'}`}>{nossa ? 'Consultório' : deles}</p>
+      <p className="line-clamp-2 text-[12.5px] leading-[16px] text-[#54656f]">{resumoDaCitada(mensagem)}</p>
+    </div>
+  )
+}
+
+/** "Respondendo a..." em cima da caixa de texto, com o X para desistir. */
+function BarraDaCitacao({ mensagem, onTirar }: { mensagem: ConversationMessage; onTirar: () => void }) {
+  return (
+    <div className="mt-2 flex items-start gap-2 rounded-[12px] bg-[#f0f2f5] p-1.5">
+      <div className="min-w-0 flex-1">
+        <Citacao mensagem={mensagem} />
+      </div>
+      <button
+        type="button"
+        onClick={onTirar}
+        title="Não citar esta mensagem"
+        aria-label="Não citar esta mensagem"
+        className="shrink-0 rounded-full p-1 text-[#54656f] hover:bg-white"
+      >
+        <X className="h-4 w-4" />
+      </button>
+    </div>
+  )
+}
+
+/**
+ * O "responder" ao lado do balao. Aparece ao passar o mouse (no celular, ao
+ * tocar no balao), para nao encher a conversa de botoes.
+ */
+function BotaoResponder({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={`Responder esta mensagem (${publicoDaClinica() === 'geral' ? 'o paciente' : 'a família'} vê a citação)`}
+      aria-label="Responder esta mensagem"
+      className="shrink-0 rounded-full bg-white/90 p-1.5 text-[#54656f] opacity-0 shadow-[0_1px_2px_rgba(11,20,26,.15)] transition focus:opacity-100 group-hover:opacity-100"
+    >
+      <Reply className="h-3.5 w-3.5" />
+    </button>
+  )
+}
+
 export default function Conversations({
   focoPatientId,
   focoConversa,
@@ -558,6 +650,11 @@ export default function Conversations({
   const [escrevendoNota, setEscrevendoNota] = useState(false)
   const [textoDaNota, setTextoDaNota] = useState('')
   const [salvandoNota, setSalvandoNota] = useState(false)
+  // "Mandar para o celular" (18/10/2026, vindo do sistema do Dr. Marcello): a
+  // conversa vai como pedido para o WhatsApp do medico e da Dayane, e a
+  // resposta de la volta para o paciente.
+  const [mandandoAoCelular, setMandandoAoCelular] = useState(false)
+  const [doCelular, setDoCelular] = useState<{ texto: string; falhou: boolean } | null>(null)
   // Foto ou documento aberto por cima da conversa.
   const [arquivoAberto, setArquivoAberto] = useState<ArquivoAberto | null>(null)
   const fecharArquivo = useCallback(() => setArquivoAberto(null), [])
@@ -570,13 +667,35 @@ export default function Conversations({
   // (15/10/2026, ver publico.ts). Decide as frases da tela e a previa do menu.
   const geral = publicoDaClinica(clinicId) === 'geral'
   const quemRecebe = geral ? 'o paciente' : 'a família'
-  const [prontas, setProntas] = useState<RespostaPronta[]>([])
+  const [prontas, setProntas] = useState<OpcaoDaEquipe<RespostaPronta>[]>([])
   // Valor e endereco de cada atendimento: a resposta pronta com {valores}
   // entra no campo ja preenchida, como o robo a mandaria (14/10/2026).
   const [lugares, setLugares] = useState<Lugar[] | null>(null)
   // Arquivo escolhido para ir junto da proxima resposta (24/09/2026).
   const [arquivo, setArquivo] = useState<File | null>(null)
   const seletorDeArquivo = useRef<HTMLInputElement>(null)
+  // Mensagem citada na proxima resposta, como o "responder" do WhatsApp
+  // (20/10/2026).
+  const [respondendo, setRespondendo] = useState<ConversationMessage | null>(null)
+  // Renomear a conversa (20/10/2026, vindo do sistema do Dr. Marcello): la, a
+  // conversa do credenciamento de um convenio aparecia com o nome de um
+  // paciente, e so dava para arrumar no banco.
+  const [renomeando, setRenomeando] = useState(false)
+  const [nomeNovo, setNomeNovo] = useState('')
+  const [salvandoNome, setSalvandoNome] = useState(false)
+
+  // Imagem colada com Ctrl+V (20/10/2026): print da area de trabalho vai como
+  // arquivo, igual ao clipe. Com a janela fechada, so modelo aprovado sai.
+  function colarImagem(evento: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const colada = imagemDaAreaDeTransferencia(evento.clipboardData)
+    if (!colada) return
+    evento.preventDefault()
+    if (!janelaAberta) {
+      setError('Com a janela de 24h fechada não dá para enviar imagem: a Meta só aceita o modelo aprovado.')
+      return
+    }
+    setArquivo(colada)
+  }
 
   // As respostas prontas mudam pouco: uma leitura quando a clinica e conhecida.
   // Falhar aqui so tira o atalho; a caixa de resposta continua igual.
@@ -584,7 +703,7 @@ export default function Conversations({
     if (!clinicId) return
     let vivo = true
     listRespostasProntas(clinicId)
-      .then((lista) => vivo && setProntas(lista.filter((p) => p.ativa && p.resposta.trim())))
+      .then((lista) => vivo && setProntas(respostasDaEquipe(lista)))
       .catch((erro) => console.warn('Nao consegui carregar as respostas prontas', erro))
     Promise.all([listUnits(clinicId), getTelemedicina(clinicId)])
       .then(([units, tele]) => vivo && setLugares(lugaresDoRobo(units, tele)))
@@ -611,6 +730,8 @@ export default function Conversations({
     infoText: '',
   })
   const [autoReplyAberto, setAutoReplyAberto] = useState(false)
+  const [trocandoRobo, setTrocandoRobo] = useState(false)
+  const [avisoRobo, setAvisoRobo] = useState('')
   const [salvandoAuto, setSalvandoAuto] = useState(false)
   const [avisoAuto, setAvisoAuto] = useState('')
   const [destravando, setDestravando] = useState<string | null>(null)
@@ -825,6 +946,25 @@ export default function Conversations({
     }
   }, [])
 
+  async function mandarAoCelular() {
+    if (!selectedId || !clinicId || mandandoAoCelular) return
+    const conversa = selectedId
+    setMandandoAoCelular(true)
+    setDoCelular(null)
+    try {
+      const r = await mandarParaOCelular(clinicId, conversa)
+      if (selectedIdRef.current === conversa) setDoCelular({ texto: r.nota, falhou: r.falhou })
+      // O resultado tambem fica como nota na conversa.
+      if (selectedIdRef.current === conversa) await carregarNotas(conversa)
+    } catch (causa) {
+      if (selectedIdRef.current === conversa) {
+        setDoCelular({ texto: causa instanceof Error ? causa.message : 'Não consegui mandar para o celular.', falhou: true })
+      }
+    } finally {
+      setMandandoAoCelular(false)
+    }
+  }
+
   async function salvarNota() {
     if (!selectedId || !clinicId || !textoDaNota.trim() || salvandoNota) return
     setSalvandoNota(true)
@@ -941,12 +1081,16 @@ export default function Conversations({
   async function openConversation(conversation: Conversation) {
     setSelectedId(conversation.id)
     selectedIdRef.current = conversation.id
-    // Arquivo escolhido numa conversa nao pode ir parar em outra - nem a nota.
+    // Arquivo escolhido numa conversa nao pode ir parar em outra - nem a nota,
+    // nem a citacao.
     setArquivo(null)
+    setRespondendo(null)
+    setRenomeando(false)
     setNotas([])
     setErroDasNotas('')
     setEscrevendoNota(false)
     setTextoDaNota('')
+    setDoCelular(null)
     void carregarNotas(conversation.id)
     setLoadingMessages(true)
     setResposta('')
@@ -989,10 +1133,12 @@ export default function Conversations({
     setError('')
     try {
       // Com arquivo, o texto vira a legenda dele.
-      if (arquivo) await sendConversationFile(selectedId, arquivo, texto)
-      else await sendConversationReply(selectedId, texto)
+      const citada = respondendo?.id ?? null
+      if (arquivo) await sendConversationFile(selectedId, arquivo, texto, citada)
+      else await sendConversationReply(selectedId, texto, false, citada)
       setResposta('')
       setArquivo(null)
+      setRespondendo(null)
       acabamosDeEnviar.current = true
       // O tempo real ja traz a mensagem nova, mas recarregar aqui evita a
       // sensacao de "sumiu" caso a assinatura esteja fora do ar.
@@ -1121,6 +1267,44 @@ export default function Conversations({
     }
   }
 
+  // Botao de emergencia do robo: grava na hora, sem passar pelo "Salvar" do
+  // painel do menu. Erro aparece na tela - robo que a equipe acha desligado e
+  // continua falando e exatamente o que o botao existe para evitar.
+  async function alternarRobo() {
+    if (!clinicId || trocandoRobo) return
+    const ligar = !autoReply.enabled
+    setTrocandoRobo(true)
+    setAvisoRobo('')
+    try {
+      const ficou = await ligarRobo(clinicId, ligar)
+      setAutoReply((atual) => ({ ...atual, enabled: ficou }))
+      if (ficou !== ligar) setAvisoRobo('O banco não aceitou a mudança. Tente de novo.')
+    } catch (cause) {
+      setAvisoRobo(`Não consegui ${ligar ? 'religar' : 'desligar'} o robô: ${cause instanceof Error ? cause.message : 'erro desconhecido'}`)
+    } finally {
+      setTrocandoRobo(false)
+    }
+  }
+
+  // Robo so desta conversa (23/10/2026). Grava na hora e mostra o que ficou
+  // no banco; erro aparece ao lado do botao.
+  const [trocandoRoboDaConversa, setTrocandoRoboDaConversa] = useState(false)
+  async function alternarRoboDaConversa(conversa: Conversation) {
+    if (trocandoRoboDaConversa) return
+    const desligar = !conversa.roboDesligado
+    setTrocandoRoboDaConversa(true)
+    setAvisoRobo('')
+    try {
+      const ficou = await desligarRoboNaConversa(conversa.id, desligar)
+      setConversations((atual) => atual.map((c) => (c.id === conversa.id ? { ...c, roboDesligado: ficou } : c)))
+      if (ficou !== desligar) setAvisoRobo('O banco não aceitou a mudança. Tente de novo.')
+    } catch (cause) {
+      setAvisoRobo(cause instanceof Error ? cause.message : 'Não foi possível mudar o robô desta conversa.')
+    } finally {
+      setTrocandoRoboDaConversa(false)
+    }
+  }
+
   async function salvarAutoReply() {
     if (!clinicId || salvandoAuto) return
     // O fecho vai colado no texto de qualquer unidade: so {valores} e
@@ -1141,6 +1325,61 @@ export default function Conversations({
       setAvisoAuto(cause instanceof Error ? cause.message : 'Não foi possível salvar.')
     } finally {
       setSalvandoAuto(false)
+    }
+  }
+
+  async function salvarNome(conversa: Conversation, nome: string) {
+    setSalvandoNome(true)
+    try {
+      await renomearConversa(conversa.id, nome)
+      const limpo = nome.trim().replace(/\s+/g, ' ')
+      setConversations((atual) =>
+        atual.map((item) =>
+          item.id === conversa.id
+            ? {
+                ...item,
+                nomePersonalizado: limpo || null,
+                patientName: limpo || item.nomeDoCadastro || 'Contato sem cadastro',
+              }
+            : item,
+        ),
+      )
+      setRenomeando(false)
+    } catch (causa) {
+      setError(causa instanceof Error ? causa.message : 'Não foi possível renomear a conversa.')
+    } finally {
+      setSalvandoNome(false)
+    }
+  }
+
+  async function desligarDoCadastro(conversa: Conversation) {
+    const doCadastro = conversa.nomeDoCadastro || 'o paciente'
+    const sim = await perguntar({
+      titulo: `Este número não é de ${doCadastro}?`,
+      detalhe:
+        `A conversa deixa de aparecer como de ${doCadastro} e o histórico dele deixa de contar estas mensagens. ` +
+        `Corrija também o telefone no cadastro de ${doCadastro}: com o número antigo lá, a próxima mensagem liga de novo.`,
+      confirmar: 'Desligar do cadastro',
+      cancelar: 'Manter',
+    })
+    if (!sim) return
+    try {
+      await desligarConversaDoPaciente(conversa.id)
+      setConversations((atual) =>
+        atual.map((item) =>
+          item.id === conversa.id
+            ? {
+                ...item,
+                patientId: null,
+                nomeDoCadastro: null,
+                patientName: item.nomePersonalizado || 'Contato sem cadastro',
+              }
+            : item,
+        ),
+      )
+      setResumo(null)
+    } catch (causa) {
+      setError(causa instanceof Error ? causa.message : 'Não foi possível desligar a conversa do cadastro.')
     }
   }
 
@@ -1695,6 +1934,36 @@ export default function Conversations({
           )}
         </p>
 
+        {/* O desligar do dia a dia e por conversa (botao no cabecalho dela,
+            23/10/2026). Aqui so aparece o aviso quando o robo da CLINICA
+            inteira esta desligado, com o botao de religar: e facil esquecer. */}
+        {clinicId && !autoReply.enabled && (
+          <span className="flex items-center gap-2">
+            <span className="rounded-full bg-[#fde8e8] px-2.5 py-1 text-[10px] font-extrabold text-[#b42318]">
+              Robô desligado para todas as conversas
+            </span>
+            <button
+              type="button"
+              onClick={() => void alternarRobo()}
+              disabled={trocandoRobo}
+              title={
+                autoReply.enabled
+                  ? 'Para o robô na hora: menu e agendamento deixam de responder'
+                  : 'O robô volta a responder quem escreve para a clínica'
+              }
+              className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-[10px] font-extrabold transition disabled:opacity-60 ${
+                autoReply.enabled
+                  ? 'border border-[#f3b4b4] bg-white text-[#b42318] hover:bg-[#fde8e8]'
+                  : 'bg-[#2f855a] text-white hover:bg-[#276749]'
+              }`}
+            >
+              <Power className="h-3.5 w-3.5" />
+              {trocandoRobo ? 'Aguarde...' : 'Religar robô'}
+            </button>
+            {avisoRobo && <span className="text-[10px] font-bold text-[#b42318]">{avisoRobo}</span>}
+          </span>
+        )}
+
         {compacto && conversations.length > 0 && (
           <div className="relative min-w-[160px] max-w-[420px] flex-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
@@ -1863,9 +2132,11 @@ export default function Conversations({
               // Sem cadastro, o nome do WhatsApp e melhor do que "Contato sem
               // cadastro" - mas vem com etiqueta, porque e o apelido que a
               // pessoa escolheu, nao um nome conferido pela clinica.
-              const titulo = semCadastro
-                ? conversation.profileName || 'Contato sem cadastro'
-                : conversation.patientName
+              const titulo = conversation.nomePersonalizado
+                ? conversation.nomePersonalizado
+                : semCadastro
+                  ? conversation.profileName || 'Contato sem cadastro'
+                  : conversation.patientName
 
               // Concluida encolhe. A altura do cartao passa a carregar o
               // significado: pendente e cartao inteiro, concluida e uma linha
@@ -1996,6 +2267,11 @@ export default function Conversations({
                     )
                   })()}
                   <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    {conversation.roboDesligado && (
+                      <span className="rounded-full bg-[#fde8e8] px-2 py-0.5 text-[9px] font-extrabold text-[#b42318]">
+                        Robô desligado
+                      </span>
+                    )}
                     {semCadastro && (
                       <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[9px] font-extrabold text-slate-500">
                         {conversation.profileName ? 'Nome do WhatsApp' : 'Sem cadastro'}
@@ -2174,10 +2450,27 @@ export default function Conversations({
                   </button>
                 </div>
                 <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#081b2c]/[0.07] pb-3">
-                  <div>
-                    <p className="text-sm font-extrabold text-[#081b2c]">{selected.patientName}</p>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <p className="text-sm font-extrabold text-[#081b2c]">
+                        {selected.nomePersonalizado || (selected.patientId ? selected.patientName : selected.profileName || selected.patientName)}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setNomeNovo(selected.nomePersonalizado || (selected.patientId ? selected.patientName : selected.profileName))
+                          setRenomeando((aberto) => !aberto)
+                        }}
+                        title="Renomear esta conversa (o cadastro do paciente não muda)"
+                        aria-label="Renomear conversa"
+                        className="rounded-lg p-1 text-slate-400 transition hover:bg-[#eff6fd] hover:text-[#1f4f78]"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
                     <p className="text-[10px] font-bold text-slate-400">
                       {selected.phone} · {STATUS_LABEL[selected.status]}
+                      {selected.nomePersonalizado && selected.nomeDoCadastro && ` · cadastro: ${selected.nomeDoCadastro}`}
                     </p>
                     {/* Com quem a equipe esta falando, em quatro numeros. Quem
                         ja veio cinco vezes e quem cancelou tres seguidas
@@ -2207,6 +2500,30 @@ export default function Conversations({
                       </div>
                     )}
                   </div>
+                  <div className="flex flex-col items-end gap-1.5">
+                  <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void alternarRoboDaConversa(selected)}
+                    disabled={trocandoRoboDaConversa}
+                    title={
+                      selected.roboDesligado
+                        ? `O robô volta a responder ${geral ? 'este paciente' : 'esta família'} (menu e agendamento)`
+                        : `Só ${geral ? 'este paciente' : 'esta família'} deixa de receber respostas do robô; as outras conversas seguem normais`
+                    }
+                    className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-[10px] font-extrabold transition disabled:opacity-60 ${
+                      selected.roboDesligado
+                        ? 'bg-[#2f855a] text-white hover:bg-[#276749]'
+                        : 'border border-[#f3b4b4] bg-white text-[#b42318] hover:bg-[#fde8e8]'
+                    }`}
+                  >
+                    <Power className="h-3.5 w-3.5" />
+                    {trocandoRoboDaConversa
+                      ? 'Aguarde...'
+                      : selected.roboDesligado
+                        ? 'Religar robô nesta conversa'
+                        : 'Desligar robô nesta conversa'}
+                  </button>
                   {selected.status === 'opted_out' ? (
                     <button
                       type="button"
@@ -2244,7 +2561,82 @@ export default function Conversations({
                       Concluir conversa
                     </button>
                   )}
+                  </div>
+                  {selected.roboDesligado && (
+                    <span className="rounded-full bg-[#fde8e8] px-2.5 py-0.5 text-[9px] font-extrabold text-[#b42318]">
+                      Robô desligado: só a equipe responde {geral ? 'este paciente' : 'esta família'}
+                    </span>
+                  )}
+                  {avisoRobo && <span className="text-[10px] font-bold text-[#b42318]">{avisoRobo}</span>}
+                  </div>
                 </div>
+
+                {renomeando && (
+                  <form
+                    className="mt-3 rounded-[14px] border border-[#2f7fc1]/25 bg-[#f6faff] p-3"
+                    onSubmit={(e) => {
+                      e.preventDefault()
+                      void salvarNome(selected, nomeNovo)
+                    }}
+                  >
+                    <label className="text-[10px] font-extrabold text-[#16456b]" htmlFor="nome-da-conversa">
+                      Nome desta conversa
+                    </label>
+                    <p className="text-[10px] font-semibold text-slate-500">
+                      Muda só o que aparece aqui na Central. O cadastro do paciente continua como está.
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <input
+                        id="nome-da-conversa"
+                        value={nomeNovo}
+                        onChange={(e) => setNomeNovo(e.target.value)}
+                        maxLength={120}
+                        autoFocus
+                        placeholder="Ex.: Ana - credenciamento do convênio"
+                        className="min-w-[220px] flex-1 rounded-xl border border-[#081b2c]/10 bg-white px-3 py-2 text-[12px] outline-none focus:border-[#2f7fc1]"
+                      />
+                      <button
+                        type="submit"
+                        disabled={salvandoNome || !nomeNovo.trim()}
+                        className="rounded-xl bg-[#16456b] px-3.5 py-2 text-[10px] font-extrabold text-white disabled:opacity-40"
+                      >
+                        {salvandoNome ? 'Salvando...' : 'Salvar nome'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRenomeando(false)}
+                        className="rounded-xl border border-[#081b2c]/10 bg-white px-3.5 py-2 text-[10px] font-bold text-slate-500"
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+                      {selected.nomePersonalizado && (
+                        <button
+                          type="button"
+                          disabled={salvandoNome}
+                          onClick={() => void salvarNome(selected, '')}
+                          className="text-[10px] font-extrabold text-[#1f4f78] underline-offset-2 hover:underline disabled:opacity-40"
+                        >
+                          Voltar ao nome do {selected.patientId ? 'cadastro' : 'WhatsApp'}
+                        </button>
+                      )}
+                      {/* O nome errado quase sempre vem do telefone casado
+                          com o paciente errado: o numero do convenio ficou no
+                          cadastro do paciente. Renomear sozinho deixaria o
+                          historico dele misturado com o do convenio. */}
+                      {selected.patientId && (
+                        <button
+                          type="button"
+                          onClick={() => void desligarDoCadastro(selected)}
+                          className="text-[10px] font-extrabold text-[#b42318] underline-offset-2 hover:underline"
+                        >
+                          Este número não é de {selected.nomeDoCadastro || selected.patientName}: desligar do cadastro
+                        </button>
+                      )}
+                    </div>
+                  </form>
+                )}
 
                 {/* O bloco inteiro continua no rodape, junto da caixa de
                     resposta que ele explica. Aqui em cima fica so o atalho:
@@ -2365,16 +2757,21 @@ export default function Conversations({
                         }
                         const message = entrada.item
                         const outbound = message.direction === 'outbound'
+                        const citada = message.respondeA ? messages.find((m) => m.id === message.respondeA) ?? null : null
                         return (
                           <div
                             key={message.id}
-                            className={`flex ${outbound ? 'justify-end' : 'justify-start'}`}
+                            className={`group flex items-center gap-1 ${outbound ? 'justify-end' : 'justify-start'}`}
                           >
+                            {outbound && janelaAberta && (
+                              <BotaoResponder onClick={() => setRespondendo(message)} />
+                            )}
                             <div
                               className={`relative max-w-[78%] rounded-[8px] px-2.5 py-1.5 shadow-[0_1px_0.5px_rgba(11,20,26,.13)] ${
                                 outbound ? 'bg-[#d9fdd3]' : 'bg-white'
                               }`}
                             >
+                              {citada && <Citacao mensagem={citada} />}
                               {message.anexoUrl && (
                                 <Anexo
                                   url={message.anexoUrl}
@@ -2403,6 +2800,9 @@ export default function Conversations({
                                 </p>
                               )}
                             </div>
+                            {!outbound && janelaAberta && (
+                              <BotaoResponder onClick={() => setRespondendo(message)} />
+                            )}
                           </div>
                         )
                       })}
@@ -2455,14 +2855,28 @@ export default function Conversations({
                         </div>
                       </div>
                     ) : (
-                      <button
-                        type="button"
-                        onClick={() => setEscrevendoNota(true)}
-                        className="inline-flex items-center gap-1.5 rounded-xl border border-[#e8c96a] bg-[#fffaf0] px-3 py-1.5 text-[10px] font-extrabold text-[#8a6a10] transition hover:bg-[#fff3d6]"
-                        title={`Recado para a equipe, dentro desta conversa. ${geral ? 'O paciente' : 'A família'} não recebe.`}
-                      >
-                        <Lock className="h-3.5 w-3.5" /> Nota interna
-                      </button>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setEscrevendoNota(true)}
+                          className="inline-flex items-center gap-1.5 rounded-xl border border-[#e8c96a] bg-[#fffaf0] px-3 py-1.5 text-[10px] font-extrabold text-[#8a6a10] transition hover:bg-[#fff3d6]"
+                          title={`Recado para a equipe, dentro desta conversa. ${geral ? 'O paciente' : 'A família'} não recebe.`}
+                        >
+                          <Lock className="h-3.5 w-3.5" /> Nota interna
+                        </button>
+                        <button
+                          type="button"
+                          disabled={mandandoAoCelular}
+                          onClick={() => void mandarAoCelular()}
+                          className="inline-flex items-center gap-1.5 rounded-xl border border-[#2f7fc1]/30 bg-[#f0f6fd] px-3 py-1.5 text-[10px] font-extrabold text-[#16456b] transition hover:bg-[#e2eefb] disabled:cursor-wait disabled:opacity-50"
+                          title={`Manda esta conversa para o WhatsApp dos números do alerta (Preferências). A resposta de lá volta para ${quemRecebe}.`}
+                        >
+                          <Smartphone className="h-3.5 w-3.5" /> {mandandoAoCelular ? 'Mandando...' : 'Mandar para o celular'}
+                        </button>
+                      </div>
+                    )}
+                    {doCelular && (
+                      <p className={`mt-1.5 text-[10px] font-bold ${doCelular.falhou ? 'text-[#b42318]' : 'text-[#1c6b3a]'}`}>{doCelular.texto}</p>
                     )}
                     {erroDasNotas && (
                       <p className="mt-1.5 text-[10px] font-bold text-[#b42318]">{erroDasNotas}</p>
@@ -2510,7 +2924,7 @@ export default function Conversations({
                               <option value="">Resposta pronta…</option>
                               {prontas.map((p) => (
                                 <option key={p.id} value={p.id}>
-                                  {p.assunto}
+                                  {p.rotulo}
                                 </option>
                               ))}
                             </select>
@@ -2520,9 +2934,13 @@ export default function Conversations({
                           </p>
                         </div>
                       </div>
+                      {respondendo && (
+                        <BarraDaCitacao mensagem={respondendo} onTirar={() => setRespondendo(null)} />
+                      )}
                       <textarea
                         value={resposta}
                         onChange={(e) => setResposta(e.target.value)}
+                        onPaste={colarImagem}
                         onKeyDown={(e) => {
                           // Enter envia, Shift+Enter quebra linha.
                           if (e.key === 'Enter' && !e.shiftKey) {
@@ -2580,7 +2998,7 @@ export default function Conversations({
                       )}
                       <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                         <p className="text-[9px] font-semibold text-slate-400">
-                          Enter envia · Shift+Enter quebra linha
+                          Enter envia · Shift+Enter quebra linha · Ctrl+V cola uma imagem
                         </p>
                         {/* Devolve a pessoa ao robo: manda o menu de opcoes e a
                             conversa volta ao inicio. Util depois de um convite
@@ -2798,9 +3216,11 @@ export default function Conversations({
               <p className="px-6 py-10 text-center text-[13px] text-[#667781]">Nenhuma conversa aqui.</p>
             )}
             {visiveis.map((conversa) => {
-              const nome = conversa.patientId
-                ? conversa.patientName
-                : conversa.profileName || conversa.phone || 'Contato sem cadastro'
+              const nome = conversa.nomePersonalizado
+                ? conversa.nomePersonalizado
+                : conversa.patientId
+                  ? conversa.patientName
+                  : conversa.profileName || conversa.phone || 'Contato sem cadastro'
               const motivo = conversa.needsAttention && conversa.attentionReason ? MOTIVO_ATENCAO[conversa.attentionReason] : null
               const quando = conversa.lastMessageAt ? new Date(conversa.lastMessageAt) : null
               const hoje = diaLocal(new Date().toISOString())
@@ -2945,6 +3365,19 @@ export default function Conversations({
                   >
                     Escrever nota interna
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      // Renomear fica no visual padrao, com o aviso de que o
+                      // cadastro nao muda e o "nao e deste paciente".
+                      trocarVisual(false)
+                      setNomeNovo(selected.nomePersonalizado || (selected.patientId ? selected.patientName : selected.profileName))
+                      setRenomeando(true)
+                    }}
+                    className="block w-full px-4 py-2.5 text-left active:bg-black/5"
+                  >
+                    Renomear conversa
+                  </button>
                   <button type="button" onClick={() => trocarVisual(false)} className="block w-full px-4 py-2.5 text-left active:bg-black/5">
                     Voltar ao visual padrão
                   </button>
@@ -3015,6 +3448,7 @@ export default function Conversations({
 
                   const message = entrada.item
                   const outbound = message.direction === 'outbound'
+                  const citada = message.respondeA ? messages.find((m) => m.id === message.respondeA) ?? null : null
                   const mesmoLadoAntes =
                     !novoDia &&
                     anterior?.tipo === 'mensagem' &&
@@ -3024,8 +3458,9 @@ export default function Conversations({
                     separador,
                     <div
                       key={message.id}
-                      className={`flex ${outbound ? 'justify-end' : 'justify-start'} ${comRabinho ? 'mt-1.5' : ''}`}
+                      className={`group flex items-center gap-1 ${outbound ? 'justify-end' : 'justify-start'} ${comRabinho ? 'mt-1.5' : ''}`}
                     >
+                      {outbound && janelaAberta && <BotaoResponder onClick={() => setRespondendo(message)} />}
                       <div
                         className={`relative max-w-[82%] rounded-[7.5px] px-[9px] pb-[6px] pt-[6px] shadow-[0_1px_0.5px_rgba(11,20,26,.13)] ${
                           outbound ? 'bg-[#d9fdd3]' : 'bg-white'
@@ -3045,6 +3480,7 @@ export default function Conversations({
                             />
                           </svg>
                         )}
+                        {citada && <Citacao mensagem={citada} />}
                         {message.anexoUrl && (
                           <Anexo url={message.anexoUrl} mime={message.anexoMime} caminho={message.anexoPath} onAbrir={setArquivoAberto} />
                         )}
@@ -3062,6 +3498,7 @@ export default function Conversations({
                           <p className="mt-1 pb-3 text-[11.5px] font-semibold text-[#b42318]">{message.failureReason}</p>
                         )}
                       </div>
+                      {!outbound && janelaAberta && <BotaoResponder onClick={() => setRespondendo(message)} />}
                     </div>,
                   ]
                 })}
@@ -3101,6 +3538,11 @@ export default function Conversations({
                 {avisoRetomada && <p className="mt-1 font-semibold text-[#b42318]">{avisoRetomada}</p>}
               </div>
             )}
+            {respondendo && janelaAberta && (
+              <div className="mx-1 mb-1.5">
+                <BarraDaCitacao mensagem={respondendo} onTirar={() => setRespondendo(null)} />
+              </div>
+            )}
             {arquivo && janelaAberta && (
               <div className="mx-1 mb-1.5 flex items-center gap-2 rounded-[10px] bg-white px-3 py-2 text-[12.5px] text-[#111b21] shadow-[0_1px_0.5px_rgba(11,20,26,.13)]">
                 <Paperclip className="h-4 w-4 shrink-0 text-[#54656f]" />
@@ -3122,6 +3564,7 @@ export default function Conversations({
                     e.target.style.height = 'auto'
                     e.target.style.height = `${Math.min(e.target.scrollHeight, 120)}px`
                   }}
+                  onPaste={colarImagem}
                   rows={1}
                   maxLength={janelaAberta ? 4096 : 700}
                   placeholder="Mensagem"

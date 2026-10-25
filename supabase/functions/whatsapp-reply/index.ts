@@ -86,6 +86,12 @@ type ReplyRequest = {
    * de motivo e o veredito fica registrado. So owner ou clinician.
    */
   veredito?: string
+  /**
+   * Id (nosso) da mensagem que esta resposta cita, como o "responder" do
+   * WhatsApp (20/10/2026, vindo do sistema do Dr. Marcello). O paciente ve a
+   * citacao em cima da resposta.
+   */
+  respondeA?: string | null
 }
 
 Deno.serve(async (req) => {
@@ -104,6 +110,7 @@ Deno.serve(async (req) => {
       body = {
         conversationId: String(form.get('conversationId') ?? ''),
         text: String(form.get('text') ?? ''),
+        respondeA: String(form.get('respondeA') ?? '') || null,
       }
       const campo = form.get('arquivo')
       arquivo = campo instanceof File && campo.size > 0 ? campo : null
@@ -195,6 +202,9 @@ Deno.serve(async (req) => {
       .select('created_at')
       .eq('conversation_id', visivel.id)
       .eq('direction', 'inbound')
+      // '[unsupported]' (talvez ligacao) nao abre a janela de 24h (16/10/2026,
+      // vindo do sistema do Dr. Marcello).
+      .neq('message_type', 'unsupported')
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle()
@@ -419,6 +429,22 @@ Deno.serve(async (req) => {
       corpoNoHistorico = texto || arquivo.name || 'Arquivo'
     }
 
+    // Citacao (20/10/2026, vindo do sistema do Dr. Marcello): a Meta so precisa
+    // do id dela da mensagem citada. Sem
+    // esse id (mensagem que falhou, ou anterior a gravacao do id), a resposta
+    // sai sem citacao - perder a citacao e melhor do que nao enviar.
+    let citada: { id: string; externo: string } | null = null
+    if (body.respondeA && !toques) {
+      const { data: original, error: erroDaCitada } = await admin
+        .from('whatsapp_messages')
+        .select('id,external_message_id')
+        .eq('id', body.respondeA)
+        .eq('conversation_id', visivel.id)
+        .maybeSingle()
+      if (erroDaCitada) console.warn('Nao achei a mensagem citada; vai sem citacao', erroDaCitada)
+      if (original?.external_message_id) citada = { id: original.id, externo: original.external_message_id }
+    }
+
     const resposta = await fetch(
       `https://graph.facebook.com/${graphVersion}/${settings.whatsapp_phone_number_id}/messages`,
       {
@@ -429,6 +455,7 @@ Deno.serve(async (req) => {
           recipient_type: 'individual',
           to: visivel.wa_id,
           ...conteudo,
+          ...(citada ? { context: { message_id: citada.externo } } : {}),
         }),
       },
     )
@@ -477,6 +504,15 @@ Deno.serve(async (req) => {
         error: 'A mensagem foi enviada mas não pôde ser registrada.',
         code: 'SAVE_FAILED',
       }, 500)
+    }
+
+    // Coluna nova, gravada a parte: sem ela, so a citacao some da tela.
+    if (citada) {
+      const { error: erroDaCitacao } = await admin
+        .from('whatsapp_messages')
+        .update({ responde_a: citada.id })
+        .eq('id', salva.id)
+      if (erroDaCitacao) console.warn('Nao gravei qual mensagem foi citada', erroDaCitacao)
     }
 
     // Respondeu: a conversa deixa de pedir atencao e some o contador de novas.

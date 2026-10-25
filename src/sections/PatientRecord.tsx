@@ -3346,6 +3346,23 @@ export default function PatientRecord({
                     Dados do paciente
                   </p>
                   <p className="mt-2 text-sm font-extrabold leading-tight text-[#081b2c]">{patient.nome}</p>
+                  {/* Nome que veio do contato do WhatsApp, e nao da ficha
+                      (18/10/2026, vindo do sistema do Dr. Marcello em
+                      25/10/2026). Vermelho, como a alergia, porque receita e
+                      atestado saem com este nome. */}
+                  {patient.nomeDoContatoEm && (
+                    <div
+                      role="alert"
+                      className="mt-2 flex items-start gap-1.5 rounded-xl border border-[#b42318]/25 bg-[#fceceb] px-2.5 py-2 text-[11px] font-bold leading-snug text-[#b42318]"
+                    >
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      <span>
+                        {publicoDaClinica(clinicId) === 'geral'
+                          ? 'Nome não confirmado: o paciente não informou o nome, e o cadastro usa o nome do contato do WhatsApp (pode ser o de um parente). Confirme e corrija em Editar cadastro.'
+                          : 'Nome não confirmado: a família não informou o nome da criança, e o cadastro usa o nome do contato do WhatsApp (pode ser o da mãe ou do pai). Confirme e corrija em Editar cadastro.'}
+                      </span>
+                    </div>
+                  )}
 
                   <dl className="mt-3 space-y-2">
                     {[

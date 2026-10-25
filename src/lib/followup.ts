@@ -75,6 +75,12 @@ export function pronome(p: Patient): string {
   return p.sexo === 'F' ? 'ela' : 'ele'
 }
 
+/** "15, 30 e 90 dias", "30 dias e 3 meses": as etapas ligadas, para o texto da tela. */
+export function etapasPorExtenso(etapas: FollowupKey[]): string {
+  const nomes = FOLLOWUP_KEYS.filter((k) => etapas.includes(k)).map((k) => FOLLOWUP_LABEL[k])
+  return nomes.length > 1 ? `${nomes.slice(0, -1).join(', ')} e ${nomes[nomes.length - 1]}` : (nomes[0] ?? '')
+}
+
 export function buildMessage(template: string, p: Patient): string {
   return template
     .replaceAll('{nome}', firstName(p.nome))
@@ -123,13 +129,23 @@ export interface FollowupItem {
   urgencia: FollowupUrgencia
 }
 
-/** Lista follow-ups pendentes ou enviados (não concluídos), ordenados por data */
-export function pendingFollowups(patients: Patient[]): FollowupItem[] {
+/**
+ * Lista follow-ups pendentes ou enviados (não concluídos), ordenados por data.
+ * So as etapas ligadas em Preferencias (19/10/2026): a tela monta as etapas
+ * pela data da consulta, e sem o filtro o "15 dias" desligado continuaria
+ * aparecendo como atrasado.
+ */
+export function pendingFollowups(patients: Patient[], etapas: FollowupKey[] = FOLLOWUP_KEYS): FollowupItem[] {
   const items: FollowupItem[] = []
   for (const p of patients) {
-    for (const key of FOLLOWUP_KEYS) {
+    for (const key of FOLLOWUP_KEYS.filter((k) => etapas.includes(k))) {
       const st = p.followups[key]
       if (st.status === 'concluido') continue
+      // So o que existe no banco (23/10/2026). A ficha sem acompanhamento (o
+      // de um paciente foi arquivado: a consulta de 23/09 nunca aconteceu) ainda tem
+      // a data da consulta, e a tela montava um "30 dias" pendente a partir
+      // dela - com "sai automatico hoje as 9h", que nunca sairia.
+      if (!st.id) continue
       const due = dueDate(p, key)
       const dias = daysFromToday(due)
       let urgencia: FollowupUrgencia = 'futuro'
@@ -143,8 +159,8 @@ export function pendingFollowups(patients: Patient[]): FollowupItem[] {
   return items.sort((a, b) => b.dias - a.dias)
 }
 
-export function dueCount(patients: Patient[]): number {
-  return pendingFollowups(patients).filter(
+export function dueCount(patients: Patient[], etapas: FollowupKey[] = FOLLOWUP_KEYS): number {
+  return pendingFollowups(patients, etapas).filter(
     (i) => i.urgencia === 'atrasado' || i.urgencia === 'hoje',
   ).length
 }

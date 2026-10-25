@@ -1,7 +1,7 @@
 // Lote do WhatsApp de 25/09/2026: nono digito, localizacao/contato e notas.
 // Numeros e nomes inventados.
-import { variantesDoTelefone, mesmoTelefone } from './telefone-br.build.mjs'
-import { textoDaLocalizacao, textoDosContatos, semRespostaDoRobo } from './mensagem-recebida.build.mjs'
+import { variantesDoTelefone, mesmoTelefone, comNonoDigito, paraEnvio } from './telefone-br.build.mjs'
+import { textoDaLocalizacao, textoDosContatos, semRespostaDoRobo, destinoDaNaoSuportada, TEXTO_NAO_SUPORTADA } from './mensagem-recebida.build.mjs'
 import { linhaDoTempo } from './linha-do-tempo.build.mjs'
 import { avaliarSaude } from './saude-dos-envios.build.mjs'
 import { consultasDeUmDia, avisoDoBloqueio } from './bloqueio-de-dia.build.mjs'
@@ -27,6 +27,22 @@ function confere(nome, cond, detalhe) {
   confere('mesmo telefone em grafias diferentes', mesmoTelefone('551391234567', '13 99123-4567'))
   confere('telefones diferentes nao casam', !mesmoTelefone('551391234567', '13991234568'))
   confere('vazio devolve lista vazia', variantesDoTelefone('').length === 0)
+}
+
+// Celular gravado sem o 9 (16/10/2026): o envio ia para 8 digitos e a Meta
+// devolvia "Message undeliverable". Numeros inventados.
+{
+  confere('envio poe o 9 no celular sem o 9', paraEnvio('(13) 9123-4567') === '5513991234567', paraEnvio('(13) 9123-4567'))
+  confere('envio poe o 9 com o 55 na frente', paraEnvio('551391234567') === '5513991234567', paraEnvio('551391234567'))
+  confere('envio mantem celular que ja tem o 9', paraEnvio('13 99123-4567') === '5513991234567', paraEnvio('13 99123-4567'))
+  confere('envio nao mexe no fixo', paraEnvio('(13) 3234-5678') === '551332345678', paraEnvio('(13) 3234-5678'))
+  confere('envio poe o 55 no DDD 55', paraEnvio('(55) 99123-4567') === '5555991234567', paraEnvio('(55) 99123-4567'))
+  confere('DDD 55 sem o 9 tambem ganha', paraEnvio('(55) 9123-4567') === '5555991234567', paraEnvio('(55) 9123-4567'))
+  confere('cadastro grava o 9', comNonoDigito('(13) 9123-4567') === '13991234567', comNonoDigito('(13) 9123-4567'))
+  confere('cadastro mantem o 55 de quem veio do WhatsApp', comNonoDigito('+55 13 9123-4567') === '5513991234567', comNonoDigito('+55 13 9123-4567'))
+  confere('cadastro nao mexe no fixo', comNonoDigito('1332345678') === '1332345678')
+  confere('cadastro nao mexe em numero incompleto', comNonoDigito('139123') === '139123')
+  confere('cadastro vazio fica vazio', comNonoDigito('') === '')
 }
 
 // ---------------------------------------------------------------- localizacao e contato
@@ -109,6 +125,16 @@ confere('figurinha nao recebe resposta do robo', semRespostaDoRobo('sticker') ==
 for (const tipo of ['text', 'image', 'document', 'audio', 'interactive', 'button', undefined]) {
   confere(`${tipo} continua com resposta`, semRespostaDoRobo(tipo) === false)
 }
+
+// ------------------------------- "[unsupported]" (16/10/2026, caso do sistema do Dr. Marcello)
+// Duas vezes o menu do robo voltou "Message undeliverable": esse tipo de
+// mensagem nao abre a janela de 24h. Sem janela, nada de texto livre.
+confere('nao suportada sem janela: so a equipe', destinoDaNaoSuportada('unsupported', false) === 'so_equipe')
+confere('nao suportada com janela: pede texto', destinoDaNaoSuportada('unsupported', true) === 'pedir_texto')
+for (const tipo of ['text', 'image', 'audio', 'interactive', 'button', 'sticker', undefined]) {
+  confere(`${tipo} segue o caminho normal`, destinoDaNaoSuportada(tipo, false) === 'normal' && destinoDaNaoSuportada(tipo, true) === 'normal')
+}
+confere('texto pede para escrever, sem menu', /escrever em texto/.test(TEXTO_NAO_SUPORTADA) && !/Responda com o número/.test(TEXTO_NAO_SUPORTADA))
 
 console.log(`WhatsApp (lote 25/09): ${ok} verificações passaram.`)
 if (falhas) {

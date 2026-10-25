@@ -214,6 +214,9 @@ Deno.serve(async (req) => {
           .select('created_at')
           .eq('conversation_id', conversa.id)
           .eq('direction', 'inbound')
+          // '[unsupported]' (talvez ligacao) nao abre a janela de 24h (16/10/2026,
+          // vindo do sistema do Dr. Marcello).
+          .neq('message_type', 'unsupported')
           .order('created_at', { ascending: false })
           .limit(1)
           .maybeSingle()

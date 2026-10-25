@@ -1,6 +1,6 @@
 import { adminClient, corsHeaders, json, userClient } from '../_shared/whatsapp.ts'
 import { chavesDaClinica, entregar } from '../_shared/push-da-equipe.ts'
-import { enviarAlertaDeUrgencia } from '../_shared/alerta-de-urgencia.ts'
+import { enviarAlertaDeUrgencia, quemNoAlerta } from '../_shared/alerta-de-urgencia.ts'
 import { clinicaDeQuemAtende } from '../_shared/papel.ts'
 
 /**
@@ -10,6 +10,8 @@ import { clinicaDeQuemAtende } from '../_shared/papel.ts'
  *   { acao: 'teste', clinicId }  -> manda "teste" para os aparelhos DA PESSOA
  *   { acao: 'alerta_teste', clinicId } -> o alerta de urgencia, no WhatsApp
  *                                   dos numeros salvos em Preferencias
+ *   { acao: 'encaminhar', clinicId, conversaId } -> a conversa, como pedido,
+ *                                   nos mesmos numeros (25/10/2026)
  *
  * O aviso de verdade (mensagem da familia) nao passa por aqui: sai do proprio
  * meta-webhook, por _shared/push-da-equipe.ts, sem uma segunda requisicao que
@@ -20,7 +22,7 @@ import { clinicaDeQuemAtende } from '../_shared/papel.ts'
  * A pessoa aperta, ve (ou nao ve) chegar, e sabe na hora.
  */
 
-type Pedido = { acao?: 'chave' | 'teste' | 'alerta_teste'; clinicId?: string }
+type Pedido = { acao?: 'chave' | 'teste' | 'alerta_teste' | 'encaminhar'; clinicId?: string; conversaId?: string }
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
@@ -84,6 +86,49 @@ Deno.serve(async (req) => {
         agora: new Date(),
       })
       if (!r.envios.length) return json({ error: r.nota }, 404)
+      return json(r)
+    }
+
+    // "Mandar para o celular" na conversa aberta da Central (18/10/2026 no
+    // sistema do Dr. Marcello, trazido em 25/10/2026): a conversa vai ao
+    // WhatsApp do medico e da Dayane, para quando alguem quer a opiniao do
+    // medico. A resposta dele volta ao paciente pelo caminho do alerta
+    // (resposta-ao-alerta.ts). Qualquer pessoa com acesso a conversa manda: e a
+    // Dayane quem mais vai usar. O resultado vira nota na conversa.
+    if (corpo.acao === 'encaminhar') {
+      if (!corpo.clinicId || !corpo.conversaId) return json({ error: 'Conversa não informada.' }, 400)
+      // Pela sessao da pessoa: a RLS so devolve conversa de clinica em que ela esta ativa.
+      const { data: conversa, error: erroDaConversa } = await userClient(autorizacao)
+        .from('whatsapp_conversations')
+        .select('id,wa_id,profile_name,patient_id')
+        .eq('clinic_id', corpo.clinicId)
+        .eq('id', corpo.conversaId)
+        .maybeSingle()
+      if (erroDaConversa || !conversa) return json({ error: 'Sem acesso a esta conversa.' }, 403)
+      const { data: paciente } = conversa.patient_id
+        ? await admin.from('patients').select('name').eq('id', conversa.patient_id).maybeSingle()
+        : { data: null }
+      const { data: ultima } = await admin
+        .from('whatsapp_messages')
+        .select('body')
+        .eq('conversation_id', conversa.id)
+        .eq('direction', 'inbound')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      const r = await enviarAlertaDeUrgencia(admin, {
+        clinicId: corpo.clinicId,
+        motivo: 'pedido',
+        assunto: 'enviado pela Central',
+        quem: quemNoAlerta({
+          pacientes: paciente?.name ? [{ name: String(paciente.name) }] : [],
+          nomeDoPerfil: String(conversa.profile_name ?? ''),
+          telefone: String(conversa.wa_id ?? ''),
+        }),
+        texto: String(ultima?.body ?? '').trim() || 'Sem mensagem do paciente nesta conversa.',
+        agora: new Date(),
+        conversationId: conversa.id,
+      })
       return json(r)
     }
 

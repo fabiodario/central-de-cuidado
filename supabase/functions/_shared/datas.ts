@@ -34,17 +34,61 @@ function partesDaData(texto: string): [string, string, string] | null {
   const t = texto.trim()
   const exata = t.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})$/)
   if (exata) return [exata[1], exata[2], exata[3]]
+  // "02022024" e "020224", sem barra (17/10/2026, painel com IA): o cadastro
+  // nascia sem data e o robo seguia como se estivesse tudo certo. So a mensagem
+  // inteira: numero solto no meio de uma frase pode ser outra coisa.
+  const colada = t.match(/^(\d{2})(\d{2})(\d{4}|\d{2})$/)
+  if (colada) return [colada[1], colada[2], colada[3]]
+  // "12 3 2019", com espaco no lugar da barra (rodada 7 do painel: a data nao
+  // era aceita e o robo pedia de novo). So a mensagem inteira e com o ano de
+  // quatro digitos: "2 3 18" no meio de uma frase pode ser qualquer conta.
+  // Ano de dois digitos tambem, mas so a mensagem inteira (rodada 9: "3 4 24").
+  const espacada = t.replace(/[.!]+$/, '').match(/^(\d{1,2})\s+(\d{1,2})\s+(\d{4}|\d{2})$/)
+  if (espacada) return [espacada[1], espacada[2], espacada[3]]
 
-  const numericas = [...t.matchAll(/(?:^|[^\d/.-])(\d{1,2})[/.-](\d{1,2})[/.-](\d{4}|\d{2})(?![\d/.-])/g)]
+  // Ponto final depois do ano vale ("nasceu em 03/02/2020."): so recusa o ponto
+  // seguido de numero, que seria outra data colada (rodada 5 do painel).
+  const numericas = [...t.matchAll(/(?:^|[^\d/.-])(\d{1,2})[/.-](\d{1,2})[/.-](\d{4}|\d{2})(?![\d/-]|\.\d)/g)]
+  // Com espaco, no meio da frase (rodada 8 do painel): "12 1 2023. mas o nome
+  // dela eh maria luisa" e "lara souza lima nasceu 12 03 2019" fechavam o
+  // cadastro sem data. So com o ano inteiro de 19xx ou 20xx.
+  // O ponto final depois do ano vale (rodada 9: "nascido em 03 09 2019." dava
+  // zero datas); so o ponto seguido de numero, que seria outra data, nao.
+  const espacadas = [...t.matchAll(/(?:^|[^\d/.-])(\d{1,2})\s+(\d{1,2})\s+((?:19|20)\d{2})(?![\d/-]|\.\d|\s+\d)/g)]
   const normal = t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
   const porExtenso = [
     ...normal.matchAll(
-      /\b(\d{1,2})\s*(?:de\s+|\/\s*|-\s*)?(janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro|jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\.?\s*(?:de\s+|\/\s*|-\s*)?(\d{4})\b/g,
+      // "2 d julho de 2020" (rodada 9): o "d" no lugar do "de".
+      /\b(\d{1,2})\s*(?:de\s+|d\s+|\/\s*|-\s*)?(janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro|jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\.?\s*(?:de\s+|d\s+|\/\s*|-\s*)?(\d{4})\b/g,
     ),
   ]
-  if (numericas.length + porExtenso.length !== 1) return null
+  if (numericas.length + espacadas.length + porExtenso.length !== 1) return null
   if (numericas.length === 1) return [numericas[0][1], numericas[0][2], numericas[0][3]]
+  if (espacadas.length === 1) return [espacadas[0][1], espacadas[0][2], espacadas[0][3]]
   return [porExtenso[0][1], String(MESES[porExtenso[0][2]]), porExtenso[0][3]]
+}
+
+/**
+ * Dia e mes sem o ano ("31 de agosto", "31/08"), como "DD/MM" (17/10/2026).
+ *
+ * No painel com IA a mae de um bebe de 7 semanas respondeu "31 de agosto" e o
+ * cadastro saiu sem data. O ano nao se adivinha: o robo pergunta so o ano e
+ * junta com o que ja veio. Vindo do sistema do Dr. Marcello (25/10/2026).
+ */
+export function diaEMesSemAno(texto: string): string | null {
+  const t = texto.trim().normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[.!]+$/, '')
+  const numerica = t.match(/^(\d{1,2})\s*[/.-]\s*(\d{1,2})$/)
+  // "Ele nasceu dia 15 de julho" (rodada 8): no meio da frase, so com "de" e o
+  // mes inteiro, e sem ano nenhum na mensagem.
+  const porExtenso =
+    t.match(/^(?:dia\s+)?(\d{1,2})\s*(?:de\s+|\/\s*|-\s*)?([a-z]+)$/) ??
+    (/\b(19|20)\d{2}\b/.test(t)
+      ? null
+      : t.match(/\b(\d{1,2})\s+de?\s+(janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)\b/))
+  const dia = Number(numerica?.[1] ?? porExtenso?.[1])
+  const mes = numerica ? Number(numerica[2]) : porExtenso ? MESES[porExtenso[2]] : undefined
+  if (!dia || !mes || dia > 31 || mes > 12) return null
+  return `${String(dia).padStart(2, '0')}/${String(mes).padStart(2, '0')}`
 }
 
 export function dataDeNascimentoIso(

@@ -16,9 +16,10 @@ import {
   Stethoscope,
   Archive,
   ArchiveRestore,
+  CreditCard,
   UsersRound,
 } from 'lucide-react'
-import type { Consultation, ConsultationDraft, Patient } from '@/types/patient'
+import type { Consultation, ConsultationDraft, FollowupKey, Patient } from '@/types/patient'
 import type { PatientDraft } from '@/lib/store'
 import PatientRecord from '@/sections/PatientRecord'
 import { fmtBR, idade } from '@/lib/followup'
@@ -28,6 +29,7 @@ import { opcoesDeUnidade, useUnidades } from '@/lib/unidades'
 import { apagarParametrosDoEndereco, parametrosDoEndereco } from '@/lib/endereco'
 import { useVoltarDoCelular } from '@/lib/voltar-do-celular'
 import { publicoDaClinica } from '@/lib/publico'
+import { sexoAoDigitarNome } from '@/lib/sexo-pelo-nome'
 import {
   Sheet,
   SheetContent,
@@ -35,48 +37,6 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
-
-/**
- * Sugere o sexo pelo primeiro nome.
- *
- * Regra de terminacao, que da conta da maioria dos nomes brasileiros, mais uma
- * lista curta para o que a regra erraria ou nao alcancaria.
- *
- * Devolve null quando nao ha confianca, e nesse caso o campo fica como estava.
- * Chutar aqui e pior do que deixar a pessoa escolher: sexo entra no calculo de
- * percentil de crescimento, que e metade de uma consulta de gastropediatria.
- */
-const NOME_FEMININO = new Set([
-  'beatriz', 'iris', 'isis', 'ester', 'esther', 'raquel', 'rachel', 'isabel', 'ingrid',
-  'karen', 'karin', 'carmen', 'ruth', 'miriam', 'noemi', 'ellen', 'helen', 'nicole',
-  'alice', 'denise', 'thais', 'tais', 'lais', 'ines', 'mercedes', 'jasmim', 'yasmin',
-  'esther', 'lorena', 'agnes', 'sol',
-])
-const NOME_MASCULINO = new Set([
-  'luca', 'nicola', 'noa', 'gabriel', 'rafael', 'miguel', 'daniel', 'samuel', 'ismael',
-  'israel', 'joel', 'emanuel', 'manuel', 'matheus', 'mateus', 'lucas', 'nicolas', 'davi',
-  'david', 'levi', 'vinicius', 'anderson', 'jefferson', 'wesley', 'kaique', 'felipe',
-  'alexandre', 'andre', 'vicente', 'henrique', 'jorge', 'enzo', 'ravi', 'yuri', 'igor',
-  'heitor', 'arthur', 'artur', 'benjamin', 'bernardo', 'joao', 'luiz', 'luis', 'thomas',
-])
-
-function sexoPeloNome(nomeCompleto: string): 'F' | 'M' | null {
-  const primeiro = nomeCompleto
-    .trim()
-    .split(/\s+/)[0]
-    ?.normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-  if (!primeiro || primeiro.length < 3) return null
-
-  if (NOME_FEMININO.has(primeiro)) return 'F'
-  if (NOME_MASCULINO.has(primeiro)) return 'M'
-
-  const fim = primeiro.at(-1)
-  if (fim === 'a') return 'F'
-  if (fim === 'o') return 'M'
-  return null
-}
 
 /**
  * Casa o nome da unidade da agenda com a opcao do cadastro.
@@ -133,12 +93,48 @@ function AConferir() {
   )
 }
 
-function emptyDraft(unidadePadrao = ''): PatientDraft {
+/**
+ * O nome do cadastro veio do contato do WhatsApp, e nao da ficha (18/10/2026,
+ * vindo do sistema do Dr. Marcello, onde quase sempre era o nome da mae).
+ * Vermelho, como a alergia no prontuario.
+ */
+function NomeAConfirmar({ geral }: { geral: boolean }) {
+  return (
+    <span
+      title={
+        geral
+          ? 'O paciente não informou o nome no WhatsApp: o cadastro usa o nome do contato, que pode ser o de um parente. Confirme e corrija.'
+          : 'A família não informou o nome da criança no WhatsApp: o cadastro usa o nome do contato, que pode ser o da mãe ou do pai. Confirme e corrija.'
+      }
+      className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[#fceceb] px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-wide text-[#b42318]"
+    >
+      Nome a confirmar
+    </span>
+  )
+}
+
+/**
+ * O formulario aceita sexo em branco; o cadastro gravado, nao. Ate 24/10/2026
+ * o formulario abria com Feminino marcado (ver sexoAoDigitarNome).
+ */
+type FormularioDoPaciente = Omit<PatientDraft, 'sexo'> & { sexo: PatientDraft['sexo'] | '' }
+
+/**
+ * Convenio como a lista mostra (25/10/2026, vindo do sistema do Dr. Marcello,
+ * a pedido do Edu): campo vazio aparece como Particular. Aqui o formulario
+ * continua abrindo vazio - no Dr. Fabio boa parte vem por convenio (Porto,
+ * Unimed, Santa Saude), e o campo preenchido sozinho seria dado presumido.
+ */
+function convenioNaLista(convenio: string): string {
+  return convenio.trim() || 'Particular'
+}
+
+function emptyDraft(unidadePadrao = ''): FormularioDoPaciente {
   return {
     nome: '',
     responsavel: '',
     nascimento: '',
-    sexo: 'F',
+    sexo: '',
     cpf: '',
     email: '',
     telefone: '',
@@ -205,6 +201,8 @@ function initials(name: string) {
 
 interface Props {
   patients: Patient[]
+  /** Etapas ligadas em Preferencias (19/10/2026): a ficha mostra so elas. */
+  etapas?: FollowupKey[]
   addPatient: (draft: PatientDraft) => Promise<Patient>
   updatePatient: (id: string, patch: Partial<Patient>) => Promise<void>
   removePatient: (id: string) => Promise<void>
@@ -247,6 +245,7 @@ interface Props {
 
 export default function Patients({
   patients,
+  etapas = ['d15', 'd30', 'm90'],
   addPatient,
   updatePatient,
   removePatient,
@@ -319,9 +318,13 @@ export default function Patients({
   const [mesFiltro, setMesFiltro] = useState('')
   const [anoFiltro, setAnoFiltro] = useState('')
   const [filtroAberto, setFiltroAberto] = useState(false)
+  // Vazio e "todos". Compara pelo que a lista mostra: cadastro sem convenio
+  // entra em Particular.
+  const [convenioFiltro, setConvenioFiltro] = useState('')
+  const [grupo, setGrupo] = useState<'atendidos' | 'pre'>('atendidos')
   const [formOpen, setFormOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
-  const [form, setForm] = useState<PatientDraft>(emptyDraft)
+  const [form, setForm] = useState<FormularioDoPaciente>(emptyDraft)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const [recordPatientId, setRecordPatientId] = useState<string | null>(null)
@@ -335,6 +338,7 @@ export default function Patients({
     setEditingId(null)
     // O que vem da conversa ou da consulta e preenchido; o resto do formulario
     // continua em branco de proposito, para ninguem salvar dado presumido.
+    const sexoInicial = sexoAoDigitarNome(preCadastro?.nome ?? '', '', false)
     const sugerido = preCadastro
       ? {
           nome: preCadastro.nome,
@@ -344,7 +348,7 @@ export default function Patients({
           unidadeEquivalente(preCadastro.unidade, opcoesDeUnidade(unidadesDaClinica))
             ? { unidade: unidadeEquivalente(preCadastro.unidade, opcoesDeUnidade(unidadesDaClinica))! }
             : {}),
-          ...((sexoPeloNome(preCadastro.nome) && { sexo: sexoPeloNome(preCadastro.nome)! }) || {}),
+          ...(sexoInicial.sexo ? { sexo: sexoInicial.sexo } : {}),
           // A ficha do WhatsApp entra preenchida, para a equipe conferir em vez
           // de digitar. A data so entra quando e uma data de verdade: "março de
           // 2019" fica de fora e a recepcao pergunta.
@@ -355,7 +359,7 @@ export default function Patients({
         }
       : {}
     setForm({ ...emptyDraft(unidadesDaClinica[0]), ...sugerido })
-    setSexoSugerido(Boolean(preCadastro?.nome && sexoPeloNome(preCadastro.nome)))
+    setSexoSugerido(sexoInicial.sugerido)
     setError('')
     setFormOpen(true)
     // preCadastro fica fora das dependencias: quem manda abrir o formulario e o
@@ -363,7 +367,7 @@ export default function Patients({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openCreateSignal])
 
-  const filtered = useMemo(() => {
+  const doFiltro = useMemo(() => {
     const normalized = query.trim().toLowerCase()
     let lista = patients
 
@@ -373,6 +377,12 @@ export default function Patients({
           .join(' ')
           .toLowerCase()
           .includes(normalized),
+      )
+    }
+
+    if (convenioFiltro) {
+      lista = lista.filter(
+        (patient) => convenioNaLista(patient.convenio).toLowerCase() === convenioFiltro.toLowerCase(),
       )
     }
 
@@ -394,7 +404,31 @@ export default function Patients({
       ordenada.sort((a, b) => (b.dataConsulta || '').localeCompare(a.dataConsulta || ''))
     }
     return ordenada
-  }, [patients, query, ordem, mesFiltro, anoFiltro])
+  }, [patients, query, ordem, mesFiltro, anoFiltro, convenioFiltro])
+
+  // Atendidos e pre-agendados (25/10/2026, ver lib/paciente-atendido.ts). Sem
+  // a marca (a leitura da agenda falhou), nao ha abas: a lista fica toda junta.
+  const temGrupos = patients.some((patient) => patient.atendido !== undefined)
+  const ehPre = (patient: Patient) => patient.atendido === false
+  const contagem = {
+    atendidos: doFiltro.filter((patient) => !ehPre(patient)).length,
+    pre: doFiltro.filter(ehPre).length,
+  }
+  const filtered = temGrupos
+    ? doFiltro.filter((patient) => (grupo === 'pre' ? ehPre(patient) : !ehPre(patient)))
+    : doFiltro
+  const totalAtendidos = patients.filter((patient) => !ehPre(patient)).length
+  const totalPre = patients.length - totalAtendidos
+
+  /** Convenios que existem na base, para o filtro; grafias diferentes viram um so. */
+  const conveniosDisponiveis = useMemo(() => {
+    const porChave = new Map<string, string>()
+    for (const patient of patients) {
+      const nome = convenioNaLista(patient.convenio)
+      if (!porChave.has(nome.toLowerCase())) porChave.set(nome.toLowerCase(), nome)
+    }
+    return [...porChave.values()].sort((a, b) => a.localeCompare(b, 'pt-BR'))
+  }, [patients])
 
   /** Anos que realmente existem na base, para o filtro nao oferecer vazio. */
   const anosDisponiveis = useMemo(() => {
@@ -456,8 +490,14 @@ export default function Patients({
     apagarParametrosDoEndereco(['paciente'])
   }, [])
 
-  function set<K extends keyof PatientDraft>(key: K, value: PatientDraft[K]) {
+  function set<K extends keyof FormularioDoPaciente>(key: K, value: FormularioDoPaciente[K]) {
     setForm((current) => ({ ...current, [key]: value }))
+  }
+
+  function mudarNome(nome: string) {
+    const { sexo, sugerido } = sexoAoDigitarNome(nome, form.sexo, sexoSugerido)
+    setForm((current) => ({ ...current, nome, sexo }))
+    setSexoSugerido(sugerido)
   }
 
   function createNew() {
@@ -512,13 +552,25 @@ export default function Patients({
       setError('Informe a data da consulta.')
       return
     }
+    // Sexo comeca em branco e e obrigatorio (24/10/2026, vindo do sistema do
+    // Dr. Marcello): o formulario abria com Feminino marcado, e quem nao
+    // reparava salvava errado.
+    if (!form.sexo) {
+      setError(
+        geral
+          ? 'Escolha o sexo do paciente. Se não foi informado, use "Outro / não informado".'
+          : 'Escolha o sexo do paciente: ele entra nas curvas de crescimento. Se a família não informou, use "Outro / não informado".',
+      )
+      return
+    }
+    const cadastro: PatientDraft = { ...form, sexo: form.sexo }
 
     setSaving(true)
     try {
       if (editingId) {
-        await updatePatient(editingId, form)
+        await updatePatient(editingId, cadastro)
       } else {
-        const patient = await addPatient(form)
+        const patient = await addPatient(cadastro)
         if (abrirProntuario) {
           setRecordPatientId(patient.id)
           setStartConsultationPatientId(patient.id)
@@ -555,10 +607,20 @@ export default function Patients({
               </span>
               <div>
                 <p className="text-[9px] font-extrabold uppercase tracking-[0.15em] text-[#1f4f78]">Base ativa</p>
-                <div className="mt-1 flex items-baseline gap-2">
-                  <span className="text-3xl font-extrabold tracking-[-0.05em] text-[#081b2c]">{patients.length}</span>
-                  <span className="text-xs font-semibold text-slate-400">{patients.length === 1 ? 'paciente cadastrado' : 'pacientes cadastrados'}</span>
-                </div>
+                {temGrupos ? (
+                  <div className="mt-1 flex flex-wrap items-baseline gap-x-2">
+                    <span className="text-3xl font-extrabold tracking-[-0.05em] text-[#081b2c]">{totalAtendidos}</span>
+                    <span className="text-xs font-semibold text-slate-400">
+                      {totalAtendidos === 1 ? 'paciente atendido' : 'pacientes atendidos'}
+                      {totalPre > 0 && ` · ${totalPre} ${totalPre === 1 ? 'pré-agendado' : 'pré-agendados'}`}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="mt-1 flex items-baseline gap-2">
+                    <span className="text-3xl font-extrabold tracking-[-0.05em] text-[#081b2c]">{patients.length}</span>
+                    <span className="text-xs font-semibold text-slate-400">{patients.length === 1 ? 'paciente cadastrado' : 'pacientes cadastrados'}</span>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -575,6 +637,31 @@ export default function Patients({
           </div>
         </div>
       </section>
+
+      {temGrupos && !mostrandoArquivados && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <div className="inline-flex rounded-2xl bg-[#eef3f2] p-1">
+            {(['atendidos', 'pre'] as const).map((qual) => (
+              <button
+                key={qual}
+                type="button"
+                onClick={() => setGrupo(qual)}
+                className={`rounded-xl px-3.5 py-2 text-[11px] font-extrabold transition ${
+                  grupo === qual ? 'bg-white text-[#081b2c] shadow-sm' : 'text-[#557f75] hover:text-[#081b2c]'
+                }`}
+              >
+                {qual === 'atendidos' ? 'Atendidos' : 'Pré-agendados'}
+                <span className="ml-1.5 text-slate-400">{contagem[qual]}</span>
+              </button>
+            ))}
+          </div>
+          {grupo === 'pre' && (
+            <p className="text-[10px] font-semibold text-slate-400">
+              Marcaram e ainda não vieram, cancelaram ou faltaram. Passam para Atendidos quando a presença é marcada ou o prontuário é escrito.
+            </p>
+          )}
+        </div>
+      )}
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <div className="relative flex-1">
@@ -618,6 +705,28 @@ export default function Patients({
             <CalendarDays className="h-3.5 w-3.5" />
             {anoFiltro ? `${mesFiltro ? mesFiltro + '/' : ''}${anoFiltro}` : 'Período'}
           </button>
+
+          <label
+            className={`inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-[10px] font-extrabold transition ${
+              convenioFiltro ? 'bg-[#081b2c] text-white' : 'bg-[#eef3f2] text-[#557f75] hover:bg-[#e2ece9]'
+            }`}
+            title="Filtrar por convênio"
+          >
+            <CreditCard className="h-3.5 w-3.5" />
+            <select
+              value={convenioFiltro}
+              onChange={(event) => setConvenioFiltro(event.target.value)}
+              aria-label="Filtrar por convênio"
+              className="cursor-pointer appearance-none bg-transparent font-extrabold outline-none"
+            >
+              <option value="" className="text-[#081b2c]">Convênio</option>
+              {conveniosDisponiveis.map((nome) => (
+                <option key={nome} value={nome} className="text-[#081b2c]">
+                  {nome}
+                </option>
+              ))}
+            </select>
+          </label>
 
           <button
             type="button"
@@ -792,17 +901,34 @@ export default function Patients({
                     {patient.nome}
                   </p>
                   {patient.criadoAutomaticamenteEm && <AConferir />}
+                  {patient.nomeDoContatoEm && <NomeAConfirmar geral={geral} />}
                 </div>
                 <p className="truncate text-[10px] text-slate-400">
                   {[
                     patient.dataConsulta ? `Consulta ${fmtBR(patient.dataConsulta)}` : null,
                     [patient.cidade, patient.bairro].filter(Boolean).join(' · ') || null,
-                    patient.convenio || null,
                   ]
                     .filter(Boolean)
                     .join('  ·  ')}
+                  {/* No computador o convenio tem coluna propria; no celular
+                      ela nao cabe ao lado do nome e ele fica nesta linha. */}
+                  <span className="sm:hidden">{'  ·  '}{convenioNaLista(patient.convenio)}</span>
                 </p>
               </div>
+
+              {/* Proposta 1 escolhida pelo Edu (25/10/2026): com "Particular"
+                  gravado em quase todos, as etiquetas tinham ficado todas
+                  iguais. Particular vira texto claro, sem caixa; convenio
+                  ganha a etiqueta cheia e aparece de longe na rolagem. */}
+              <span className="hidden w-28 shrink-0 justify-center sm:flex" title={`Convênio: ${convenioNaLista(patient.convenio)}`}>
+                {convenioNaLista(patient.convenio).toLowerCase() === 'particular' ? (
+                  <span className="text-[10px] font-semibold text-[#b4bfcc]">Particular</span>
+                ) : (
+                  <span className="max-w-full truncate rounded-full bg-[#1f4f78] px-3 py-1 text-[10px] font-extrabold text-white">
+                    {convenioNaLista(patient.convenio)}
+                  </span>
+                )}
+              </span>
 
               <div className="flex shrink-0 items-center gap-1">
                 {/* No celular, so o icone: a palavra "Prontuario" comia a
@@ -855,6 +981,7 @@ export default function Patients({
                       <div className="flex items-center gap-1.5">
                         <h2 className="truncate text-sm font-extrabold uppercase tracking-[-0.01em] text-[#081b2c]">{patient.nome}</h2>
                         {patient.criadoAutomaticamenteEm && <AConferir />}
+                        {patient.nomeDoContatoEm && <NomeAConfirmar geral={geral} />}
                       </div>
                       <p className="mt-1 text-[10px] font-semibold text-slate-400">
                         {idade(patient.nascimento)} · {patient.sexo === 'F' ? 'Feminino' : patient.sexo === 'M' ? 'Masculino' : 'Outro / NI'}
@@ -902,7 +1029,7 @@ export default function Patients({
               </div>
 
               <div className="mt-4 grid grid-cols-2 gap-2 border-t border-[#081b2c]/[0.06] pt-3">
-                {(['d15', 'd30', 'm90'] as const).map((key) => (
+                {(['d15', 'd30', 'm90'] as const).filter((key) => etapas.includes(key)).map((key) => (
                   <div key={key} className="flex items-center justify-between gap-2 rounded-xl bg-[#faf9f7] px-2.5 py-2">
                     <span className="text-[9px] font-extrabold text-slate-400">{FOLLOWUP_LABEL[key]}</span>
                     <StatusBadge status={patient.followups[key].status} />
@@ -919,17 +1046,15 @@ export default function Patients({
                 Abrir prontuário
               </button>
 
-              {(patient.responsavel || patient.convenio || patient.observacoes) && (
-                <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[9px] font-semibold text-slate-400">
-                  {patient.responsavel && (
-                    <span className="inline-flex items-center gap-1"><CircleUserRound className="h-3 w-3" /> Resp. {patient.responsavel}</span>
-                  )}
-                  {patient.convenio && <span>Convênio: {patient.convenio}</span>}
-                  {patient.telefone && (
-                    <span className="inline-flex items-center gap-1"><MessageCircle className="h-3 w-3" /> {patient.telefone}</span>
-                  )}
-                </div>
-              )}
+              <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[9px] font-semibold text-slate-400">
+                {patient.responsavel && (
+                  <span className="inline-flex items-center gap-1"><CircleUserRound className="h-3 w-3" /> Resp. {patient.responsavel}</span>
+                )}
+                <span>Convênio: {convenioNaLista(patient.convenio)}</span>
+                {patient.telefone && (
+                  <span className="inline-flex items-center gap-1"><MessageCircle className="h-3 w-3" /> {patient.telefone}</span>
+                )}
+              </div>
             </article>
           ))}
         </div>
@@ -967,7 +1092,7 @@ export default function Patients({
 
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Nome do paciente" required className="sm:col-span-2">
-                <input className={inputClass} value={form.nome} onChange={(event) => set('nome', event.target.value)} placeholder={geral ? 'Nome completo do paciente' : 'Nome completo da criança'} />
+                <input className={inputClass} value={form.nome} onChange={(event) => mudarNome(event.target.value)} placeholder={geral ? 'Nome completo do paciente' : 'Nome completo da criança'} />
               </Field>
               <Field label="Responsável">
                 <input className={inputClass} value={form.responsavel} onChange={(event) => set('responsavel', event.target.value)} placeholder={geral ? 'Pai, mãe ou tutor, se for menor de idade' : 'Nome do pai, mãe ou tutor'} />
@@ -1009,7 +1134,7 @@ export default function Patients({
                   inputMode="email"
                 />
               </Field>
-              <Field label="Sexo">
+              <Field label="Sexo" required>
                 <select
                   className={inputClass}
                   value={form.sexo}
@@ -1019,6 +1144,7 @@ export default function Patients({
                     set('sexo', event.target.value as PatientDraft['sexo'])
                   }}
                 >
+                  <option value="" disabled>Escolha</option>
                   <option value="F">Feminino</option>
                   <option value="M">Masculino</option>
                   <option value="O">Outro / não informado</option>

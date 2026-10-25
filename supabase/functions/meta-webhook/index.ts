@@ -1,10 +1,17 @@
 import '../_shared/whatsapp.ts'
 import { adminClient, digits, sha256HmacHex, safeEqual } from '../_shared/whatsapp.ts'
-import { colherEventos, type Estado, type Toque, tratarConversa } from '../_shared/atendimento.ts'
+import { colherEventos, etiquetaQueFica, type Estado, type Toque, tratarConversa } from '../_shared/atendimento.ts'
 import { montarMensagens } from '../_shared/conteudo.ts'
 import { RegistroDeEventos } from '../_shared/eventos-do-webhook.ts'
 import { variantesDoTelefone } from '../_shared/telefone-br.ts'
-import { semRespostaDoRobo, textoDaLocalizacao, textoDosContatos } from '../_shared/mensagem-recebida.ts'
+import {
+  destinoDaNaoSuportada,
+  semRespostaDoRobo,
+  textoDaLocalizacao,
+  textoDosContatos,
+  TEXTO_NAO_SUPORTADA,
+} from '../_shared/mensagem-recebida.ts'
+import { roboRespondeNaConversa } from '../_shared/robo-da-conversa.ts'
 import { chaveDoWhatsApp } from '../_shared/whatsapp-teste.ts'
 import { montarAviso } from '../_shared/aviso-da-equipe.ts'
 import { avisarEquipe } from '../_shared/push-da-equipe.ts'
@@ -16,7 +23,7 @@ import {
   quemNoAlerta,
   whatsAppPelaApi,
 } from '../_shared/alerta-de-urgencia.ts'
-import { tratarRespostaDaEquipe } from '../_shared/resposta-ao-alerta.ts'
+import { repassarRespostaDoPaciente, tratarRespostaDaEquipe } from '../_shared/resposta-ao-alerta.ts'
 import {
   BOTOES_URGENCIA_OU_DUVIDA,
   contextoDaLeitura,
@@ -35,6 +42,10 @@ import {
   precisaEsperar,
   qualquerMensagem,
   rajadaJaRespondida,
+  anteriorEmCurso,
+  ESPERA_PELA_ANTERIOR_MS,
+  JANELA_DA_FILA_MS,
+  type EventoDeMensagem,
 } from '../_shared/rajada.ts'
 
 // O runtime das Edge Functions deixa terminar trabalho depois da resposta.
@@ -264,13 +275,26 @@ Deno.serve(async (req) => {
     registro = new RegistroDeEventos({
       inserir: (linha) => admin.from('whatsapp_webhook_events').insert(linha),
       apagar: (chave) => admin.from('whatsapp_webhook_events').delete().eq('event_key', chave),
+      // Conclusao e retomada (23/10/2026, vindo do sistema do Dr. Marcello): ver
+      // eventos-do-webhook.ts. Condicional: so a linha sem conclusao e gravada
+      // antes do corte. Dois reenvios ao mesmo tempo nao retomam juntos (o
+      // primeiro move processed_at).
+      concluir: (chave) =>
+        admin.from('whatsapp_webhook_events').update({ concluded_at: new Date().toISOString() }).eq('event_key', chave),
+      retomar: (chave, gravadoAntesDe) =>
+        admin.from('whatsapp_webhook_events')
+          .update({ processed_at: new Date().toISOString() })
+          .eq('event_key', chave)
+          .is('concluded_at', null)
+          .lt('processed_at', gravadoAntesDe)
+          .select('event_key'),
     })
 
     for (const entry of payload.entry ?? []) {
       for (const change of entry.changes ?? []) {
         // Tudo que veio antes terminou; um erro daqui ate o proximo registrar
         // nao pertence a nenhum evento.
-        registro.concluir()
+        await registro.concluir()
         if (change.field !== 'messages') continue
         const value = change.value ?? {}
         const phoneNumberId = String(value.metadata?.phone_number_id ?? '')
@@ -318,7 +342,7 @@ Deno.serve(async (req) => {
 
         for (const message of value.messages ?? []) {
           // A mensagem anterior do lote terminou (inclusive pelos continue).
-          registro.concluir()
+          await registro.concluir()
           const externalId = String(message.id ?? '')
           if (!externalId) continue
 
@@ -525,6 +549,34 @@ Deno.serve(async (req) => {
           // Em try/catch e com limite: a espera e cortesia. Se a consulta
           // falhar ou o tempo acabar, segue como antes - com aviso no log.
           let complementoDeRajada = false
+          // Antes de tudo, a fila (24/10/2026, vindo do sistema do Dr. Marcello;
+          // ver anteriorEmCurso em _shared/rajada.ts): se a mensagem anterior
+          // desta pessoa ainda esta sendo atendida - mesmo antes de ser
+          // gravada -, esta espera ela terminar. A espera abaixo so enxerga
+          // mensagem ja gravada.
+          try {
+            const inicioDaFila = Date.now()
+            let esperou = false
+            while (Date.now() - inicioDaFila < ESPERA_PELA_ANTERIOR_MS) {
+              const { data: eventos, error: erroDaFila } = await admin
+                .from('whatsapp_webhook_events')
+                .select('id,event_key,concluded_at')
+                .eq('event_kind', 'message')
+                .eq('payload->change->value->messages->0->>from', String(message.from ?? ''))
+                .gte('processed_at', new Date(Date.now() - JANELA_DA_FILA_MS).toISOString())
+              if (erroDaFila) throw erroDaFila
+              const fila: EventoDeMensagem[] = ((eventos ?? []) as { id: number; event_key: string; concluded_at: string | null }[])
+                .map((e) => ({ id: Number(e.id), chave: String(e.event_key), concluidoEm: e.concluded_at }))
+              if (!anteriorEmCurso(fila, `message:${externalId}`)) break
+              esperou = true
+              await new Promise((ok) => setTimeout(ok, 500))
+            }
+            if (esperou && Date.now() - inicioDaFila >= ESPERA_PELA_ANTERIOR_MS) {
+              console.warn('Fila: a mensagem anterior desta pessoa nao terminou a tempo; seguindo assim mesmo', waId)
+            }
+          } catch (erro) {
+            console.warn('Fila: nao consegui conferir a mensagem anterior desta pessoa; seguindo sem esperar', erro)
+          }
           try {
             const { data: conversaDaRajada } = await admin
               .from('whatsapp_conversations')
@@ -671,11 +723,15 @@ Deno.serve(async (req) => {
           // Lembrete de consulta nas ultimas 48h, ainda que nao seja a ultima
           // mensagem nossa (06/10/2026). Ver lembreteRecente em lembrete.ts.
           let comLembreteRecente = false
+          // A ultima mensagem nossa foi o lembrete em si (20/10/2026, vindo do
+          // sistema do Dr. Marcello): so ai "sim" e "ok" confirmam. Ver
+          // interpretarResposta.
+          let ultimaFoiLembrete = false
           if (conversaAnterior?.id) {
             const [ultimoNossoResult, ultimoHumanoResult, ultimoAcompanhamentoResult, ultimoLembreteResult] = await Promise.all([
               admin
                 .from('whatsapp_messages')
-                .select('followup_id,appointment_id,created_at,external_message_id')
+                .select('followup_id,appointment_id,created_at,external_message_id,template_name')
                 .eq('conversation_id', conversaAnterior.id)
                 .eq('direction', 'outbound')
                 .order('created_at', { ascending: false })
@@ -730,6 +786,10 @@ Deno.serve(async (req) => {
               }
             }
             respondendoEnvioNosso = dentroDaJanelaDeResposta(ultimoNossoResult.data, Date.now(), consultaAindaMarcada)
+            {
+              const u = ultimoNossoResult.data as { appointment_id?: string | null; followup_id?: string | null; template_name?: string | null } | null
+              ultimaFoiLembrete = respondendoEnvioNosso && Boolean(u?.appointment_id && !u.followup_id && u.template_name)
+            }
             // Falha aqui custa so o tratamento especial do pos-consulta: a
             // mensagem segue o caminho de sempre. Mas avisa, para nao virar
             // mais um defeito mudo.
@@ -788,6 +848,7 @@ Deno.serve(async (req) => {
             escolhido,
             respondendoEnvioNosso,
             comLembreteRecente && !equipeFalouRecentemente,
+            ultimaFoiLembrete,
           )
           const { respondeuLembrete, optedOut, paraTudo, isWell, pediuAjuda, motivoAtencao } = resposta
           // A conversa so fica "nao quer receber" quando e para nao receber
@@ -887,6 +948,63 @@ Deno.serve(async (req) => {
           }
           if (messageError) throw messageError
 
+          // O paciente citou uma mensagem nossa (o "responder" do WhatsApp,
+          // 20/10/2026, vindo do sistema do Dr. Marcello): a tela mostra a
+          // citacao em cima do balao. Coluna nova, gravada a parte - sem ela,
+          // so a citacao some.
+          const idCitado = message.context?.id
+          if (idCitado && externalId) {
+            try {
+              const { data: citada } = await admin
+                .from('whatsapp_messages')
+                .select('id')
+                .eq('conversation_id', conversation.id)
+                .eq('external_message_id', idCitado)
+                .maybeSingle()
+              if (citada?.id) {
+                const { error: erroCitacao } = await admin
+                  .from('whatsapp_messages')
+                  .update({ responde_a: citada.id })
+                  .eq('conversation_id', conversation.id)
+                  .eq('external_message_id', externalId)
+                if (erroCitacao) throw erroCitacao
+              }
+            } catch (erro) {
+              console.warn('Nao gravei qual mensagem o paciente citou', erro)
+            }
+          }
+
+          // O paciente respondendo a uma conversa que o medico (ou a Dayane)
+          // esta levando pelo WhatsApp dele (18/10/2026, vindo do sistema do
+          // Dr. Marcello): a mensagem vai aos celulares, na mesma conversa. Ver
+          // repassarRespostaDoPaciente. O robo segue como sempre: quem respondeu
+          // pelo celular e gente falando, e ele ja fica quieto.
+          try {
+            if (numerosDoAlerta === undefined) numerosDoAlerta = await lerNumerosDoAlerta(admin, clinicId)
+            if (numerosDoAlerta?.length) {
+              await repassarRespostaDoPaciente(
+                {
+                  admin,
+                  clinicId,
+                  agora: new Date(),
+                  numeros: numerosDoAlerta,
+                  enviarWhatsApp: whatsAppPelaApi(phoneNumberId, chaveDoWhatsApp(phoneNumberId)),
+                },
+                {
+                  conversationId: conversation.id,
+                  quem: quemNoAlerta({
+                    pacientes,
+                    nomeDoPerfil: nomeDoPerfil || String(conversaAnterior?.profile_name ?? ''),
+                    telefone: waId,
+                  }),
+                  texto: body,
+                },
+              )
+            }
+          } catch (erro) {
+            console.warn('Repasse do paciente aos celulares falhou; segue como sempre', erro)
+          }
+
           if (patient?.id && optedOut) {
             if (paraTudo) {
               await admin.from('patients').update({ whatsapp_opt_out_at: receivedAt }).eq('id', patient.id)
@@ -961,6 +1079,57 @@ Deno.serve(async (req) => {
             return envio.ok
           }
 
+          // Robo desligado so nesta conversa pela equipe (23/10/2026, vindo do
+          // sistema do Dr. Marcello; ver _shared/robo-da-conversa.ts). Coluna
+          // nova, lida a parte: sem ela, o robo responde como antes - e o log
+          // diz por que.
+          let roboDesligadoNaConversaEm: string | null = null
+          if (linhaAnterior) {
+            try {
+              const { data: chave, error: erroDaChave } = await admin
+                .from('whatsapp_conversations')
+                .select('robo_desligado_em')
+                .eq('clinic_id', clinicId)
+                .eq('wa_id', waId)
+                .maybeSingle()
+              if (erroDaChave) throw erroDaChave
+              roboDesligadoNaConversaEm = (chave as { robo_desligado_em?: string | null } | null)?.robo_desligado_em ?? null
+            } catch (erro) {
+              console.warn('Sem whatsapp_conversations.robo_desligado_em; o robo responde nesta conversa como antes', erro)
+            }
+          }
+          const roboLigadoAqui = roboRespondeNaConversa({
+            ligadoNaClinica: settings.whatsapp_autoreply_enabled,
+            desligadoNaConversaEm: roboDesligadoNaConversaEm,
+          })
+
+          // Mensagem que o WhatsApp nao mostra (16/10/2026, vindo do sistema do
+          // Dr. Marcello; ver destinoDaNaoSuportada). A janela de 24h so conta
+          // mensagem que a pessoa escreveu de verdade: "[unsupported]" nao abre
+          // a janela, e responder texto livre ali volta "Message undeliverable".
+          let destinoNaoSuportada = destinoDaNaoSuportada(message.type, false)
+          if (destinoNaoSuportada !== 'normal') {
+            let janelaAberta = false
+            try {
+              const { data: escrita, error: erroDaJanela } = await admin
+                .from('whatsapp_messages')
+                .select('id')
+                .eq('conversation_id', conversation.id)
+                .eq('direction', 'inbound')
+                .neq('message_type', 'unsupported')
+                .gte('created_at', new Date(Date.now() - 24 * 3600 * 1000).toISOString())
+                .limit(1)
+                .maybeSingle()
+              if (erroDaJanela) throw erroDaJanela
+              janelaAberta = Boolean(escrita)
+            } catch (erro) {
+              // Na duvida, janela fechada: o pior caso e a equipe mandar um
+              // modelo quando o texto livre teria passado - nada falha.
+              console.warn('Nao consegui ver a janela de 24h; tratando como fechada', erro)
+            }
+            destinoNaoSuportada = destinoDaNaoSuportada(message.type, janelaAberta)
+          }
+
           // ---- Atendimento automatico ----
           //
           // Um unico ponto decide o que responder: menu, informacoes,
@@ -981,7 +1150,8 @@ Deno.serve(async (req) => {
             !pediuAjuda &&
             !complementoDeRajada &&
             !semRespostaDoRobo(message.type) &&
-            settings.whatsapp_autoreply_enabled
+            destinoNaoSuportada === 'normal' &&
+            roboLigadoAqui
           ) {
             // Segunda leitura pelo Jev (17/10/2026, DESLIGADA por padrao; o modo
             // vem de Preferencias, a chave dos segredos): ver
@@ -1111,9 +1281,14 @@ Deno.serve(async (req) => {
                   .eq('id', conversation.id)
               }
               if (resultado.atencao) {
+                // Urgencia e sangramento nao descem por outra etiqueta, e
+                // pendencia com a equipe nao desce para etiqueta so
+                // informativa (25/10/2026, vindo do sistema do Dr. Marcello).
+                // Ver etiquetaQueFica.
+                const etiqueta = etiquetaQueFica(conversaAnterior, resultado.atencao)
                 const { error: erroDaBandeira } = await admin
                   .from('whatsapp_conversations')
-                  .update({ needs_attention: true, attention_reason: resultado.atencao })
+                  .update({ needs_attention: true, attention_reason: etiqueta })
                   .eq('id', conversation.id)
                 // Motivo novo, banco antigo.
                 //
@@ -1269,6 +1444,59 @@ Deno.serve(async (req) => {
               }
             } catch (erro) {
               console.warn('Notificacao no celular: nao consegui montar o aviso', erro)
+            }
+          }
+
+          // Mensagem que o WhatsApp nao mostra: o robo nao manda o menu (ver
+          // destinoDaNaoSuportada). Com a janela aberta pede texto; fechada,
+          // nao responde - falharia - e a conversa acende para a equipe, com a
+          // etiqueta que diz para usar um modelo. Tudo em try/catch: falhar
+          // aqui nao pode derrubar o resto.
+          if (destinoNaoSuportada !== 'normal' && !foraDaLista && !optedOut) {
+            try {
+              let respondeu = false
+              if (destinoNaoSuportada === 'pedir_texto' && roboLigadoAqui && !equipeFalouRecentemente) {
+                respondeu = await responder(TEXTO_NAO_SUPORTADA)
+              }
+              if (!respondeu) {
+                const motivo = destinoNaoSuportada === 'so_equipe' ? 'nao_suportada' : 'atendente'
+                const { error: erroDaEtiqueta } = await admin
+                  .from('whatsapp_conversations')
+                  .update({ needs_attention: true, attention_reason: motivo })
+                  .eq('id', conversation.id)
+                // Motivo novo, banco antigo: 'atendente' sempre passa.
+                if (erroDaEtiqueta) {
+                  console.warn('Etiqueta nao_suportada recusada pelo banco; marcando como atendente', erroDaEtiqueta)
+                  await admin
+                    .from('whatsapp_conversations')
+                    .update({ needs_attention: true, attention_reason: 'atendente' })
+                    .eq('id', conversation.id)
+                }
+                const aviso = montarAviso({
+                  conversationId: conversation.id,
+                  atencaoAntes: Boolean(conversaAnterior?.needs_attention),
+                  motivoAntes: (conversaAnterior?.attention_reason as string | null) ?? null,
+                  motivoAgora: motivo,
+                  texto: 'Tentou falar (talvez uma ligação pelo WhatsApp)',
+                  pacientes,
+                  nomeDoPerfil: nomeDoPerfil || String(conversaAnterior?.profile_name ?? ''),
+                  telefone: waId,
+                })
+                if (aviso) {
+                  const envio = avisarEquipe(admin, clinicId, aviso)
+                  if (typeof EdgeRuntime !== 'undefined') EdgeRuntime.waitUntil(envio)
+                  else await envio
+                }
+              }
+              const { error: erroDoEvento } = await admin.from('whatsapp_bot_events').insert({
+                clinic_id: clinicId,
+                conversation_id: conversation.id,
+                evento: 'nao_suportada',
+                detalhe: respondeu ? 'pediu_texto' : 'passou_a_equipe',
+              })
+              if (erroDoEvento) console.warn('Nao consegui registrar o evento nao_suportada', erroDoEvento)
+            } catch (erro) {
+              console.warn('Mensagem nao suportada: nao consegui avisar a equipe', erro)
             }
           }
 
@@ -1451,7 +1679,7 @@ Deno.serve(async (req) => {
         }
 
         for (const delivery of value.statuses ?? []) {
-          registro.concluir()
+          await registro.concluir()
           const externalId = String(delivery.id ?? '')
           const status = String(delivery.status ?? '')
           if (!externalId || statusRank[status] === undefined) continue
@@ -1514,6 +1742,8 @@ Deno.serve(async (req) => {
       }
     }
 
+    // O ultimo evento do lote tambem terminou.
+    await registro.concluir()
     return text('EVENT_RECEIVED')
   } catch (error) {
     console.error(error)

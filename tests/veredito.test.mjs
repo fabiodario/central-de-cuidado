@@ -36,6 +36,9 @@ await caso('os dois textos, em nome do medico da clinica, sem travessao', () => 
   const urgente = V.textoDoVeredito('urgente', FABIO)
   const calmo = V.textoDoVeredito('nao_urgente', FABIO)
   assert.match(urgente, /^🚨 O Dr\. Fábio viu a sua mensagem e orienta: \*procure o pronto-socorro agora\*/)
+  // Relatorio da Cintia (25/10/2026): o pronto-socorro que atende ao plano, sem hospital fixo.
+  assert.match(urgente, /\n\nEm caso de urgência, emergência ou sangramento intenso, dirija-se imediatamente ao Pronto-Socorro mais próximo que atenda ao seu plano de saúde \(Porto Saúde, Unimed, Santa Saúde\)/)
+  assert.doesNotMatch(V.textoDoVeredito('urgente', 'c1'), /plano de saúde/, 'o perfil sem a frase fica como era')
   // Desde 17/10/2026 o "nao e urgente" leva o botao de marcar e o "se
   // piorar", igual ao "Pode aguardar" do alerta no WhatsApp do medico.
   assert.match(calmo, /^💙 O Dr\. Fábio viu a sua mensagem e, pelo que você contou, não parece urgência\. A nossa equipe continua com você por aqui\.\n\nSe quiser, toque em \*Marcar uma consulta\* para ver os horários mais próximos\. Se piorar, é só escrever aqui\.$/)
