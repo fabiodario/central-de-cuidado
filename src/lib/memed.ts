@@ -1,4 +1,5 @@
 import { supabase } from '@/lib/supabase'
+import { idDaReceitaExcluida, memedNaTela, prontaParaComando, type PortaoDaMemed, type QuadroNaPagina } from '@/lib/sinais-da-memed'
 import type { Consultation, Patient } from '@/types/patient'
 
 /**
@@ -40,6 +41,9 @@ type MemedGlobal = {
     module: { show: (modulo: string) => Promise<unknown>; hide?: (modulo: string) => void }
     event: { add: (nome: string, callback: (dados: unknown) => void) => void }
   }
+  // Estado do "gate" da Memed, que escolhe entre o motor antigo e o v4 (ver
+  // sinais-da-memed.ts).
+  __mdSinapseGate?: PortaoDaMemed
 }
 
 function janela() {
@@ -83,11 +87,12 @@ function destravarRolagem() {
   document.documentElement.style.removeProperty('overflow-y')
 }
 
-/** Algum modulo da Memed esta aberto na tela neste momento? */
-function memedNaTela(): boolean {
-  return [...document.querySelectorAll('iframe[id^="mdhub-module-"]')].some(
-    (quadro) => getComputedStyle(quadro).display !== 'none',
-  )
+/** Os iframes da pagina, no formato que sinais-da-memed.ts le. */
+function quadrosDaPagina(): QuadroNaPagina[] {
+  return [...document.querySelectorAll('iframe')].map((quadro) => {
+    const estilo = getComputedStyle(quadro)
+    return { id: quadro.id, src: quadro.src, display: estilo.display, visibility: estilo.visibility }
+  })
 }
 
 /**
@@ -109,7 +114,7 @@ function vigiarTravaDeRolagem() {
   if (vigia) return
   vigia = new MutationObserver(() => {
     if (!document.body.style.overflow) return
-    if (memedNaTela()) return
+    if (memedNaTela(quadrosDaPagina())) return
     destravarRolagem()
   })
   vigia.observe(document.body, { attributes: true, attributeFilter: ['style'] })
@@ -227,9 +232,11 @@ async function carregarScript(token: string, producao: boolean) {
           // Liga a rede de seguranca so depois que a Memed existe: antes disso
           // nao ha o que vigiar.
           vigiarTravaDeRolagem()
+          // A Memed manda o id nu, e nao { id } como na documentacao (ver
+          // idDaReceitaExcluida).
           hub.event.add('prescricaoExcluida', (dados) => {
-            const excluida = dados as { id?: string | number }
-            if (excluida?.id !== undefined) ouvintes.onExcluida?.(String(excluida.id))
+            const id = idDaReceitaExcluida(dados)
+            if (id) ouvintes.onExcluida?.(id)
           })
         }
 
@@ -244,7 +251,11 @@ async function carregarScript(token: string, producao: boolean) {
         // O sinal certo e o iframe do modulo estar na pagina: e o proprio
         // MdHub que o cria, quando o modulo termina de carregar. DOM, e nao
         // nome de evento - pelo mesmo motivo da espera pelo hub, logo acima.
-        if (!document.getElementById('mdhub-module-plataforma.prescricao')) return
+        //
+        // Desde 25/10/2026 a Memed pode entregar o motor v4, que nao cria esse
+        // iframe nunca: a espera estourava os 40 s com a Memed pronta. Os dois
+        // sinais ficam em sinais-da-memed.ts.
+        if (!prontaParaComando(quadrosDaPagina(), janela().__mdSinapseGate)) return
 
         window.clearInterval(espera)
         pronto()
