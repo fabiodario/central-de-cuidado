@@ -27,6 +27,7 @@ import {
 import { ANEXO_RECENTE_MS, anexoQueVai, anexoRecenteDaConversa, type AnexoParaEquipe } from '../_shared/anexo-para-equipe.ts'
 import { acompanharEnvioDoAnexo, entregarAnexosPendentes } from '../_shared/anexos-pendentes.ts'
 import { MOTIVOS_COM_VEREDITO } from '../_shared/veredito.ts'
+import { pediuReset, podeResetar, resetarConversaDeTeste, respostaDoReset } from '../_shared/reset-de-teste.ts'
 import { repassarRespostaDoPaciente, tratarRespostaDaEquipe } from '../_shared/resposta-ao-alerta.ts'
 import {
   BOTOES_URGENCIA_OU_DUVIDA,
@@ -371,6 +372,11 @@ Deno.serve(async (req) => {
           }
 
           const waId = digits(String(message.from ?? ''))
+          // RESET de teste (25/10/2026, TEMPORARIO, ver _shared/reset-de-teste.ts):
+          // so com a clinica em modo teste e de um celular da lista. Lido aqui,
+          // antes da resposta ao alerta: o RESET do Dr. Fabio ou da Dayane nao
+          // pode virar resposta a um alerta de teste.
+          const ehReset = pediuReset(messageBody(message)) && (await podeResetar(admin, clinicId, waId))
 
           // O medico respondendo ao alerta de urgencia pelo WhatsApp dele
           // (17/10/2026, ver _shared/resposta-ao-alerta.ts): o toque ou o texto
@@ -394,7 +400,7 @@ Deno.serve(async (req) => {
               )
               if (foram) console.info(`Anexos pendentes: ${foram} entregue(s) ao celular final ${waId.slice(-4)}`)
             }
-            if (numerosDoAlerta?.length) {
+            if (numerosDoAlerta?.length && !ehReset) {
               const tratada = await tratarRespostaDaEquipe(
                 {
                   admin,
@@ -1023,7 +1029,7 @@ Deno.serve(async (req) => {
           // pelo celular e gente falando, e ele ja fica quieto.
           try {
             if (numerosDoAlerta === undefined) numerosDoAlerta = await lerNumerosDoAlerta(admin, clinicId)
-            if (numerosDoAlerta?.length) {
+            if (numerosDoAlerta?.length && !ehReset) {
               await repassarRespostaDoPaciente(
                 {
                   admin,
@@ -1120,6 +1126,24 @@ Deno.serve(async (req) => {
               failure_reason: envio.ok ? null : corpoEnvio?.error?.message ?? 'Meta recusou o envio.',
             })
             return envio.ok
+          }
+
+          // RESET de teste: zera o que o teste deixou, responde e para aqui,
+          // sem robo, sem alerta e sem repasse aos celulares.
+          if (ehReset) {
+            try {
+              const zerado = await resetarConversaDeTeste(admin, {
+                clinicId,
+                conversationId: conversation.id,
+                telefone: waId,
+                agora: new Date(),
+              })
+              await responder(respostaDoReset(zerado))
+            } catch (erro) {
+              console.error('RESET de teste falhou', erro)
+              await responder('⚠️ O RESET de teste não funcionou agora. Tente de novo em instantes.')
+            }
+            continue
           }
 
           // Robo desligado so nesta conversa pela equipe (23/10/2026, vindo do

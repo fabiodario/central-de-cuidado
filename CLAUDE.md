@@ -173,6 +173,16 @@ registrado antes em `alertas_de_urgencia`, com o id nos botões
   sem mexer no código, `DESLIGAR` (ver `tests/montar-para-teste.mjs`) troca um
   trecho na hora de montar.
 
+## RESET de teste (25/10/2026, TEMPORÁRIO)
+
+No número de teste, quem está na lista de teste (`whatsapp_telefones_teste`)
+escreve só RESET e recomeça do zero: consultas futuras desse telefone
+canceladas, conversa zerada e alertas das últimas 24 horas apagados (ver
+`_shared/reset-de-teste.ts`). É lido no `meta-webhook` antes da resposta ao
+alerta e para antes do robô. Com a lista nula (clínica de verdade) não faz
+nada, mas **sai antes do número oficial**: o arquivo, o `ehReset` do webhook e
+`tests/reset-de-teste.test.mjs`. Pedido do Edu.
+
 ## Simulador (reuniões)
 
 `src/simulador`: o robô de verdade com banco falso no navegador. Identidade em
