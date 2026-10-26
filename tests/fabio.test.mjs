@@ -1684,4 +1684,67 @@ await caso('anexo: a foto com "sangrando" na legenda dispara o alerta e vai atra
   assert.equal(r.noMedico.length, 0, 'arquivo de conversa comum nao toca o celular (relatorio da Cintia)')
 })
 
+// ---------------------------------------------------------------
+// A pergunta de cancelar (26/10/2026, sondagem das etapas para o Jev)
+// ---------------------------------------------------------------
+
+await caso('cancelar: "quero mudar o dia" remarca e nao cancela; pergunta nao e sim; o sim continua valendo', async () => {
+  const cancelou = (s) => s.consultas().some((c) => c.status === 'cancelled')
+  for (const frase of ['quero mudar o dia', 'quero remarcar', 'na verdade quero só trocar o horario']) {
+    const s = nova('com_consulta')
+    await conversar(s, ['Oi', '4', 'cancelar'])
+    const r = await conversar(s, [frase])
+    assert.equal(cancelou(s), false, `"${frase}" nao cancela a consulta`)
+    assert.match(r.texto, /Vamos remarcar esta consulta/, `"${frase}" vai para a remarcacao`)
+  }
+  for (const frase of ['pode me ligar?', 'quero falar com alguem antes', 'deixa quieto']) {
+    const s = nova('com_consulta')
+    await conversar(s, ['Oi', '4', 'cancelar'])
+    await conversar(s, [frase])
+    assert.equal(cancelou(s), false, `"${frase}" nao cancela a consulta`)
+  }
+  for (const frase of ['quero', 'quero sim', 'pode', 'ok', 'sim, pode cancelar por favor', 'quero cancelar sim']) {
+    const s = nova('com_consulta')
+    await conversar(s, ['Oi', '4', 'cancelar'])
+    const r = await conversar(s, [frase])
+    assert.equal(cancelou(s), true, `"${frase}" confirma o cancelamento`)
+    assert.match(r.texto, /Consulta cancelada/)
+  }
+  // Na remarcacao nada cai agora: "pode ser na semana que vem" continua sendo sim.
+  const s = nova('com_consulta')
+  await conversar(s, ['Oi', '4', 'remarcar'])
+  const r = await conversar(s, ['pode ser na semana que vem'])
+  assert.equal(cancelou(s), false)
+  assert.match(r.texto, /Vamos achar outra data/)
+})
+
+await caso('"qual o horário de atendimento?" responde com os dias e horarios, no menu e no meio do agendamento', async () => {
+  let s = nova('nova')
+  await conversar(s, ['Oi'])
+  let r = await conversar(s, ['qual o horário de atendimento?'])
+  assert.match(r.texto, /Dias e horários com vaga/)
+  assert.doesNotMatch(r.texto, /Não consegui entender/)
+  s = nova('nova')
+  await conversar(s, ['Oi', 'quero marcar uma consulta', '2', '1'])
+  r = await conversar(s, ['horario de atendimento'])
+  assert.match(r.texto, /Dias e horários com vaga/)
+  assert.equal(s.etapa, 'aguardando_dia', 'a escolha do dia continua de pe')
+})
+
+await caso('ficha: cortesia e pedido de outra coisa nao viram o nome do paciente; nome de verdade passa', async () => {
+  for (const frase of ['obrigado', 'ok, obrigado', 'Certo', 'valeu', 'preciso da 2ª via da receita']) {
+    const s = nova('nova')
+    await conversar(s, ['Oi', 'quero marcar uma consulta', '2', '1', '1', '1'])
+    const r = await conversar(s, [frase])
+    assert.equal(s.etapa, 'dados_nome', `"${frase}" nao e nome`)
+    assert.match(r.texto, /Não consegui ler o nome/)
+  }
+  for (const nome of ['Tatiana Souza', 'Valéria Certo Lima', 'joao pedro da silva']) {
+    const s = nova('nova')
+    await conversar(s, ['Oi', 'quero marcar uma consulta', '2', '1', '1', '1'])
+    await conversar(s, [nome])
+    assert.equal(s.etapa, 'dados_nascimento', `"${nome}" e nome`)
+  }
+})
+
 console.log(`fabio.test: ${ok} casos ok`)

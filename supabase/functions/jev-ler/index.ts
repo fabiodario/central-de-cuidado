@@ -1,5 +1,6 @@
 import { corsHeaders, json, userClient } from '../_shared/whatsapp.ts'
 import { entradaDoSimulador, lerComJev, modoDaSegundaLeitura } from '../_shared/segunda-leitura.ts'
+import { lerCaminhoComJev, type OpcaoDaLista } from '../_shared/caminho-pelo-jev.ts'
 
 /**
  * O Jev no simulador de dentro do sistema (17/10/2026, pedido do Edu).
@@ -48,8 +49,25 @@ Deno.serve(async (req) => {
     const modo = modoDaSegundaLeitura((opcao?.jev_segunda_leitura as string | null | undefined) ?? null)
     if (modo === 'desligada') return json({ modo, leitura: null })
 
-    const entrada = entradaDoSimulador(await req.json().catch(() => null))
+    const corpo = await req.json().catch(() => null)
+    const entrada = entradaDoSimulador(corpo)
     if (!entrada) return json({ error: 'Mensagem vazia ou grande demais.' }, 400)
+
+    // O caminho pelo Jev (26/10/2026, ver _shared/caminho-pelo-jev.ts): a
+    // lista que o simulador mostrou vem do navegador, conferida e cortada.
+    if ((corpo as { acao?: unknown } | null)?.acao === 'caminho') {
+      const bruta = (corpo as { lista?: unknown }).lista
+      const lista: OpcaoDaLista[] = Array.isArray(bruta)
+        ? bruta
+            .filter((o): o is { numero: string; rotulo: string } =>
+              Boolean(o) && typeof (o as { numero?: unknown }).numero === 'string' && /^\d{1,2}$/.test((o as { numero: string }).numero) &&
+              typeof (o as { rotulo?: unknown }).rotulo === 'string')
+            .slice(0, 12)
+            .map((o) => ({ numero: o.numero, rotulo: o.rotulo.slice(0, 200) }))
+        : []
+      const leitura = await lerCaminhoComJev({ ...entrada, lista }, { chave: Deno.env.get('TYPESAFE_API_KEY') ?? '' })
+      return json({ modo, leitura })
+    }
 
     const leitura = await lerComJev(entrada, { chave: Deno.env.get('TYPESAFE_API_KEY') ?? '' })
     return json({ modo, leitura })

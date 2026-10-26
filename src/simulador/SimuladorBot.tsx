@@ -42,7 +42,7 @@ import { FAMILIAS, IDENTIDADES, type ChaveFamilia, type Identidade } from './dad
 import { agendaValida, copiarAgenda, type AgendaDaClinica } from './agenda'
 import { identidadeDoSistema } from './da-clinica'
 import { lerClinicaDoLogin, lerModoDoJev } from './ler-clinica'
-import { perguntarAoJev } from './jev'
+import { perguntarAoJev, perguntarOCaminhoAoJev } from './jev'
 import type { ModoDaSegundaLeitura } from '../../supabase/functions/_shared/segunda-leitura.ts'
 import ConfiguracaoDaAgenda from './ConfiguracaoDaAgenda'
 import { ROTEIROS, type Roteiro } from './roteiros'
@@ -530,7 +530,10 @@ export default function SimuladorBot() {
     const nova = new Simulacao(base.identidade, FAMILIAS[cf], { agenda: base.agenda })
     // Com a clinica do sistema, o Jev pergunta pelo servidor (jev-ler); o
     // arquivo da reuniao segue sem ele.
-    if (base.jev !== undefined) nova.leitorDoJev = perguntarAoJev
+    if (base.jev !== undefined) {
+      nova.leitorDoJev = perguntarAoJev
+      nova.leitorDoCaminho = perguntarOCaminhoAoJev
+    }
     simAtual.current = nova
     setSim(nova)
     setChaveFamilia(cf)

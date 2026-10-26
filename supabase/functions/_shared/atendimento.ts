@@ -3832,6 +3832,10 @@ function perguntouDaAgenda(texto: string): boolean {
     /\b(ultimo|ultima) (horario|consulta|vaga|atendimento)\b/.test(t) ||
     /\bultimo da (tarde|manha)\b/.test(t) ||
     /\bate que (horas|hora|horario)\b/.test(t) ||
+    // "Qual o horario de atendimento?" (26/10/2026, sondagem das etapas para
+    // o Jev): no menu ia para a equipe como "nao entendi", e no meio do
+    // agendamento recebia "responda com o numero do dia".
+    /\bhorarios? de (atendimento|funcionamento)\b/.test(t) ||
     /\b(que|quais|qual|em que) (dia|dias)\b( \w+){0,5} (atende|atendem|tem|ha|abre|abrem|funciona|funcionam|fica)\b/.test(t) ||
     /\b(atende|atendem|abre|abrem|funciona|funcionam)\b( \w+){0,4} (que|quais|qual) (dia|dias|horario|horarios)\b/.test(t) ||
     /\b(que|qual) (horas|horario) (ele |o dr |o doutor |o medico |voces |vcs )?(atende|atendem|comeca|abre|abrem|fecha|fecham|termina)\b/.test(t) ||
@@ -5676,6 +5680,18 @@ function nomeDaFicha(texto: string): string | null {
   // nem as palavras de quem esta reclamando ou pedindo outra coisa.
   if (/[?]|!!/.test(t)) return null
   if (/\b(nao|não|queria|quero|errado|errada|horario|horário|marcar|consulta|atendente|pessoa|ajuda|trocar|mudar)\b/i.test(t.replace(/^(nao|não)\s+sei\b.*$/i, ''))) return null
+  // Cortesia e pedido de outra coisa (26/10/2026, sondagem das etapas para o
+  // Jev): "obrigado" e "preciso da 2a via da receita" foram gravados como o
+  // nome do paciente, e na rodada 4 do painel a confirmacao saiu com o nome
+  // "Certo". A pergunta do nome volta.
+  const semAcento = normalizar(t)
+  if (
+    /^(ok|okay|obrigad[oa]s?|brigad[oa]|valeu|vlw|beleza|blz|certo|ta bom|ta|perfeito|show|combinado)\b/.test(semAcento) ||
+    /\b(obrigad[oa]s?|preciso|precisava|receita|exames?|pedido|quanto|valor|convenio|endereco|cancel\w*|desmarc\w*)\b/.test(semAcento) ||
+    /\b(2a|2ª|segunda) via\b/.test(semAcento)
+  ) {
+    return null
+  }
   // Muleta antes do nome (16/10/2026, painel): "ja falei, ana paula ribeiro"
   // foi gravado como "Ja Falei", e "eu, renata andrade", como "Eu".
   t = t.replace(/^((ja|já)\s+(falei|disse|informei|mandei|escrevi)|como\s+(eu\s+)?(falei|disse)|eu\s+mesm[oa]|sou\s+eu(\s+mesm[oa])?|eu)\s*[,:.!-]\s*/i, '')
@@ -8552,9 +8568,28 @@ async function tratarConversaPorDentro(opcoes: {
     // "pode cancelar" e desmarcaria a consulta de quem estava recusando. Errar
     // aqui apaga uma vaga que ninguem pediu para apagar.
     const negou = /^(n|nao|nada|negativo|deixa|espera|melhor nao)\b/.test(t)
+
+    // "Quero mudar o dia" na pergunta de cancelar (26/10/2026, sondagem das
+    // etapas para o Jev): comecava com "quero", valia como sim, e a consulta
+    // de quem so queria trocar a data era cancelada. Pedido de remarcar vai
+    // para a remarcacao, que so cancela a antiga depois da nova marcada.
+    if (!negou && !opcoes.consultaASubstituir && intencaoDaConsulta(texto) === 'remarcar') {
+      const marcadas = Array.isArray(opcoes.opcoesAtuais) ? (opcoes.opcoesAtuais as string[]) : []
+      const consulta = opcoes.consultas.find((c) => c.id === marcadas[0]) ?? opcoes.consultas[0]
+      if (consulta) return await pedirConfirmacaoCancelamento(admin, clinicId, conversationId, consulta, true)
+    }
+
+    // "Quero", "ok" e "pode" so confirmam o cancelamento sozinhos ou falando
+    // de cancelar (26/10/2026): "quero falar com alguem" e "pode me ligar?"
+    // tambem comecam assim, e cancelar por engano apaga uma vaga que ninguem
+    // pediu para apagar. Na remarcacao nada cai agora, e "pode ser na semana
+    // que vem" continua sendo sim. "Sim" e companhia valem em qualquer frase.
+    const curta = t.replace(/[^a-z\s]/g, ' ').trim().split(/\s+/).length <= 3 && !/\?\s*$/.test(texto)
+    const falaDeCancelar = /\b(cancel\w*|desmarc\w*)\b/.test(t)
     const confirmou =
       !negou &&
-      (/^(sim|s|isso|claro|confirmo|confirmar|quero|ok|pode)\b/.test(t) ||
+      (/^(sim|s|isso|claro|confirmo|confirmar)\b/.test(t) ||
+        (/^(quero|ok|pode)\b/.test(t) && (Boolean(opcoes.consultaASubstituir) || curta || falaDeCancelar)) ||
         t.includes('pode cancelar') ||
         t.includes('pode desmarcar'))
     if (!confirmou) {

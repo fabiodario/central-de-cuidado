@@ -11,6 +11,7 @@ import {
   type UltimaLeituraDoJev,
 } from '@/lib/repository'
 import { descreverLeituraDoJev } from '../../supabase/functions/_shared/segunda-leitura.ts'
+import { descreverCaminho } from '../../supabase/functions/_shared/caminho-pelo-jev.ts'
 
 const OPCOES: { modo: ModoDoJev; rotulo: string; explica: string }[] = [
   { modo: 'desligada', rotulo: 'Desligado', explica: 'O robô não chama o Jev.' },
@@ -22,7 +23,8 @@ const OPCOES: { modo: ModoDoJev; rotulo: string; explica: string }[] = [
   {
     modo: 'ligada',
     rotulo: 'Ligado',
-    explica: 'O Jev lê e age: manda a pergunta Urgência ou Dúvida e, com nota alta, avisa a equipe.',
+    explica:
+      'O Jev lê e age: pergunta Urgência ou Dúvida, avisa a equipe com nota alta e, quando o robô não entende, leva para o caminho pedido.',
   },
 ]
 
@@ -48,6 +50,7 @@ export default function SegundaLeituraDoJev() {
   const [responsavel, setResponsavel] = useState(false)
   const [modo, setModo] = useState<ModoDoJev | null>(null)
   const [ultima, setUltima] = useState<UltimaLeituraDoJev | null>(null)
+  const [ultimoCaminho, setUltimoCaminho] = useState<UltimaLeituraDoJev | null>(null)
   const [salvando, setSalvando] = useState(false)
   const [atualizando, setAtualizando] = useState(false)
   const [erro, setErro] = useState('')
@@ -60,13 +63,15 @@ export default function SegundaLeituraDoJev() {
         if (!membership || !vivo) return
         setClinicId(membership.clinicId)
         setResponsavel(membership.role === 'owner')
-        const [atual, leitura] = await Promise.all([
+        const [atual, leitura, caminho] = await Promise.all([
           getModoDoJev(membership.clinicId),
           getUltimaLeituraDoJev(membership.clinicId),
+          getUltimaLeituraDoJev(membership.clinicId, 'jev_caminho'),
         ])
         if (!vivo) return
         setModo(atual)
         setUltima(leitura)
+        setUltimoCaminho(caminho)
       } catch (causa) {
         if (vivo) setErro(causa instanceof Error ? causa.message : 'Não foi possível ler a opção do Jev.')
       }
@@ -106,7 +111,12 @@ export default function SegundaLeituraDoJev() {
     setAtualizando(true)
     setErro('')
     try {
-      setUltima(await getUltimaLeituraDoJev(clinicId))
+      const [leitura, caminho] = await Promise.all([
+        getUltimaLeituraDoJev(clinicId),
+        getUltimaLeituraDoJev(clinicId, 'jev_caminho'),
+      ])
+      setUltima(leitura)
+      setUltimoCaminho(caminho)
     } catch (causa) {
       setErro(causa instanceof Error ? causa.message : 'Não foi possível ler a última leitura.')
     } finally {
@@ -115,6 +125,7 @@ export default function SegundaLeituraDoJev() {
   }
 
   const descricao = ultima ? descreverLeituraDoJev(ultima.detalhe) : null
+  const caminho = ultimoCaminho ? descreverCaminho(ultimoCaminho.detalhe) : null
 
   return (
     <section className="surface-card overflow-hidden rounded-[26px]">
@@ -127,11 +138,12 @@ export default function SegundaLeituraDoJev() {
             <p className="text-[9px] font-extrabold uppercase tracking-[0.15em] text-[#4b5a92]">Robô do WhatsApp</p>
             <h2 className="mt-1 flex items-center gap-1.5 text-base font-extrabold tracking-[-0.03em] text-[#081b2c]">
               Segunda leitura pelo Jev
-              <Ajuda texto="O Jev é um serviço da TypeSafe AI que dá uma nota de urgência para cada mensagem escrita. A chave dele fica nos segredos do Supabase (TYPESAFE_API_KEY): sem ela, a leitura falha e o aviso aparece aqui embaixo." />
+              <Ajuda texto="O Jev é um serviço da TypeSafe AI que dá uma nota de urgência para cada mensagem escrita e, quando o robô responde 'Não entendi', diz qual era o pedido. A chave dele fica nos segredos do Supabase (TYPESAFE_API_KEY): sem ela, a leitura falha e o aviso aparece aqui embaixo." />
             </h2>
             <p className="mt-1.5 max-w-2xl text-[11px] leading-relaxed text-slate-400">
-              Lê as mensagens escritas pelos pacientes para reconhecer urgência que a regra do robô não entende. Ele só
-              acrescenta cuidado: nunca muda a resposta do robô nem marca consulta.
+              Lê as mensagens escritas pelos pacientes para reconhecer urgência que a regra do robô não entende. Quando o
+              robô não entende uma mensagem, o Jev diz o que a pessoa pediu e o robô segue por esse caminho; sem certeza,
+              o robô pergunta antes. Ele nunca marca nem cancela sozinho: quem confirma é sempre o robô, com o paciente.
             </p>
           </div>
         </div>
@@ -181,6 +193,14 @@ export default function SegundaLeituraDoJev() {
                 </>
               ) : (
                 'ainda nenhuma. Ela aparece aqui depois da primeira mensagem escrita por um paciente.'
+              )}
+              {ultimoCaminho && caminho && (
+                <>
+                  <br />
+                  <span className="font-extrabold text-[#081b2c]">Último caminho: </span>
+                  {quandoFoi(ultimoCaminho.quando)}.{' '}
+                  <span className={COR_DO_TOM[caminho.tom]}>{caminho.texto}</span>
+                </>
               )}
             </p>
             <button

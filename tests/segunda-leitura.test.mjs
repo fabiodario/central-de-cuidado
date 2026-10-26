@@ -437,7 +437,11 @@ await caso('a funcao jev-ler: so com sessao e acesso ativo, le o modo, e desliga
   assert.match(ler('.github', 'workflows', 'deploy-pages.yml'), /supabase functions deploy jev-ler --project-ref/)
   // O simulador pergunta por ela, e so com a clinica do sistema.
   assert.match(ler('src', 'simulador', 'jev.ts'), /supabase\.functions\.invoke\('jev-ler'/)
-  assert.match(ler('src', 'simulador', 'SimuladorBot.tsx'), /if \(base\.jev !== undefined\) nova\.leitorDoJev = perguntarAoJev/)
+  // Desde 26/10/2026 o caminho pelo Jev vem junto (ver caminho-pelo-jev.ts).
+  assert.match(
+    ler('src', 'simulador', 'SimuladorBot.tsx'),
+    /if \(base\.jev !== undefined\) \{\s*nova\.leitorDoJev = perguntarAoJev\s*nova\.leitorDoCaminho = perguntarOCaminhoAoJev\s*\}/,
+  )
 })
 
 console.log(`segunda-leitura: ${ok} casos ok`)

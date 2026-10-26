@@ -120,6 +120,34 @@ robô como sempre.
   privacidade (seção 4), com o OK do Dr. Fábio.
 - Testes em `tests/segunda-leitura.test.mjs`, dentro do `npm run test:bot`.
 
+## O Jev escolhendo o caminho (26/10/2026)
+
+Pedido do Edu: o robô nunca travado. Quando a regra responde "Não entendi"
+(evento `nao_entendi` ou o texto), o webhook pergunta ao Jev, numa chamada só,
+o assunto (marcar, remarcar, cancelar, ver a consulta, valor, convênio,
+endereço ou horário, documento, equipe, agradecimento, urgência, outro) e qual
+opção da lista que está valendo a pessoa escolheu, ou nenhuma
+(`_shared/caminho-pelo-jev.ts`). O Jev não responde nada ao paciente: o robô
+roda de novo com o número da opção, ou com uma frase que a regra entende com
+certeza naquela etapa (`rotaDoAssunto`), na conversa como estava antes do
+"Não entendi" (`estadoParaSeguir`).
+
+- Limiares medidos em `../jev-caminho` (fora do repositório): opção a partir
+  de 0,5 segue, de 0,2 a 0,5 pergunta "Você quis dizer X?" com o botão Sim
+  (id `JEV:opcao:N`); assunto a partir de 0,8 segue, de 0,5 a 0,8 pergunta
+  (id `JEV:assunto:A`). Mudou a pergunta ou a versão `jev-1.13.0`, mede de novo.
+- Valor, convênio, endereço e equipe respondem na etapa, sem desmanchar o
+  agendamento; remarcar, cancelar, ver a consulta, documento e marcar vão pelo
+  menu. Cancelar e remarcar sempre caem na confirmação do robô; no meio do
+  agendamento, cancelar é desistir (`CANCELAR`) e remarcar na lista de
+  horários é `VOLTAR`.
+- Fica de fora: ficha (`dados_*`), fila da equipe, confirmação do
+  cancelamento, conversa de urgência, toque e foto, e quando a segunda leitura
+  já viu urgência. Liga e desliga junto com a segunda leitura; em "só observar"
+  registra o que faria (`jev_caminho` em `whatsapp_bot_events`).
+- O simulador faz o mesmo (`leitorDoCaminho`; no sistema, `jev-ler` com
+  `acao: 'caminho'`). Testes em `tests/caminho-pelo-jev.test.mjs`.
+
 ## Veredito da urgência (17/10/2026)
 
 Conversa acesa como urgência ou sangramento ganha, na tela de Respostas, os

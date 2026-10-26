@@ -2492,13 +2492,20 @@ export interface UltimaLeituraDoJev {
   quando: string
 }
 
-/** O ultimo evento segunda_leitura do robo, para Preferencias mostrar se o Jev esta lendo. */
-export async function getUltimaLeituraDoJev(clinicId: string): Promise<UltimaLeituraDoJev | null> {
+/**
+ * O ultimo evento do Jev no robo, para Preferencias mostrar se ele esta lendo:
+ * segunda_leitura (a nota de urgencia) ou, desde 26/10/2026, jev_caminho (o
+ * caminho escolhido quando o robo nao entendeu).
+ */
+export async function getUltimaLeituraDoJev(
+  clinicId: string,
+  evento: 'segunda_leitura' | 'jev_caminho' = 'segunda_leitura',
+): Promise<UltimaLeituraDoJev | null> {
   const { data, error } = await (supabase as unknown as SupabaseClient)
     .from('whatsapp_bot_events')
     .select('detalhe,criado_em')
     .eq('clinic_id', clinicId)
-    .eq('evento', 'segunda_leitura')
+    .eq('evento', evento)
     .order('criado_em', { ascending: false })
     .limit(1)
     .maybeSingle()

@@ -42,6 +42,16 @@ import {
   temBotaoDeUrgencia,
 } from '../_shared/segunda-leitura.ts'
 import {
+  contextoDoCaminho,
+  decidirCaminho,
+  type DecisaoDoCaminho,
+  entradaDoBotao,
+  estadoParaSeguir,
+  lerCaminhoComJev,
+  precisaDoCaminho,
+  roboTravou,
+} from '../_shared/caminho-pelo-jev.ts'
+import {
   ESPERA_MAXIMA_MS,
   complementoDaRajada,
   precisaEsperar,
@@ -1227,31 +1237,48 @@ Deno.serve(async (req) => {
             // acesa como urgencia ou sangramento nao e lida.
             const modoJev = modoDaSegundaLeitura(opcaoDoJev)
             const motivoAceso = conversaAnterior?.needs_attention ? ((conversaAnterior.attention_reason as string | null) ?? null) : null
+            // O historico de antes desta mensagem, lido uma vez so: a segunda
+            // leitura e o caminho pelo Jev usam o mesmo.
+            let historicoLido: Promise<MensagemDoHistorico[]> | null = null
+            const historicoAntes = () =>
+              (historicoLido ??= (async () => {
+                const { data: historico } = await admin
+                  .from('whatsapp_messages')
+                  .select('direction,body,automatic,external_message_id')
+                  .eq('conversation_id', conversation.id)
+                  .order('created_at', { ascending: false })
+                  .limit(12)
+                const linhas = (historico ?? []) as (MensagemDoHistorico & { external_message_id?: string | null })[]
+                // A mensagem de agora ja esta gravada (logo acima): fica de fora do contexto.
+                return externalId
+                  ? linhas.filter((m) => m.external_message_id !== externalId)
+                  : linhas[0]?.direction === 'inbound' && linhas[0]?.body === body ? linhas.slice(1) : linhas
+              })())
             const leituraJev: Promise<Leitura> | null =
               modoJev !== 'desligada' && precisaDeLeitura(body, message.type === 'interactive', motivoAceso)
                 ? (async (): Promise<Leitura> => {
-                    const { data: historico } = await admin
-                      .from('whatsapp_messages')
-                      .select('direction,body,automatic,external_message_id')
-                      .eq('conversation_id', conversation.id)
-                      .order('created_at', { ascending: false })
-                      .limit(10)
-                    const linhas = (historico ?? []) as (MensagemDoHistorico & { external_message_id?: string | null })[]
-                    // A mensagem de agora ja esta gravada (logo acima): fica de fora do contexto.
-                    const antes = externalId
-                      ? linhas.filter((m) => m.external_message_id !== externalId)
-                      : linhas[0]?.direction === 'inbound' && linhas[0]?.body === body ? linhas.slice(1) : linhas
+                    const antes = await historicoAntes()
                     return await lerComJev({ texto: body, ...contextoDaLeitura(antes) }, { chave: Deno.env.get('TYPESAFE_API_KEY') ?? '' })
                   })().catch((erro): Leitura => ({ ok: false, erro: String((erro as Error)?.message ?? erro) }))
                 : null
 
-            const resultado = await tratarConversa({
+            // O "Sim" da sugestao do Jev (26/10/2026, ver _shared/caminho-pelo-jev.ts):
+            // vira o que ele tinha entendido. Caminho pelo menu volta a conversa
+            // ao menu antes do robo.
+            const estadoAntes = (conversaAnterior?.booking_state ?? null) as Estado | null
+            const temConsulta = consultas.length > 0
+            const botaoDoJev = entradaDoBotao(String(escolhido ?? ''), estadoAntes, temConsulta)
+            if (botaoDoJev?.doMenu) {
+              await admin.from('whatsapp_conversations').update(estadoParaSeguir({}, true)).eq('id', conversation.id)
+            }
+
+            const entradaDoRobo: Parameters<typeof tratarConversa>[0] = {
               admin,
               clinicId,
               conversationId: conversation.id,
-              estadoAtual: (conversaAnterior?.booking_state ?? null) as Estado | null,
-              opcoesAtuais: conversaAnterior?.booking_options ?? null,
-              unidadeEmAndamento: conversaAnterior?.booking_unit_id ?? null,
+              estadoAtual: botaoDoJev?.doMenu ? 'menu' : estadoAntes,
+              opcoesAtuais: botaoDoJev?.doMenu ? null : (conversaAnterior?.booking_options ?? null),
+              unidadeEmAndamento: botaoDoJev?.doMenu ? null : (conversaAnterior?.booking_unit_id ?? null),
               podeIniciarMenu: !respondendoEnvioNosso && !equipeFalouRecentemente,
               // Com a equipe ja conversando, quem responde e ela - o robo nao
               // entra nem para dizer "passei sua mensagem".
@@ -1262,7 +1289,7 @@ Deno.serve(async (req) => {
               // recebe o "nao espere" (ver lembreteDeUrgencia). Etapa vencida
               // e conversa nova, e o motivo velho nao conta.
               motivoDaAtencao: etapaVenceu ? null : ((conversaAnterior?.attention_reason as string | null) ?? null),
-              texto: escolhido,
+              texto: botaoDoJev?.texto ?? escolhido,
               telefone: waId,
               pacientes,
               pacienteEmAndamento: conversaAnterior?.booking_patient_id ?? null,
@@ -1286,7 +1313,11 @@ Deno.serve(async (req) => {
                 saudacaoConhecida: settings.whatsapp_autoreply_known_text ?? '',
                 informacoes: settings.whatsapp_menu_info_text ?? '',
               },
-            })
+            }
+            let resultado = await tratarConversa(entradaDoRobo)
+            // Os eventos desta resposta, colhidos aqui: o caminho pelo Jev pode
+            // trocar a resposta, e os eventos vao junto com ela.
+            let eventosDoRobo = colherEventos(conversation.id)
 
             // A decisao da segunda leitura (ver decidirSegundaLeitura): so
             // acrescenta. A resposta do robo sai igual; a urgencia acesa pelo
@@ -1305,11 +1336,61 @@ Deno.serve(async (req) => {
               resultado.concluida = false
             }
 
+            // O robo disse "Nao entendi": o Jev escolhe o caminho (26/10/2026,
+            // ver _shared/caminho-pelo-jev.ts). Nao quando a segunda leitura ja
+            // viu urgencia: ali a urgencia manda. Seguir e rodar o robo de novo
+            // com a frase que ele entende, na conversa como estava antes.
+            let caminhoJev: DecisaoDoCaminho | null = null
+            if (
+              modoJev !== 'desligada' && resultado && !botaoDoJev &&
+              !decisaoJev?.atencao && !decisaoJev?.botoes &&
+              precisaDoCaminho({ estado: estadoAntes, foiToque: message.type === 'interactive', anexo: ehAnexo(message), motivoAceso }) &&
+              roboTravou(resultado)
+            ) {
+              try {
+                const contexto = contextoDoCaminho(await historicoAntes(), estadoAntes)
+                const leitura = await lerCaminhoComJev({ texto: body, ...contexto }, { chave: Deno.env.get('TYPESAFE_API_KEY') ?? '' })
+                caminhoJev = decidirCaminho(leitura, {
+                  modo: modoJev,
+                  estado: estadoAntes,
+                  lista: contexto.lista,
+                  quantasOpcoes: Array.isArray(conversaAnterior?.booking_options) ? conversaAnterior.booking_options.length : null,
+                  temConsulta,
+                  texto: body,
+                  chamouEquipe: Boolean(resultado.atencao),
+                })
+                if (caminhoJev.acao === 'seguir') {
+                  await admin
+                    .from('whatsapp_conversations')
+                    .update(estadoParaSeguir(conversaAnterior ?? {}, caminhoJev.doMenu))
+                    .eq('id', conversation.id)
+                  const seguido = await tratarConversa({
+                    ...entradaDoRobo,
+                    texto: caminhoJev.texto,
+                    ...(caminhoJev.doMenu ? { estadoAtual: 'menu' as Estado, opcoesAtuais: null, unidadeEmAndamento: null } : {}),
+                  })
+                  if (seguido) {
+                    resultado = seguido
+                    eventosDoRobo = colherEventos(conversation.id)
+                  }
+                }
+              } catch (erro) {
+                // Falha aqui nao muda nada: sai o "Nao entendi" de sempre.
+                console.warn('Caminho pelo Jev falhou; segue o nao entendi', erro)
+                caminhoJev = { acao: 'nada', detalhe: `falhou: ${String((erro as Error)?.message ?? erro)}`.slice(0, 120) }
+              }
+            }
+
             if (resultado) {
               const respondeu = await responder(resultado.resposta, null, {
                 botoes: resultado.botoes,
                 lista: resultado.lista,
               })
+              // A sugestao do Jev vai depois, numa mensagem propria, com o
+              // botao Sim (ver entradaDoBotao).
+              if (respondeu && caminhoJev?.acao === 'sugerir') {
+                await responder(caminhoJev.pergunta, null, { botoes: [caminhoJev.botao] })
+              }
               // A pergunta com os dois botoes vai DEPOIS da resposta, numa
               // mensagem propria. Toque na lista da mensagem de antes chega como
               // o titulo da opcao (oQueFoiEscolhido), que o motor le na unidade,
@@ -1425,7 +1506,7 @@ Deno.serve(async (req) => {
              * e a conversa segue inteira.
              */
             try {
-              const eventos = colherEventos(conversation.id)
+              const eventos = eventosDoRobo
               // O pedido de gente vem do resultado, e nao de um registrar()
               // espalhado: os quatro pontos que levantam a bandeira ficam em
               // funcoes diferentes, e aqui existe um so.
@@ -1435,6 +1516,8 @@ Deno.serve(async (req) => {
               if (resultado?.concluida) eventos.push({ evento: 'concluiu_sozinho' })
               // A nota do Jev e o que foi feito com ela, para medir com mensagem de verdade.
               if (decisaoJev) eventos.push({ evento: 'segunda_leitura', detalhe: decisaoJev.detalhe })
+              // O caminho escolhido pelo Jev quando o robo nao entendeu (26/10/2026).
+              if (caminhoJev) eventos.push({ evento: 'jev_caminho', detalhe: caminhoJev.detalhe })
 
               if (eventos.length > 0) {
                 const { error: erroDoRegistro } = await admin

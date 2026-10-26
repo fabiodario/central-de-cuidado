@@ -27,6 +27,18 @@ import {
   type ModoDaSegundaLeitura,
 } from '../../supabase/functions/_shared/segunda-leitura.ts'
 import {
+  contextoDoCaminho,
+  decidirCaminho,
+  descreverCaminho,
+  entradaDoBotao,
+  estadoParaSeguir,
+  precisaDoCaminho,
+  roboTravou,
+  type DecisaoDoCaminho,
+  type LeituraDoCaminho,
+  type OpcaoDaLista,
+} from '../../supabase/functions/_shared/caminho-pelo-jev.ts'
+import {
   botoesDoVeredito,
   conversaDepoisDoVeredito,
   MOTIVOS_COM_VEREDITO,
@@ -70,6 +82,19 @@ export type LeitorDoJev = (entrada: {
   anteriores: string[]
   ultimaDoRobo: string
 }) => Promise<{ modo: ModoDaSegundaLeitura | null; leitura: Leitura | null }>
+
+/**
+ * Quem pergunta ao Jev o caminho quando o robo nao entende (26/10/2026, ver
+ * _shared/caminho-pelo-jev.ts). No sistema, a funcao jev-ler com
+ * acao 'caminho'; nos testes, um Jev de mentira; no painel, a TypeSafe com a
+ * chave do computador. Sem leitor, o "Nao entendi" de sempre.
+ */
+export type LeitorDoCaminho = (entrada: {
+  texto: string
+  anteriores: string[]
+  ultimaDoRobo: string
+  lista: OpcaoDaLista[]
+}) => Promise<{ modo: ModoDaSegundaLeitura | null; leitura: LeituraDoCaminho | null }>
 
 export type Autor = 'familia' | 'robo' | 'equipe'
 
@@ -246,6 +271,8 @@ export class Simulacao {
   leitorDoJev: LeitorDoJev | null = null
   /** O modo que o servidor devolveu na ultima leitura, para o selo da tela. */
   ultimoModoDoJev: ModoDaSegundaLeitura | null = null
+  /** O Jev escolhendo o caminho quando o robo nao entende (ver LeitorDoCaminho). */
+  leitorDoCaminho: LeitorDoCaminho | null = null
   private contador = 0
   private relogio: () => Date
 
@@ -471,6 +498,15 @@ export class Simulacao {
           )
         : null
 
+    // O caminho pelo Jev (26/10/2026), como no meta-webhook: o historico de
+    // antes desta mensagem, a conversa antes do robo, e o "Sim" da sugestao,
+    // que vira o que o Jev tinha entendido.
+    const historicoAntesDoJev = this.historicoParaOJev()
+    const etapaAntes = (conversa.booking_state as string | null) ?? null
+    const conversaAntes = { ...conversa }
+    const botaoDoJev = entrada.idDoToque ? entradaDoBotao(entrada.idDoToque, etapaAntes, futuras.length > 0) : null
+    if (botaoDoJev?.doMenu) Object.assign(conversa, estadoParaSeguir({}, true))
+
     // A mensagem da familia entra no historico ANTES do robo, como o webhook
     // grava (16/10/2026): o robo le as mensagens de antes da conversa - a
     // queixa contada na primeira, por exemplo - e precisa ver a de agora tambem.
@@ -484,7 +520,7 @@ export class Simulacao {
         new Date(String(c.starts_at)).toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }) === hoje,
     )
 
-    const resultado = await tratarConversa({
+    const entradaDoRobo: Parameters<typeof tratarConversa>[0] = {
       admin: this.banco,
       clinicId: this.identidade.clinicId,
       conversationId: CONVERSA,
@@ -499,7 +535,7 @@ export class Simulacao {
       // A legenda da foto vai ao robo, como no webhook (messageBody): "meu
       // nariz ta sangrando, olha" com a foto dispara o alerta. Sem legenda, o
       // "[image]" de la (25/10/2026: aqui ia vazio, e a legenda se perdia).
-      texto: entrada.anexo ? (entrada.texto.trim() || '[image]') : (entrada.idDoToque ?? entrada.texto),
+      texto: entrada.anexo ? (entrada.texto.trim() || '[image]') : (botaoDoJev?.texto ?? entrada.idDoToque ?? entrada.texto),
       telefone: this.familia.telefone,
       pacientes,
       pacienteEmAndamento: (conversa.booking_patient_id as string | null) ?? null,
@@ -520,7 +556,11 @@ export class Simulacao {
       nomeDoPerfil: this.familia.nomeDoPerfil,
       textos: this.identidade.textos,
       agora,
-    })
+    }
+    let resultado = await tratarConversa(entradaDoRobo)
+    // Os eventos desta resposta, colhidos aqui: o caminho pelo Jev pode trocar
+    // a resposta, e os eventos vao junto com ela (como no meta-webhook).
+    let eventos = colherEventos(CONVERSA)
 
     // A decisao do Jev (ver decidirSegundaLeitura): so acrescenta. A urgencia
     // que ele leu entra no lugar do motivo que a regra deu, como no webhook.
@@ -547,10 +587,49 @@ export class Simulacao {
       }
     }
 
+    // O robo disse "Nao entendi": o Jev escolhe o caminho (26/10/2026, ver
+    // _shared/caminho-pelo-jev.ts), na mesma ordem do meta-webhook.
+    let caminhoJev: DecisaoDoCaminho | null = null
+    if (
+      this.leitorDoCaminho && resultado && !botaoDoJev &&
+      !decisaoJev?.atencao && !decisaoJev?.botoes &&
+      precisaDoCaminho({ estado: etapaAntes, foiToque: Boolean(entrada.idDoToque), anexo: Boolean(entrada.anexo), motivoAceso }) &&
+      roboTravou(resultado)
+    ) {
+      const contexto = contextoDoCaminho(historicoAntesDoJev, etapaAntes)
+      const { modo, leitura } = await this.leitorDoCaminho({ texto: entrada.texto, ...contexto }).catch(
+        (erro): { modo: null; leitura: LeituraDoCaminho } => ({ modo: null, leitura: { ok: false, erro: String((erro as Error)?.message ?? erro) } }),
+      )
+      if (modo === null) {
+        caminhoJev = { acao: 'nada', detalhe: leitura && !leitura.ok ? `falhou: ${leitura.erro}` : 'falhou: sem resposta' }
+      } else if (modo !== 'desligada') {
+        caminhoJev = decidirCaminho(leitura, {
+          modo,
+          estado: etapaAntes,
+          lista: contexto.lista,
+          quantasOpcoes: Array.isArray(conversaAntes.booking_options) ? (conversaAntes.booking_options as unknown[]).length : null,
+          temConsulta: futuras.length > 0,
+          texto: entrada.texto,
+          chamouEquipe: Boolean(resultado.atencao),
+        })
+        if (caminhoJev.acao === 'seguir') {
+          Object.assign(conversa, estadoParaSeguir(conversaAntes, caminhoJev.doMenu))
+          const seguido = await tratarConversa({
+            ...entradaDoRobo,
+            texto: caminhoJev.texto,
+            ...(caminhoJev.doMenu ? { estadoAtual: 'menu', opcoesAtuais: null, unidadeEmAndamento: null } : {}),
+          })
+          if (seguido) {
+            resultado = seguido
+            eventos = colherEventos(CONVERSA)
+          }
+        }
+      }
+    }
+
     // A bandeira de atencao, na mesma ordem do meta-webhook: concluida fecha,
     // pedido de gente acende com o motivo, e silencio acende com o motivo que
     // ja havia (ou "atendente"). Calar sem acender e o defeito de 22/09/2026.
-    const eventos = colherEventos(CONVERSA)
     if (resultado) {
       // Bandeira que ja estava acesa nao se apaga por conclusao do robo.
       if (resultado.concluida && !resultado.atencao && !atencaoAntes.ligada) {
@@ -623,6 +702,18 @@ export class Simulacao {
         conversation_id: CONVERSA, direction: 'outbound', automatic: true, body: PERGUNTA_URGENCIA_OU_DUVIDA, created_at: agora.toISOString(),
       })
     }
+    // A sugestao do Jev quando ele nao teve certeza (26/10/2026): pergunta com
+    // o botao Sim, numa mensagem propria, como no webhook.
+    if (resultado?.resposta && caminhoJev?.acao === 'sugerir') {
+      respostas.push(
+        this.mensagem('robo', caminhoJev.pergunta, agora, {
+          toques: { tipo: 'botoes', opcoes: [{ id: caminhoJev.botao.id, titulo: caminhoJev.botao.titulo }] },
+        }),
+      )
+      historico.push({
+        conversation_id: CONVERSA, direction: 'outbound', automatic: true, body: caminhoJev.pergunta, created_at: agora.toISOString(),
+      })
+    }
 
     const registros = [
       ...eventos.flatMap((e) => {
@@ -643,6 +734,12 @@ export class Simulacao {
       registros.push(this.registro('evento', `Jev: ${lida.texto}`, tom, agora))
     } else if (falhaDoJev) {
       registros.push(this.registro('evento', `Jev: não consegui perguntar (${falhaDoJev}). O robô seguiu como sempre.`, 'alerta', agora))
+    }
+    // O caminho escolhido pelo Jev, quando o robo nao entendeu (26/10/2026).
+    if (caminhoJev) {
+      const lido = descreverCaminho(caminhoJev.detalhe)
+      const tom: Tom = lido.tom === 'erro' ? 'alerta' : lido.tom === 'alerta' ? 'atencao' : 'bom'
+      registros.push(this.registro('evento', `Jev: ${lido.texto}`, tom, agora))
     }
     const motivoAgora = this.motivo
     if (motivoAgora && (!atencaoAntes.ligada || atencaoAntes.motivo !== motivoAgora)) {
