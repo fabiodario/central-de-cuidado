@@ -21,8 +21,13 @@ import { foraDaListaDeTeste, listaDeTeste } from './whatsapp-teste.ts'
  *    resposta ao alerta (resposta-ao-alerta.ts), e eles nao conseguem testar
  *    como paciente. Em modo teste, todo alerta e de teste.
  *
- * O cadastro do paciente fica (o robo continua chamando pelo nome), e o
- * historico da conversa tambem, com uma nota dizendo o que o RESET fez.
+ *  - o cadastro deste telefone (pedido do Edu, mesmo dia: "RESET que desvincula
+ *    tudo e apaga o cadastro"), para a proxima marcacao pedir nome,
+ *    nascimento e CPF de novo, como para quem escreve pela primeira vez. Vai
+ *    junto o que e dele: prontuario, acompanhamentos, exames, receitas. As
+ *    consultas da agenda e as mensagens ficam, sem o paciente.
+ *
+ * O historico da conversa fica, com uma nota dizendo o que o RESET fez.
  */
 
 type Admin = { from: (tabela: string) => any } // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -38,7 +43,7 @@ export async function podeResetar(admin: Admin, clinicId: string, telefone: stri
   return lista !== null && lista.length > 0 && !foraDaListaDeTeste(lista, telefone)
 }
 
-export type ResultadoDoReset = { consultas: number; alertas: number; falhas: string[] }
+export type ResultadoDoReset = { consultas: number; alertas: number; cadastros: number; arquivados: number; falhas: string[] }
 
 const JANELA_DOS_ALERTAS_MS = 24 * 3600 * 1000
 
@@ -50,7 +55,7 @@ export async function resetarConversaDeTeste(
   admin: Admin,
   p: { clinicId: string; conversationId: string; telefone: string; agora: Date },
 ): Promise<ResultadoDoReset> {
-  const r: ResultadoDoReset = { consultas: 0, alertas: 0, falhas: [] }
+  const r: ResultadoDoReset = { consultas: 0, alertas: 0, cadastros: 0, arquivados: 0, falhas: [] }
   const quando = p.agora.toISOString()
 
   try {
@@ -84,9 +89,27 @@ export async function resetarConversaDeTeste(
   }
 
   try {
+    const ids = await cadastrosDoTelefone(admin, p.clinicId, p.telefone)
+    try {
+      r.cadastros = await apagarCadastros(admin, p.clinicId, ids)
+    } catch (erro) {
+      // O banco protege o adendo do prontuario (gatilho
+      // consultation_addenda_imutavel): cadastro com adendo nao se apaga.
+      // Arquivado, o robo nao o acha mais (ele so busca os nao arquivados), e
+      // a proxima marcacao pede tudo de novo; a ficha fica.
+      console.warn('RESET de teste: nao apaguei o cadastro; arquivando', erro)
+      r.arquivados = await arquivarCadastros(admin, p.clinicId, ids, quando)
+    }
+  } catch (erro) {
+    console.error('RESET de teste: nao apaguei nem arquivei o cadastro', erro)
+    r.falhas.push('cadastro')
+  }
+
+  try {
     const { error } = await admin
       .from('whatsapp_conversations')
       .update({
+        patient_id: null,
         booking_state: null,
         booking_options: null,
         booking_unit_id: null,
@@ -122,7 +145,70 @@ export async function resetarConversaDeTeste(
   return r
 }
 
+/**
+ * Os cadastros deste telefone, pelo mesmo campo que o robo usa para achar o
+ * paciente (phone_digits, com e sem o 55 e o nono digito). Os arquivados
+ * entram: tambem sao do teste.
+ */
+async function cadastrosDoTelefone(admin: Admin, clinicId: string, telefone: string): Promise<string[]> {
+  const achados = (await etapa(
+    admin.from('patients').select('id').eq('clinic_id', clinicId).in('phone_digits', variantesDoTelefone(telefone)),
+  )) as { id: string }[]
+  return achados.map((p) => p.id)
+}
+
+/** O recuo quando o cadastro nao se apaga: arquivar, que o robo nao acha. */
+async function arquivarCadastros(admin: Admin, clinicId: string, ids: string[], quando: string): Promise<number> {
+  if (!ids.length) return 0
+  const arquivados = await etapa(
+    admin.from('patients').update({ archived_at: quando }).eq('clinic_id', clinicId).in('id', ids).is('archived_at', null).select('id'),
+  )
+  return arquivados.length
+}
+
+/** Uma etapa do apagar: lanca no erro, que para as seguintes. */
+async function etapa(consulta: PromiseLike<{ data?: unknown; error: unknown }>): Promise<unknown[]> {
+  const { data, error } = await consulta
+  if (error) throw error
+  return Array.isArray(data) ? data : []
+}
+
+/**
+ * Apaga o cadastro deste telefone e o que e dele. Na ordem que o banco exige
+ * (as chaves estrangeiras de 25/10/2026): primeiro solta o que aponta para o
+ * paciente e nao e dele (mensagens, conversas, consultas da agenda), apaga o
+ * que e dele e trava (acompanhamentos, adendos, prontuario, exames) e so
+ * entao o cadastro; rascunhos, receitas e pedidos de assinatura vao junto,
+ * pelo proprio banco. Qualquer etapa que falha para as seguintes: o cadastro
+ * nao some pela metade. Devolve quantos cadastros apagou.
+ */
+async function apagarCadastros(admin: Admin, clinicId: string, ids: string[]): Promise<number> {
+  if (!ids.length) return 0
+  const acompanhamentos = ((await etapa(admin.from('followups').select('id').in('patient_id', ids))) as { id: string }[]).map((f) => f.id)
+
+  await etapa(admin.from('whatsapp_messages').update({ patient_id: null }).eq('clinic_id', clinicId).in('patient_id', ids))
+  if (acompanhamentos.length) {
+    await etapa(admin.from('whatsapp_messages').update({ followup_id: null }).in('followup_id', acompanhamentos))
+  }
+  await etapa(admin.from('whatsapp_conversations').update({ patient_id: null, booking_patient_id: null }).eq('clinic_id', clinicId).in('patient_id', ids))
+  await etapa(admin.from('appointments').update({ patient_id: null }).eq('clinic_id', clinicId).in('patient_id', ids))
+  await etapa(admin.from('followups').delete().in('patient_id', ids))
+  await etapa(admin.from('consultation_addenda').delete().in('patient_id', ids))
+  await etapa(admin.from('consultations').delete().in('patient_id', ids))
+  await etapa(admin.from('patient_exams').delete().in('patient_id', ids))
+  const apagados = await etapa(admin.from('patients').delete().eq('clinic_id', clinicId).in('id', ids).select('id'))
+  return apagados.length
+}
+
 const plural = (n: number, um: string, varios: string) => `${n} ${n === 1 ? um : varios}`
+
+/** "1 cadastro apagado", e o arquivado quando houve (o que tinha adendo). */
+function cadastrosDoResultado(r: ResultadoDoReset): string {
+  return (
+    plural(r.cadastros, 'cadastro apagado', 'cadastros apagados') +
+    (r.arquivados ? `, ${plural(r.arquivados, 'arquivado', 'arquivados')} (tinha adendo no prontuário, que não se apaga)` : '')
+  )
+}
 
 /** A nota que a equipe ve na conversa. */
 export function notaDoReset(r: ResultadoDoReset, telefone: string): string {
@@ -130,7 +216,8 @@ export function notaDoReset(r: ResultadoDoReset, telefone: string): string {
   return (
     `🔄 RESET de teste pelo celular final ${final}: ` +
     `${plural(r.consultas, 'consulta de teste cancelada', 'consultas de teste canceladas')}, ` +
-    `${plural(r.alertas, 'alerta encerrado', 'alertas encerrados')}, conversa recomeçada.` +
+    `${plural(r.alertas, 'alerta encerrado', 'alertas encerrados')}, ` +
+    `${cadastrosDoResultado(r)}, conversa recomeçada.` +
     (r.falhas.length ? ` ⚠️ Não deu para zerar: ${r.falhas.join(', ')}.` : '')
   )
 }
@@ -140,7 +227,10 @@ export function respostaDoReset(r: ResultadoDoReset): string {
   return (
     '🔄 *RESET de teste*: a conversa recomeçou do zero.\n\n' +
     `• ${plural(r.consultas, 'consulta de teste cancelada', 'consultas de teste canceladas')}\n` +
-    `• ${plural(r.alertas, 'alerta de urgência encerrado', 'alertas de urgência encerrados')}\n\n` +
+    `• ${plural(r.alertas, 'alerta de urgência encerrado', 'alertas de urgência encerrados')}\n` +
+    `• ${cadastrosDoResultado(r)}` +
+    (r.cadastros + r.arquivados ? ': na próxima marcação o robô pede nome, nascimento e CPF de novo' : '') +
+    '\n\n' +
     (r.falhas.length ? `⚠️ Não deu para zerar: ${r.falhas.join(', ')}. Avise o Edu.\n\n` : '') +
     'Pode testar de novo: mande *Oi*.'
   )

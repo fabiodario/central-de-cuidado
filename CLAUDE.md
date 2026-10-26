@@ -177,7 +177,9 @@ registrado antes em `alertas_de_urgencia`, com o id nos botões
 
 No número de teste, quem está na lista de teste (`whatsapp_telefones_teste`)
 escreve só RESET e recomeça do zero: consultas futuras desse telefone
-canceladas, conversa zerada e alertas das últimas 24 horas apagados (ver
+canceladas, conversa zerada, alertas das últimas 24 horas apagados e o
+cadastro do telefone apagado com o que é dele (arquivado, se tiver adendo de
+prontuário, que o banco não deixa apagar) (ver
 `_shared/reset-de-teste.ts`). É lido no `meta-webhook` antes da resposta ao
 alerta e para antes do robô. Com a lista nula (clínica de verdade) não faz
 nada, mas **sai antes do número oficial**: o arquivo, o `ehReset` do webhook e
