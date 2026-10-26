@@ -1,6 +1,6 @@
 import { adminClient, corsHeaders, json, userClient } from '../_shared/whatsapp.ts'
 import { montarPdfDoAtendimento } from '../_shared/pdf-do-prontuario.ts'
-import { LICENCA_NAO_CONFIGURADA, licencaDaAssinatura } from '../_shared/licenca-da-assinatura.ts'
+import { CODIGO_SEM_LICENCA, LICENCA_NAO_CONFIGURADA, licencaDaAssinatura } from '../_shared/licenca-da-assinatura.ts'
 
 /**
  * Assinatura digital do atendimento com o certificado ICP-Brasil do medico.
@@ -26,6 +26,7 @@ import { LICENCA_NAO_CONFIGURADA, licencaDaAssinatura } from '../_shared/licenca
 type Pedido =
   | { acao: 'iniciar'; consultationId: string; voltarPara?: string }
   | { acao: 'concluir'; pedido: string }
+  | { acao: 'licenca' }
 
 const AMBIENTES = {
   producao: {
@@ -222,7 +223,7 @@ Deno.serve(async (req) => {
   // Clinica sem o modulo de assinatura: uma mensagem so, antes de qualquer
   // leitura no banco (ver _shared/licenca-da-assinatura.ts).
   if (!licencaDaAssinatura((nome) => Deno.env.get(nome))) {
-    return json({ error: LICENCA_NAO_CONFIGURADA, code: 'SEM_LICENCA' }, 503)
+    return json({ error: LICENCA_NAO_CONFIGURADA, code: CODIGO_SEM_LICENCA }, 503)
   }
 
   const env = ambiente()
@@ -231,6 +232,11 @@ Deno.serve(async (req) => {
 
   try {
     const corpo = (await req.json()) as Pedido
+
+    // A tela inicial pergunta se ha licenca para mostrar o lembrete de
+    // atendimentos sem assinatura. Sem licenca, a resposta ja saiu acima
+    // (SEM_LICENCA); chegar aqui quer dizer que ha.
+    if (corpo.acao === 'licenca') return json({ licenca: true })
 
     // -----------------------------------------------------------------------
     // ETAPA 1 - pedir a permissao

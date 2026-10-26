@@ -22,6 +22,7 @@ import {
 } from 'lucide-react'
 import { useDb } from '@/lib/store'
 import {
+  assinaturaLicenciada,
   conversasEsperandoEquipe,
   getCurrentMembership,
   listAtendimentosSemAssinatura,
@@ -356,6 +357,13 @@ export default function Home() {
   const carregarSemAssinatura = useCallback(async () => {
     if (!podeAssinar || !clinicaId) return
     try {
+      // Sem o modulo de assinatura (26/10/2026), o lembrete cobraria o que a
+      // clinica nao tem como fazer: o botao so responde "Licença não
+      // configurada.". Ver assinaturaLicenciada.
+      if (!(await assinaturaLicenciada())) {
+        setSemAssinatura([])
+        return
+      }
       setSemAssinatura(await listAtendimentosSemAssinatura(clinicaId))
     } catch (erro) {
       // Lembrete, nao trava: sem a lista, o resto do sistema segue inteiro.

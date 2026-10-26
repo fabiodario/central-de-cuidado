@@ -13,6 +13,7 @@ import type { PatientDraft } from '@/lib/store'
 import type { Database } from '@/types/database'
 import { buscarTodas } from '@/lib/paginar'
 import { comNonoDigito } from '../../supabase/functions/_shared/telefone-br.ts'
+import { licencaPelaResposta } from '../../supabase/functions/_shared/licenca-da-assinatura.ts'
 import {
   consultasQueNaoAconteceram,
   diaEmSaoPaulo,
@@ -3165,6 +3166,29 @@ function semConteudoClinico(linha: ConsultationRow) {
     linha.weight_kg === null &&
     linha.height_cm === null
   )
+}
+
+/**
+ * A clinica tem o modulo de assinatura digital? (26/10/2026)
+ *
+ * A assinatura ICP-Brasil e um modulo a parte, e a licenca sao segredos do
+ * servidor (ver _shared/licenca-da-assinatura.ts) que a tela nao enxerga: entao
+ * pergunta a assinar-consulta. Uma vez por sessao - a licenca nao muda no meio
+ * do dia, e o lembrete recarrega a cada 5 minutos e a cada troca de aba. Falha
+ * de rede nao fica guardada: a proxima carga pergunta de novo.
+ */
+let licencaDaAssinaturaPedida: Promise<boolean> | null = null
+
+export function assinaturaLicenciada(): Promise<boolean> {
+  if (!licencaDaAssinaturaPedida) {
+    licencaDaAssinaturaPedida = supabase.functions
+      .invoke('assinar-consulta', { body: { acao: 'licenca' } })
+      .then(({ error }) => licencaPelaResposta(error))
+    licencaDaAssinaturaPedida.catch(() => {
+      licencaDaAssinaturaPedida = null
+    })
+  }
+  return licencaDaAssinaturaPedida
 }
 
 /** Atendimento escrito e ainda sem assinatura digital. */
