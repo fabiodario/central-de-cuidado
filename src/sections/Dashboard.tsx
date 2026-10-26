@@ -151,37 +151,114 @@ function countBy(patients: Patient[], pick: (patient: Patient) => string): [stri
   return [...map.entries()]
 }
 
-function Donut({ female, male, other }: { female: number; male: number; other: number }) {
-  const total = female + male + other
-  const femaleEnd = total ? (female / total) * 100 : 0
-  const maleEnd = total ? femaleEnd + (male / total) * 100 : 0
-  const background = total
-    ? `conic-gradient(${AZUL} 0 ${femaleEnd}%, ${NAVY} ${femaleEnd}% ${maleEnd}%, #a5b1bb ${maleEnd}% 100%)`
-    : '#edf0f2'
+/**
+ * Mulheres x homens (26/10/2026), o mesmo placar do Dr. Marcello.
+ *
+ * Ate aqui era uma rosca em azul, marinho e cinza. O Edu pediu "igual o do
+ * marcello": rosa e azul na mesma luminancia (nenhum chama mais atencao que o
+ * outro), um bonequinho de cada lado e a barra da proporcao embaixo. La sao
+ * meninas e meninos porque a clinica e de criancas; o Dr. Fabio atende adulto
+ * e crianca (perfil 'geral' em quem-atende.ts), entao aqui e mulheres e homens,
+ * e a mulher tem cabelo comprido no lugar dos dois coquinhos de menina.
+ *
+ * Quem esta com sexo "O" (outro ou nao informado) sai do placar e vira uma
+ * linha discreta embaixo, como la: dentro da proporcao, esconderia a leitura.
+ */
+const ROSA = '#c4627e'
+const ROSA_ESCURO = '#a54d66'
+const AZUL_HOMEM = '#3f86c8'
+const AZUL_HOMEM_ESCURO = '#2c6aa6'
 
-  const items = [
-    { label: 'Feminino', value: female, color: AZUL },
-    { label: 'Masculino', value: male, color: NAVY },
-    { label: 'Outro / NI', value: other, color: '#a5b1bb' },
-  ]
+function Pessoa({ mulher, className = '' }: { mulher: boolean; className?: string }) {
+  const cor = mulher ? ROSA : AZUL_HOMEM
+  const escuro = mulher ? ROSA_ESCURO : AZUL_HOMEM_ESCURO
+  return (
+    <svg viewBox="0 0 64 64" className={className} aria-hidden="true">
+      {mulher ? (
+        <>
+          <path d="M17 27 Q17 9 32 9 Q47 9 47 27 L47 41 Q40 37 32 37 Q24 37 17 41 Z" fill={escuro} />
+          <circle cx="32" cy="25" r="14" fill={cor} />
+          <path d="M19 22 Q20 10 32 10 Q44 10 45 22 Q38 15 32 15 Q26 15 19 22Z" fill={escuro} />
+          <path d="M17 63 L24 42 Q32 38 40 42 L47 63 Z" fill={cor} />
+        </>
+      ) : (
+        <>
+          <circle cx="32" cy="25" r="14" fill={cor} />
+          <path d="M18 23 Q18 9 32 9 Q46 9 46 23 Q42 16 35 16 Q30 17 26 15 Q22 17 18 23Z" fill={escuro} />
+          <path d="M16 63 Q16 42 32 41 Q48 42 48 63 Z" fill={cor} />
+        </>
+      )}
+      <circle cx="26.5" cy="25" r="1.9" fill="#fff" />
+      <circle cx="37.5" cy="25" r="1.9" fill="#fff" />
+      <path d="M27.5 30.5 Q32 34 36.5 30.5" stroke="#fff" strokeWidth="2" fill="none" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function PlacarMulheresHomens({ female, male, other }: { female: number; male: number; other: number }) {
+  const informados = female + male
+  const pctMulheres = informados ? Math.round((female / informados) * 100) : 0
+  // A barra cresce ao abrir o painel: comeca igual e assenta na proporcao.
+  const [pronto, setPronto] = useState(false)
+  useEffect(() => {
+    const espera = window.setTimeout(() => setPronto(true), 80)
+    return () => window.clearTimeout(espera)
+  }, [])
+
+  const lado = (mulher: boolean, valor: number) => (
+    <div
+      className={`group flex items-center gap-3 rounded-[18px] p-2 transition-colors sm:p-2.5 ${
+        mulher ? 'hover:bg-[#f8e5eb]' : 'flex-row-reverse text-right hover:bg-[#e4eef8]'
+      }`}
+    >
+      <Pessoa
+        mulher={mulher}
+        className="h-11 w-11 shrink-0 transition-transform duration-300 group-hover:-translate-y-[3px] group-hover:-rotate-[4deg] sm:h-14 sm:w-14"
+      />
+      <div>
+        <p className="text-[32px] font-extrabold leading-none tracking-[-0.05em] sm:text-[40px]" style={{ color: mulher ? ROSA : AZUL_HOMEM }}>
+          {valor}
+        </p>
+        <p className="mt-1 text-[10px] font-extrabold uppercase tracking-[0.14em] text-slate-400">
+          {mulher ? (valor === 1 ? 'Mulher' : 'Mulheres') : valor === 1 ? 'Homem' : 'Homens'}
+        </p>
+      </div>
+    </div>
+  )
 
   return (
-    <div className="flex flex-col items-center gap-6 py-1 sm:flex-row sm:justify-center lg:justify-start">
-      <div className="relative h-36 w-36 shrink-0 rounded-full p-[13px]" style={{ background }}>
-        <div className="flex h-full w-full flex-col items-center justify-center rounded-full bg-white shadow-[inset_0_0_0_1px_rgba(8,27,44,.04)]">
-          <span className="text-3xl font-extrabold tracking-[-0.05em] text-[#081b2c]">{total}</span>
-          <span className="mt-0.5 text-[9px] font-extrabold uppercase tracking-[0.16em] text-slate-400">pacientes</span>
+    <div className="py-1">
+      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+        {lado(true, female)}
+        <span className="grid h-[34px] w-[34px] place-items-center rounded-full bg-[#f1f3f4] text-[15px] font-extrabold text-slate-500">×</span>
+        {lado(false, male)}
+      </div>
+      <div className="mt-4 flex h-2.5 gap-[3px] overflow-hidden rounded-full bg-[#eef1f2]">
+        {informados > 0 && (
+          <>
+            <div className="h-full transition-[flex-grow] duration-1000 ease-out" style={{ flexGrow: pronto ? female : 1, background: ROSA }} />
+            <div className="h-full transition-[flex-grow] duration-1000 ease-out" style={{ flexGrow: pronto ? male : 1, background: AZUL_HOMEM }} />
+          </>
+        )}
+      </div>
+      <div className="mt-1.5 flex justify-between text-[11px] font-extrabold">
+        {informados > 0 ? (
+          <>
+            <span style={{ color: ROSA }}>{pctMulheres}%</span>
+            <span style={{ color: AZUL_HOMEM }}>{100 - pctMulheres}%</span>
+          </>
+        ) : (
+          <span className="font-semibold text-slate-400">Nenhum paciente com sexo informado ainda.</span>
+        )}
+      </div>
+      {other > 0 && (
+        <div className="mt-4 flex items-center gap-2 border-t border-[#081b2c]/[0.06] pt-3 text-[11px] font-semibold text-slate-400">
+          <span className="h-[9px] w-[9px] shrink-0 rounded-full bg-[#b9c2ca]" />
+          <span>
+            <b className="font-extrabold text-slate-500">{other}</b> {other === 1 ? 'paciente' : 'pacientes'} com sexo não informado (ou outro) no cadastro
+          </span>
         </div>
-      </div>
-      <div className="w-full max-w-[200px] space-y-3">
-        {items.map((item) => (
-          <div key={item.label} className="flex items-center gap-2.5">
-            <span className="h-2.5 w-2.5 rounded-full" style={{ background: item.color }} />
-            <span className="flex-1 text-[11px] font-semibold text-slate-500">{item.label}</span>
-            <span className="text-xs font-extrabold text-[#081b2c]">{item.value}</span>
-          </div>
-        ))}
-      </div>
+      )}
     </div>
   )
 }
@@ -454,8 +531,8 @@ export default function Dashboard({
       ) : (
         <>
           <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
-            <Panel title="Perfil dos pacientes" subtitle="Distribuição por sexo informado" icon={UsersRound}>
-              <Donut female={female} male={male} other={other} />
+            <Panel title="Perfil dos pacientes" subtitle="Mulheres e homens atendidos" icon={UsersRound}>
+              <PlacarMulheresHomens female={female} male={male} other={other} />
             </Panel>
 
             <Panel title="Faixa etária" subtitle="Idade atual dos pacientes cadastrados" icon={Activity}>
