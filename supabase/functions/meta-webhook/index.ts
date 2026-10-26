@@ -16,6 +16,7 @@ import { chaveDoWhatsApp } from '../_shared/whatsapp-teste.ts'
 import { montarAviso } from '../_shared/aviso-da-equipe.ts'
 import { avisarEquipe } from '../_shared/push-da-equipe.ts'
 import {
+  alertaEmAberto,
   deveAlertar,
   enviarAlertaDeUrgencia,
   lerNumeros as lerNumerosDoAlerta,
@@ -23,6 +24,9 @@ import {
   quemNoAlerta,
   whatsAppPelaApi,
 } from '../_shared/alerta-de-urgencia.ts'
+import { ANEXO_RECENTE_MS, anexoQueVai, anexoRecenteDaConversa, type AnexoParaEquipe } from '../_shared/anexo-para-equipe.ts'
+import { acompanharEnvioDoAnexo, entregarAnexosPendentes } from '../_shared/anexos-pendentes.ts'
+import { MOTIVOS_COM_VEREDITO } from '../_shared/veredito.ts'
 import { repassarRespostaDoPaciente, tratarRespostaDaEquipe } from '../_shared/resposta-ao-alerta.ts'
 import {
   BOTOES_URGENCIA_OU_DUVIDA,
@@ -376,6 +380,20 @@ Deno.serve(async (req) => {
           // de sempre, e grita no log.
           try {
             if (numerosDoAlerta === undefined) numerosDoAlerta = await lerNumerosDoAlerta(admin, clinicId)
+            // O celular do alerta escreveu (ou tocou num botao): a janela de 24
+            // horas da Meta abriu, e o arquivo do paciente que ela tinha recusado
+            // vai agora (25/10/2026, vindo do sistema do Dr. Marcello, ver
+            // _shared/anexos-pendentes.ts).
+            if (numerosDoAlerta?.some((numero) => variantesDoTelefone(numero).includes(waId))) {
+              const foram = await entregarAnexosPendentes(
+                admin,
+                clinicId,
+                waId,
+                whatsAppPelaApi(phoneNumberId, chaveDoWhatsApp(phoneNumberId)),
+                new Date(),
+              )
+              if (foram) console.info(`Anexos pendentes: ${foram} entregue(s) ao celular final ${waId.slice(-4)}`)
+            }
             if (numerosDoAlerta?.length) {
               const tratada = await tratarRespostaDaEquipe(
                 {
@@ -919,6 +937,30 @@ Deno.serve(async (req) => {
           const anexo = midia && externalId
             ? await guardarAnexo(admin, clinicId, externalId, midia, phoneNumberId)
             : null
+          // O arquivo vai junto para os celulares do alerta (25/10/2026, vindo
+          // do sistema do Dr. Marcello, ver _shared/anexo-para-equipe.ts), por
+          // link assinado do acervo: o id da Meta serve para baixar, nao para
+          // reenviar. Sem o link, vai so o alerta, como antes, e o log diz.
+          let anexoParaEquipe: AnexoParaEquipe | undefined
+          if (anexo && anexoQueVai(message.type)) {
+            try {
+              const { data: assinado, error: erroDoLink } = await admin.storage
+                .from('whatsapp-anexos')
+                .createSignedUrl(anexo.path, 24 * 3600)
+              if (erroDoLink) throw erroDoLink
+              if (assinado?.signedUrl) {
+                anexoParaEquipe = {
+                  tipo: String(message.type),
+                  link: assinado.signedUrl,
+                  nome: midia?.filename,
+                  caminho: anexo.path,
+                  recebidoEm: receivedAt,
+                }
+              }
+            } catch (erro) {
+              console.warn('Nao gerei o link do anexo para os celulares; vai so o alerta', erro)
+            }
+          }
 
           const { error: messageError } = await admin.from('whatsapp_messages').insert({
             clinic_id: clinicId,
@@ -998,6 +1040,7 @@ Deno.serve(async (req) => {
                     telefone: waId,
                   }),
                   texto: body,
+                  anexo: anexoParaEquipe,
                 },
               )
             }
@@ -1438,12 +1481,47 @@ Deno.serve(async (req) => {
                   texto: body,
                   agora: new Date(),
                   conversationId: conversation.id,
+                  // A foto desta mensagem; sem ela, a que o paciente mandou
+                  // pouco antes ("olha o meu nariz" e depois "ta sangrando").
+                  anexo: anexoParaEquipe ?? (await anexoRecenteDaConversa(admin, conversation.id, new Date(Date.now() - ANEXO_RECENTE_MS))),
                 })
                 if (typeof EdgeRuntime !== 'undefined') EdgeRuntime.waitUntil(alerta)
                 else await alerta
               }
             } catch (erro) {
               console.warn('Notificacao no celular: nao consegui montar o aviso', erro)
+            }
+          }
+
+          // O arquivo que o paciente manda depois, com o alerta ainda aberto
+          // (25/10/2026, ver alertaEmAberto): so o arquivo vai aos celulares.
+          // Fora do bloco do robo de proposito: a foto que chega colada no
+          // texto (rajada) ou com o robo calado na conversa tambem vai. O
+          // alerta novo desta mesma mensagem nao acontece aqui: com a conversa
+          // ja em urgencia, deveAlertar e falso.
+          if (anexoParaEquipe && !optedOut && conversaAnterior?.needs_attention &&
+            MOTIVOS_COM_VEREDITO.includes(String(conversaAnterior.attention_reason ?? ''))) {
+            try {
+              if (await alertaEmAberto(admin, clinicId, conversation.id, new Date())) {
+                const soOArquivo = enviarAlertaDeUrgencia(admin, {
+                  clinicId,
+                  motivo: conversaAnterior.attention_reason as MotivoDoAlerta,
+                  quem: quemNoAlerta({
+                    pacientes,
+                    nomeDoPerfil: nomeDoPerfil || String(conversaAnterior?.profile_name ?? ''),
+                    telefone: waId,
+                  }),
+                  texto: body,
+                  agora: new Date(),
+                  conversationId: conversation.id,
+                  anexo: anexoParaEquipe,
+                  soOAnexo: true,
+                })
+                if (typeof EdgeRuntime !== 'undefined') EdgeRuntime.waitUntil(soOArquivo)
+                else await soOArquivo
+              }
+            } catch (erro) {
+              console.warn('Anexo para a equipe: o arquivo nao foi aos celulares; esta na Central', erro)
             }
           }
 
@@ -1688,6 +1766,11 @@ Deno.serve(async (req) => {
           if ((await registro.registrar(eventKey, `status_${status}`, { entry_id: entry.id, change })) === 'repetido') {
             continue
           }
+
+          // Arquivo do paciente mandado a um celular do alerta (25/10/2026, ver
+          // _shared/anexos-pendentes.ts): a Meta aceita na hora e recusa por
+          // aqui. Esses envios nao estao em whatsapp_messages.
+          if (await acompanharEnvioDoAnexo(admin, externalId, status, delivery.errors, new Date())) continue
 
           const { data: stored } = await admin
             .from('whatsapp_messages')

@@ -388,7 +388,8 @@ await caso('o webhook: a resposta do medico antes do robo do paciente, e o alert
   const alerta = f.indexOf('const alerta = enviarAlertaDeUrgencia(admin, {')
   assert.ok(aviso > 0 && alerta > aviso, 'a notificacao do navegador continua, e o alerta vem depois dela')
   assert.match(f.slice(alerta - 400, alerta), /if \(deveAlertar\(\{ atencaoAntes: Boolean\(conversaAnterior\?\.needs_attention\), motivoAntes, motivoAgora \}\)\) \{/)
-  assert.match(f.slice(alerta, alerta + 700), /EdgeRuntime\.waitUntil\(alerta\)/, 'fora do caminho da resposta ao paciente')
+  // 1000: desde 25/10/2026 a chamada leva tambem o arquivo do paciente.
+  assert.match(f.slice(alerta, alerta + 1000), /EdgeRuntime\.waitUntil\(alerta\)/, 'fora do caminho da resposta ao paciente')
 })
 
 await caso('o teste da tela: so quem atende, e pelo mesmo envio', () => {
@@ -409,6 +410,101 @@ await caso('a migration: coluna, tabela, RLS forcada e so o servidor escreve', (
   assert.match(m, /revoke all on table public\.alertas_de_urgencia from public, anon, authenticated/)
   assert.match(m, /grant select on table public\.alertas_de_urgencia to authenticated/)
   assert.doesNotMatch(m, /supabase\.co|marcello/i, 'nada de URL de projeto nem do sistema do Dr. Marcello')
+})
+
+// ---- O arquivo do paciente junto do alerta (25/10/2026, vindo do sistema do Dr. Marcello) ----
+
+const FOTO = { tipo: 'image', link: 'https://acervo/foto', caminho: `${FABIO}/wamid.F`, recebidoEm: '2026-10-18T02:13:30Z' }
+const AUDIO = { tipo: 'audio', link: 'https://acervo/audio', caminho: `${FABIO}/wamid.A`, recebidoEm: '2026-10-18T02:13:30Z' }
+const anexos = (banco) => banco.linhas('anexos_para_equipe')
+
+await caso('anexo: o arquivo logo atras do alerta, so para quem recebeu o alerta, e cada envio registrado', async () => {
+  const { banco, admin } = cenario()
+  const m = meta((corpo, n) =>
+    corpo.to === DAYANE && corpo.type === 'template'
+      ? { ok: false, status: 400, corpo: { error: { code: 131026, message: 'Message undeliverable' } } }
+      : { ok: true, status: 200, corpo: { messages: [{ id: `wamid.${n}` }] } },
+  )
+  const r = await A.enviarAlertaDeUrgencia(admin, { ...pedido, anexo: FOTO }, A.whatsAppPelaApi('123', 'token-de-teste', m.buscar))
+  assert.deepEqual(m.pedidos.map((p) => [p.corpo.to, p.corpo.type]), [[MEDICO, 'template'], [MEDICO, 'image'], [DAYANE, 'template']])
+  assert.equal(m.pedidos[1].corpo.image.link, 'https://acervo/foto')
+  assert.equal(m.pedidos[1].corpo.image.caption, '📎 Enviado por Paciente de Teste pela Central de Cuidado')
+  const [registro] = anexos(banco)
+  assert.equal(anexos(banco).length, 1, 'a Dayane nao recebeu o alerta, e o arquivo nao foi')
+  assert.equal(registro.numero, MEDICO)
+  assert.equal(registro.situacao, 'enviado')
+  assert.equal(registro.meta_id, 'wamid.2', 'e por este id que a recusa de depois e reconhecida')
+  assert.equal(registro.conversation_id, 'conv-1')
+  assert.equal(r.falhou, true)
+})
+
+await caso('anexo recusado na hora: fica pendente, e a nota diz que vai quando o celular escrever', async () => {
+  const { banco, admin } = cenario()
+  const m = meta((corpo, n) =>
+    corpo.to === DAYANE && corpo.type === 'image'
+      ? { ok: false, status: 400, corpo: { error: { code: 131047, message: 'Re-engagement message' } } }
+      : { ok: true, status: 200, corpo: { messages: [{ id: `wamid.${n}` }] } },
+  )
+  const r = await A.enviarAlertaDeUrgencia(admin, { ...pedido, anexo: FOTO }, A.whatsAppPelaApi('123', 'token-de-teste', m.buscar))
+  assert.equal(r.falhou, false, 'o alerta chegou aos dois')
+  assert.deepEqual(anexos(banco).map((a) => [a.numero, a.situacao]), [[MEDICO, 'enviado'], [DAYANE, 'pendente']])
+  assert.deepEqual(notas(banco), [
+    '🚨 Alerta de sangramento enviado no WhatsApp para 2 números (final 0001, final 0002).\n' +
+      '⚠️ A foto não foi para final 0002: a Meta só deixa mandar arquivo para quem escreveu ao número da clínica nas últimas 24 horas. ' +
+      'Vai sozinho quando esse celular escrever para a clínica ou tocar num botão do alerta. Está aqui na Central.',
+  ])
+})
+
+await caso('so o arquivo, com o alerta aberto: sem modelo, sem alerta novo, sem evento; o audio com a linha de quem e', async () => {
+  const { banco, admin } = cenario()
+  const m = meta((corpo, n) => ({ ok: true, status: 200, corpo: { messages: [{ id: `wamid.${n}` }] } }))
+  const r = await A.enviarAlertaDeUrgencia(admin, { ...pedido, anexo: AUDIO, soOAnexo: true }, A.whatsAppPelaApi('123', 'token-de-teste', m.buscar))
+  assert.deepEqual(m.pedidos.map((p) => [p.corpo.to, p.corpo.type]), [[MEDICO, 'text'], [MEDICO, 'audio'], [DAYANE, 'text'], [DAYANE, 'audio']])
+  assert.equal(m.pedidos[0].corpo.text.body, '📎 Áudio que Paciente de Teste mandou às 23:13 de 17/10:')
+  assert.equal(banco.linhas('alertas_de_urgencia').length, 0, 'nao e alerta novo')
+  assert.equal(eventos(banco).length, 0, 'nao conta como alerta nos Numeros')
+  assert.equal(notas(banco).length, 0, 'deu certo: sem nota')
+  assert.equal(anexos(banco).length, 2)
+  assert.equal(r.falhou, false)
+  // A foto vai sem a linha: a legenda ja diz de quem e.
+  const foto = meta((corpo, n) => ({ ok: true, status: 200, corpo: { messages: [{ id: `wamid.${n}` }] } }))
+  await A.enviarAlertaDeUrgencia(cenario().admin, { ...pedido, anexo: FOTO, soOAnexo: true }, A.whatsAppPelaApi('123', 'token-de-teste', foto.buscar))
+  assert.deepEqual(foto.pedidos.map((p) => p.corpo.type), ['image', 'image'])
+  // Sem arquivo, nada sai.
+  const nada = meta()
+  const vazio = await A.enviarAlertaDeUrgencia(cenario().admin, { ...pedido, soOAnexo: true }, A.whatsAppPelaApi('123', 'token-de-teste', nada.buscar))
+  assert.equal(nada.pedidos.length, 0)
+  assert.equal(vazio.nota, '')
+})
+
+await caso('alerta aberto: sem veredito, sem resposta do medico, nas ultimas 6 horas, e nunca o de teste', async () => {
+  const linha = (extra) => ({ clinic_id: FABIO, conversation_id: 'conv-1', teste: false, veredito: null, respondido_em: null, criado_em: '2026-10-18T01:00:00Z', ...extra })
+  const com = (alertas) => bancoCom(new BancoFalso({ alertas_de_urgencia: alertas }, {}))
+  assert.equal(await A.alertaEmAberto(com([linha({})]), FABIO, 'conv-1', AGORA), true)
+  assert.equal(await A.alertaEmAberto(com([linha({ veredito: 'urgente' })]), FABIO, 'conv-1', AGORA), false, 'o caso ja foi decidido')
+  assert.equal(await A.alertaEmAberto(com([linha({ respondido_em: '2026-10-18T01:30:00Z' })]), FABIO, 'conv-1', AGORA), false, 'depois do "Eu respondo", o repasse leva o arquivo')
+  assert.equal(await A.alertaEmAberto(com([linha({ criado_em: '2026-10-17T19:00:00Z' })]), FABIO, 'conv-1', AGORA), false, 'mais de 6 horas')
+  assert.equal(await A.alertaEmAberto(com([linha({ teste: true })]), FABIO, 'conv-1', AGORA), false)
+  assert.equal(await A.alertaEmAberto(com([linha({ conversation_id: 'conv-2' })]), FABIO, 'conv-1', AGORA), false)
+  assert.equal(await A.alertaEmAberto(bancoCom(new BancoFalso({}, {}), { semTabela: ['alertas_de_urgencia'] }), FABIO, 'conv-1', AGORA), false, 'na duvida, o arquivo fica na Central')
+})
+
+await caso('o webhook: o link do acervo, o alerta com o arquivo, so o arquivo fora do bloco do robo, os pendentes e a recusa', () => {
+  const w = ler('supabase', 'functions', 'meta-webhook', 'index.ts')
+  assert.match(w, /\.from\('whatsapp-anexos'\)\s*\.createSignedUrl\(anexo\.path, 24 \* 3600\)/)
+  assert.match(w, /anexo: anexoParaEquipe \?\? \(await anexoRecenteDaConversa\(admin, conversation\.id, new Date\(Date\.now\(\) - ANEXO_RECENTE_MS\)\)\)/)
+  assert.match(w, /anexo: anexoParaEquipe,\n\s*soOAnexo: true,/)
+  // So o arquivo vem DEPOIS do fim do bloco do robo (a foto colada no texto, em rajada, tambem vai).
+  const fimDoRobo = w.indexOf('// Mensagem que o WhatsApp nao mostra: o robo nao manda o menu')
+  assert.ok(w.indexOf('soOAnexo: true') > w.indexOf('if (deveAlertar(') && w.indexOf('soOAnexo: true') < fimDoRobo)
+  assert.match(w, /if \(anexoParaEquipe && !optedOut && conversaAnterior\?\.needs_attention &&\n\s*MOTIVOS_COM_VEREDITO\.includes/)
+  assert.match(w, /if \(numerosDoAlerta\?\.some\(\(numero\) => variantesDoTelefone\(numero\)\.includes\(waId\)\)\) \{\n\s*const foram = await entregarAnexosPendentes\(\n\s*admin,\n\s*clinicId,\n\s*waId,/)
+  assert.ok(w.indexOf('const foram = await entregarAnexosPendentes(') < w.indexOf('const tratada = await tratarRespostaDaEquipe('), 'antes da resposta do medico: o toque em "Eu respondo" abre a janela')
+  assert.match(w, /if \(await acompanharEnvioDoAnexo\(admin, externalId, status, delivery\.errors, new Date\(\)\)\) continue/)
+  assert.ok(w.indexOf('acompanharEnvioDoAnexo(admin, externalId') < w.indexOf(".select('id,status,followup_id')"), 'antes de procurar em whatsapp_messages')
+  assert.match(w, /texto: body,\n\s*anexo: anexoParaEquipe,\n\s*\},\n\s*\)/, 'o repasse depois do "Eu respondo" leva o arquivo')
+  const n = ler('supabase', 'functions', 'notificar-equipe', 'index.ts')
+  assert.match(n, /anexo: await anexoRecenteDaConversa\(admin, conversa\.id, new Date\(Date\.now\(\) - 24 \* 3600 \* 1000\)\)/, 'o "Mandar para o celular" leva o ultimo arquivo')
 })
 
 conferirDesligar()

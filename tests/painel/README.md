@@ -169,3 +169,36 @@ mais duas falhas baixas pela pergunta "É uma urgência ou uma dúvida?" em
 conversa sem urgência. As conversas, os vereditos e o relatório estão fora do
 repositório, em `../jev-medicao` e `../RELATORIO - Jev (TypeSafe)
 17-10-2026.md`.
+
+**Rodada 5 (25/10/2026, robô com as melhorias vindas do sistema do
+Dr. Marcello):** 52 de 80 conversas passaram; 19 dos 40 pacientes nas duas
+redações. Falhas: 5 críticas, 5 altas, 31 médias, 56 baixas. Julgada como as
+rodadas 1 a 3 (cada agente faz o paciente e julga), e não às cegas como a 4:
+pelo mesmo método, subiu de 40 para 52. Nesta rodada o juiz conferiu também o
+acionamento do Dr. Fábio e da Dayane: `tests/conversar.mjs` passou a mostrar o
+alerta no WhatsApp dos dois e as notas da Central. Em 14 conversas com urgência
+ou sangramento o alerta saiu nas 14, e não houve alarme falso nas outras 66.
+
+- As críticas: "tontera forte a casa ta girano. vomitano" recebeu o menu (o
+  alerta só saiu na mensagem seguinte); "como vo se nem consigo levanta" ficou
+  sem o 192; "nao da pra ir nao consigo anda" e "chama uma ambulancia pra mim"
+  ficaram sem resposta (o lembrete com o 192 começa igual ao anterior, e
+  `jaMandada` compara só o começo); "de 8 em 8h ta bom?", sobre o
+  antibiótico, recebeu "Tem, sim 🙂 Às 8h" (a dose lida como horário).
+- As altas: a Unimed de São Paulo, e a que "pega em todo lugar", virou
+  Unimed Santos (três vezes); "é o Davi Oliveira Costa" foi gravado com o "é o";
+  a pergunta de remédio virou a queixa, sem o sintoma.
+- Médias que se repetiam: despedida e desculpa ("puts, ok vlw", "Eu que
+  agradeço", "eu me enganei, desculpa") com "Não consegui entender"; "não quero
+  marcar agora, só queria saber" na pergunta do convênio; dia e hora com a
+  unidade ("quero a de terça às 8h em Higienópolis") com a lista de endereços;
+  "santos não, tatuapé" com "não entendi qual unidade".
+
+Tudo isso virou caso em `tests/fabio.test.mjs` ("rodada 5"), e cada uma das 18
+correções foi desligada uma vez para provar que o caso falha sem ela. Tirar o
+nome das unidades das palavras da resposta de endereços também foi testado e
+desfeito: não era preciso, e "Higienópolis" sozinho passaria a ouvir "não
+entendi". Ficaram para a próxima rodada as outras médias (texto repetido
+palavra por palavra, "19h 20h" lido como 19:20, "2 a tarde" como 12h, "o
+primero" sem os dias, a foto no meio da urgência sem resposta). As conversas e
+os vereditos estão fora do repositório, na pasta de trabalho da sessão.

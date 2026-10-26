@@ -1,6 +1,7 @@
 import { adminClient, corsHeaders, json, userClient } from '../_shared/whatsapp.ts'
 import { chavesDaClinica, entregar } from '../_shared/push-da-equipe.ts'
 import { enviarAlertaDeUrgencia, quemNoAlerta } from '../_shared/alerta-de-urgencia.ts'
+import { anexoRecenteDaConversa } from '../_shared/anexo-para-equipe.ts'
 import { clinicaDeQuemAtende } from '../_shared/papel.ts'
 
 /**
@@ -128,6 +129,9 @@ Deno.serve(async (req) => {
         texto: String(ultima?.body ?? '').trim() || 'Sem mensagem do paciente nesta conversa.',
         agora: new Date(),
         conversationId: conversa.id,
+        // A foto, o audio ou o documento do paciente vai junto (25/10/2026,
+        // pedido do Edu): o ultimo das ultimas 24 horas, logo atras do pedido.
+        anexo: await anexoRecenteDaConversa(admin, conversa.id, new Date(Date.now() - 24 * 3600 * 1000)),
       })
       return json(r)
     }

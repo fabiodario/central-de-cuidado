@@ -535,6 +535,17 @@ export function pediuAgendamento(texto: string) {
   // "marca da" tambem ("qual marca de formula?").
   if (/\b(marque|marcamos|agende|agendo|agenda|agendamos)\b/.test(t)) return true
   if (/\bmarca\b(?!\s+d[aeo]s?\b)/.test(t)) return true
+  // "Mesmo assim ja quero deixar marcado: Higienopolis, terca a tarde" e
+  // "quero a de terca as 8h em Higienopolis" (25/10/2026, rodada 5 do painel):
+  // a escolha do dia e da hora e pedido, e recebeu a lista de enderecos.
+  if (/\b(deixar|deixa|deixo|ja) marcad[oa]\b/.test(t)) return true
+  if (
+    /\b(quero|queria|prefiro|pode ser|fico com|vou querer)\b/.test(t) &&
+    /\b(segunda|terca|quarta|quinta|sexta)\b/.test(t) &&
+    /\b\d{1,2} ?h\b|\bas \d{1,2}\b|\b(manha|tarde)\b/.test(t)
+  ) {
+    return true
+  }
 
   // Pedido de vaga sem o verbo (24/09/2026): "Consigo para amanha com o dr
   // Marcelo" recebeu "Nao entendi". Vaga e dia pedidos juntos sao agendamento.
@@ -592,6 +603,11 @@ export function soAgradecimento(texto: string): boolean {
     // "Ok, obrigada, fico no aguardo do contato" (rodada 2): recado de espera.
     'fico', 'no', 'aguardo', 'aguardando', 'entao', 'esperando', 'espero', 'contato', 'retorno', 'resposta',
     'noticias', 'seu', 'sua', 'vosso', 'vossa', 'do', 'da',
+    // "puts, ok vlw", "Eu que agradeco. Tenha um otimo dia!" e "Ah, entao eu
+    // me enganei mesmo. Desculpa, obrigada!" (25/10/2026, rodada 5 do painel)
+    // receberam "Nao consegui entender" e acenderam a conversa para a equipe.
+    'puts', 'vlw', 'vlww', 'falou', 'flw', 'tmj', 'eu', 'que', 'ah', 'ahh', 'desculpa', 'desculpe', 'me',
+    'enganei', 'confundi', 'engano', 'mesmo', 'msm', 'foi', 'nos', 'agradecemos',
   ])
   const palavras = t.split(/\s+/)
   // Precisa de UM agradecimento ou "ok" de verdade (25/09/2026): so com a
@@ -603,6 +619,7 @@ export function soAgradecimento(texto: string): boolean {
 const AGRADECIMENTO = new Set([
   'ok', 'okay', 'okk', 'blz', 'beleza', 'obrigado', 'obrigada', 'obg', 'brigado', 'brigada', 'valeu',
   'grato', 'grata', 'certo', 'combinado', 'perfeito', 'entendi', 'otimo', 'show', 'maravilha', 'agradeco',
+  'vlw', 'vlww', 'agradecemos',
 ])
 
 /**
@@ -1036,7 +1053,10 @@ const OBJETO_COMUM = '(objeto|coisa|peca|pedaco|papel|borracha|algodao|cotonete|
 const LUGAR_DO_OBJETO = '(nariz|narina|narinas|ouvido|ouvidos|orelha|garganta)'
 const PUS_PRA_DENTRO = '(enfiou|enfiei|enfiaram|colocou|coloquei|colocaram|botou|botei|meteu|meti|entrou|caiu|ficou|engoliu|engoli)'
 const NAO_CONSEGUE = '(nao|mal) (consigo|consegue|consegui|conseguiu|conseguimos|to conseguindo|estou conseguindo|esta conseguindo|ta conseguindo)'
-const TONTURA = /\b(tontura|tonteira|tont[oa]|vertigem|vertigens|labirintite|(tudo|mundo|casa|cabeca) (rodando|girando|gira|roda)|(rodando|girando) tudo)\b/
+// "Tontera forte a casa ta girano" (25/10/2026, rodada 5 do painel): a grafia
+// falada e o "ta" no meio escapavam, e a mensagem recebeu o menu. O gerundio
+// falado ("girano", "vomitano") e corrigido antes, em sinalDeAlarme.
+const TONTURA = /\b(tontura|tonteira|tontera|tontiera|tont[oa]|vertigem|vertigens|labirintite|(tudo|mundo|casa|cabeca|quarto)( (ta|esta|fica|ficou|todo|toda))? (rodando|girando|gira|roda)|(rodando|girando) tudo)\b/
 const TONTURA_FORTE = new RegExp(
   `\\b(vomit\\w*|${NAO_CONSEGUE} (ficar de pe|ficar em pe|parar em pe|levanta\\w*|me levantar|andar|abrir os olhos)|cai|caiu|desmai\\w*|` +
     'forte|fortissima|horrivel|insuportavel|passando mal|nao para|sem parar)\\b',
@@ -1047,7 +1067,14 @@ const TONTURA_FORTE = new RegExp(
 const QUEIXA_DE_SEMPRE = /\b(pelo nariz|pela narina|pelas narinas|pelo lado|nariz entupido|entupid[oa]|a noite|de noite|dormindo|quando dorme|pra dormir|para dormir|ronc\w*)\b/
 
 export function sinalDeAlarme(texto: string): SinalDeAlarme | null {
-  const t = normalizar(texto).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()
+  // O gerundio como se fala (rodadas 4 e 5 do painel): "tudo rodano, vomitei"
+  // e "a casa ta girano. vomitano" ficaram sem alerta. So os verbos do alarme:
+  // trocar todo "-ano" estragaria "plano", "cano" e "ano".
+  const t = normalizar(texto)
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\b(gir|rod|vomit|sangr|desmai|sufoc|engasg|trem)ano\b/g, '$1ando')
+    .replace(/\s+/g, ' ')
+    .trim()
   if (!t) return null
   const tem = (padrao: RegExp | string) => (typeof padrao === 'string' ? new RegExp(padrao) : padrao).test(t)
   /** O padrao casa longe da queixa de sempre (ver QUEIXA_DE_SEMPRE). */
@@ -2179,7 +2206,10 @@ export function despedida(texto: string): boolean {
   // "Fica pra quando eu for pra SP", "deixa pra depois" (16/10/2026, rodada 2
   // do painel): recebiam "Nao consegui entender" e iam para a fila.
   const depois =
-    /\b(vou (tentar|ver|pensar|verificar|conversar|falar|olhar|analisar|decidir|avaliar|procurar|aguardar|esperar)|nao vai dar( pra mim)?|nao da pra mim|nao serve pra mim|nao vai rolar|volto (a falar|depois|mais tarde|pra|para|aqui|a entrar|a chamar)|retorno (depois|mais tarde|em breve)|(entro|entramos) em contato|qualquer coisa (eu )?(volto|chamo|falo|aviso|entro)|depois (eu )?(volto|chamo|falo|marco|vejo|aviso)|fica (pra|para) (depois|quando|outra|outro|a proxima)|(deixa|deixo|vou deixar) (pra|para) (depois|outra|outro|quando|a proxima)|quando eu (for|puder|voltar|tiver|estiver))\b/.test(t)
+    /\b(vou (tentar|ver|pensar|verificar|conversar|falar|olhar|analisar|decidir|avaliar|procurar|aguardar|esperar)|nao vai dar( pra mim)?|nao da pra mim|nao serve pra mim|nao vai rolar|volto (a falar|depois|mais tarde|pra|para|aqui|a entrar|a chamar)|retorno (depois|mais tarde|em breve)|(entro|entramos) em contato|qualquer coisa (eu )?(volto|chamo|falo|aviso|entro)|depois (eu )?(volto|chamo|falo|marco|vejo|aviso)|fica (pra|para) (depois|quando|outra|outro|a proxima)|(deixa|deixo|vou deixar) (pra|para) (depois|outra|outro|quando|a proxima)|quando eu (for|puder|voltar|tiver|estiver))\b/.test(t) ||
+    // "nao quero marcar agora nao, so queria saber msm. obg" (25/10/2026,
+    // rodada 5 do painel) recebeu duas vezes "Responda com o numero do convenio".
+    /\b(nao (quero|vou|preciso) marcar (agora|ainda|por enquanto|hoje|nao)|so queria (saber|tirar|perguntar)|era so (pra|para) (saber|perguntar)|era so (uma )?duvida|so (uma )?duvida mesmo)\b/.test(t)
   return agradece && depois
 }
 
@@ -3204,7 +3234,11 @@ async function unidadeDoPedidoSemAviso(admin: Admin, clinicId: string, conversat
   }
 
   if (fora) {
+    // A Unimed de outra cidade ouve o porque (rodada 5 do painel): "unimed e
+    // unimed, a minha pega em todo lugar".
+    const unimedDaqui = /^Unimed /.test(fora) ? aceitos.find((p) => /\bunimed\b/i.test(p)) : undefined
     const aviso =
+      (unimedDaqui ? `Cada Unimed é uma cooperativa diferente, com rede própria: aqui é atendida a *${unimedDaqui}*. ` : '') +
       `O plano *${fora}* não está entre os convênios atendidos ${perfil().o.replace(/^o /, 'pelo ')}. ` +
       'A consulta pode ser particular, com recibo para você pedir reembolso ao seu plano.'
     return await comAviso(aviso, citada ? perguntarConvenioOuDia(admin, clinicId, conversationId, citada) : perguntarUnidade(admin, clinicId, conversationId))
@@ -3453,6 +3487,10 @@ function unidadeCitada(unidades: Unidade[], texto: string): Unidade | null {
       if (palavras[i + 1] === 'nao') return true
       const antes = palavras.slice(Math.max(0, i - 4), i)
       const j = antes.lastIndexOf('nao')
+      // O "nao" de outra unidade nao nega esta (25/10/2026, rodada 5 do
+      // painel): em "santos nao, tatuape" o "nao" e do Santos, e o Tatuape
+      // tambem saia, com "Nao entendi qual unidade".
+      if (j > 0 && quantas.has(antes[j - 1])) return false
       return j >= 0 && antes.slice(j + 1).every((x) => PODE_FICAR_NA_RECUSA.has(x))
     })
   }
@@ -4152,6 +4190,23 @@ function outraUnimed(texto: string, planos: string[]): string | null {
     const duas = t.match(padrao)
     if (duas) return `Unimed ${titulo(duas[1])}`
   }
+  // A cidade depois de "de" (25/10/2026, rodada 5 do painel): "A minha e a
+  // Unimed daqui de Sao Paulo" virou "Pela Unimed Santos" e a agenda de
+  // Santos, com a paciente morando no Tatuape. E "a minha pega em todo lugar"
+  // tambem nao e a Unimed Santos, a menos que diga Santos.
+  const daCidade = t.match(/\bunimed( [a-z]+){0,2} (de|do|da|em) (sao paulo|sp|sampa|capital|guarulhos|osasco|campinas|santo andre|sao bernardo|sao caetano|abc|jundiai|sorocaba|rio de janeiro|rio|belo horizonte|bh|curitiba)\b/)
+  if (daCidade && !daAceita.some((w) => w.length >= 3 && daCidade[3].split(' ').includes(w))) {
+    const nome = /^(sp|sampa|capital|sao paulo)$/.test(daCidade[3]) ? 'São Paulo' : titulo(daCidade[3])
+    return `Unimed de ${nome}`
+  }
+  // So o plano que "vale em todo lugar": "pode ser em qualquer lugar" e a
+  // unidade, e nao o plano.
+  if (
+    /\bunimed\b/.test(t) && !/\b(santos|santista)\b/.test(t) &&
+    /\b(pega|pegam|vale|valia|cobre|cobria|aceita|aceitam|serve|servia|funciona)( em| no| na)? (todo lugar|qualquer lugar|todo o brasil|todo brasil)\b/.test(t)
+  ) {
+    return 'Unimed de outra cidade'
+  }
   const m = t.match(/\bunimed\s+([a-z]+)/)
   if (!m || NAO_E_CIDADE.has(m[1]) || daAceita.includes(m[1])) return null
   if (CIDADES_DA_UNIMED.has(m[1])) return `Unimed ${titulo(m[1])}`
@@ -4758,14 +4813,23 @@ function lembreteDeUrgencia(motivo: 'sangramento' | 'urgencia', texto = ''): str
  * consultorio (plano ou particular) deixava a mae sem caminho: e a UPA. Vazio
  * quando nao ha nada a acrescentar.
  */
+/**
+ * Quem nao tem como ir ao pronto-socorro, ou pede ambulancia: o caminho e o 192.
+ * "Minha mulher ta no trabalho, nao tenho como i" e "vcs pode chama uma
+ * ambulancia?" (rodada 3 do painel); "como vo se nem consigo levanta" e "nao
+ * consigo anda" (25/10/2026, rodada 5).
+ */
+function precisaDo192(texto: string): boolean {
+  const t = normalizar(texto).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ')
+  return /\b(sozinh[oa]|(nao|nem) (consigo|consegue|tenho como|tem como|da pra) (ir|i|levantar|levanta|dirigir|andar|anda|sair|sai)|como (eu )?(vou|vo)|sem carro|sem ninguem|nao tenho quem|ninguem (pra|para) (me )?levar|(ta|esta) no trabalho|ambulancia|samu|resgate)\b/.test(t)
+}
+
 function complementoDaUrgencia(texto: string): string {
   const t = normalizar(texto).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ')
   const partes: string[] = []
   // "Minha mulher ta no trabalho, nao tenho como i" e "vcs pode chama uma
   // ambulancia?" (rodada 3 do painel) ficaram sem o 192.
-  if (/\b(sozinh[oa]|nao (consigo|consegue|tenho como|tem como|da pra) (ir|i|levantar|levanta|dirigir|andar|sair)|como (eu )?vou|sem carro|sem ninguem|nao tenho quem|ninguem (pra|para) (me )?levar|(ta|esta) no trabalho|ambulancia|samu|resgate)\b/.test(t)) {
-    partes.push('Se não tiver como ir, ligue *192* (SAMU): eles vão até você.')
-  }
+  if (precisaDo192(texto)) partes.push('Se não tiver como ir, ligue *192* (SAMU): eles vão até você.')
   if (/\b(nao tenho|nao tem|sem) (plano|convenio)\b|\b(sus|upa|publico|publica)\b/.test(t)) {
     partes.push('Sem plano de saúde, a UPA ou o pronto-socorro público mais próximo atendem.')
   }
@@ -4968,7 +5032,14 @@ async function perguntarHorario(
 // Rinoplastia e motivo de consulta (rodada 3 do painel): a ficha perguntou o
 // motivo a quem ja tinha dito que queria a avaliacao da rinoplastia.
 const QUEIXA_DO_OTORRINO =
-  /\b(rinoplastia|plastica no nariz|sinusite|rinite|renite|ronc\w*|apneia|nariz|entupid\w*|entupimento|desvio|septo|ouvidos?|orelha|zumbido|audicao|surd\w*|escuto|tontura|labirintite|vertigem|garganta|amigdal\w*|adenoide|voz|rouquidao|rouc[oa]|olfato|cheiro|paladar|respira\w*|otite|dor|febre|sangr\w*|secrecao|catarro|alergia|coriza|espirr\w*|polipos?|cornetos?)\b/
+  /\b(rinoplastia|plastica no nariz|sinusite|rinite|renite|ronc\w*|apneia|nariz|entupid\w*|entupimento|desvio|septo|ouvidos?|orelha|zumbido|audicao|surd\w*|escuto|tontura|labirintite|vertigem|garganta|amigdal\w*|adenoide|voz|rouquidao|rouc[oa]|olfato|cheiro|paladar|respira\w*|otite|dor|doendo|doi|febre|sangr\w*|secrecao|pus|catarro|alergia|coriza|espirr\w*|polipos?|cornetos?)\b/
+
+/** "Posso pingar umas gotas?", "tomo o que?": pedido de orientacao, e nao queixa. */
+function perguntaDeRemedio(frase: string): boolean {
+  const t = normalizar(frase)
+  return /\?/.test(frase) && /\b(posso|pode|devo|da pra|dá pra|tomo|uso|pingo|passo)\b/.test(t) &&
+    /\b(tomar|toma|pingar|pinga|usar|usa|passar|passa|dar|gotas?|remedio|spray|pomada|antibiotico|xarope)\b/.test(t)
+}
 
 /**
  * A frase conta uma queixa do otorrino. "Medico do ouvido" e a especialidade,
@@ -5102,7 +5173,10 @@ async function queixaDaConversa(admin: Admin, conversationId: string): Promise<s
       .map((frase) => frase.trim().replace(/[.!]+$/, ''))
       // "Quero marca o medico do ouvido" (rodada 3 do painel) nao e queixa: e a
       // especialidade, e a ficha precisa perguntar o motivo.
-      .filter((frase) => frase.length >= 6 && ehQueixa(frase))
+      // A pergunta de remedio nao e a queixa (25/10/2026, rodada 5 do painel):
+      // "posso pinga umas gota no ouvido? ta saindo pus e doendo mt" gravou a
+      // pergunta e deixou de fora o pus e a dor.
+      .filter((frase) => frase.length >= 6 && ehQueixa(frase) && !perguntaDeRemedio(frase))
       // Sem o "bom dia" e sem o pedido de marcar (rodada 3 do painel): "bom dia,
       // to com sinusite de novo, queria uma consulta semana q vem pela unimed
       // santos" foi gravado inteiro. Fica o pedaco que conta a queixa.
@@ -5611,6 +5685,9 @@ function nomeDaFicha(texto: string): string | null {
   // nenhum comeca com a palavra "eu" solta ("Eunice" e uma palavra so).
   t = t.replace(/^(eu|aqui e|aqui é)\s+(?!mesm)/i, '')
   t = t.replace(/^(o\s+)?(nome\s+(completo\s+)?(dela|dele|do paciente|da paciente|e|é)?\s*(e|é|:)?|ela se chama|ele se chama|se chama|meu nome (e|é)|eu sou (a|o)|sou (a|o))\s+/i, '')
+  // "É o Davi Oliveira Costa" (25/10/2026, rodada 5 do painel) foi gravado
+  // com o "É o" no nome e saiu assim na confirmacao.
+  t = t.replace(/^(e|é|eh)\s+(o|a|so|só)\s+(?=\p{L})/iu, '')
   t = t.split(/[,;(]|\s-\s|\s+\d/)[0]
   t = t.replace(/\s+(nascid[oa]|nasceu|tem\s|sou\s|mae|mãe|pai|avo|avó)\b.*$/i, '')
   t = t.replace(/[.!?]+$/, '').replace(/\s+/g, ' ').trim()
@@ -6931,8 +7008,27 @@ async function tratarConversaPorDentro(opcoes: {
           botoes: [{ id: 'MARCAR_AGORA', titulo: 'Marcar uma consulta' }],
         }
       }
-      if (parecePergunta(texto) || pediuUrgencia(texto) || !(await jaMandada(admin, conversationId, lembrete))) {
+      // O que a pessoa disse agora (o 192 para quem nao tem como ir) vale mesmo
+      // com o lembrete de ha pouco (25/10/2026, rodada 5 do painel): "nao da pra
+      // ir nao consigo anda" e "chama uma ambulancia pra mim" ficaram em
+      // silencio, porque o lembrete com o 192 comeca igual ao de antes, e
+      // jaMandada so compara o comeco.
+      const complemento = complementoDaUrgencia(texto).trim()
+      if (
+        parecePergunta(texto) || pediuUrgencia(texto) || !(await jaMandada(admin, conversationId, lembrete)) ||
+        (complemento && !(await jaMandada(admin, conversationId, complemento)))
+      ) {
         return { resposta: lembrete, atencao: motivo }
+      }
+      // O 192 ja saiu e a pessoa insiste que nao consegue ir, ou pede que a
+      // clinica chame a ambulancia (rodada 5): o silencio ali e o pior que ha.
+      if (precisaDo192(texto)) {
+        return {
+          resposta:
+            '🚑 *Ligue 192 (SAMU) agora*: eles vão até você. Por aqui não conseguimos chamar a ambulância. ' +
+            'Se tiver alguém perto, peça para ligar. A nossa equipe já foi avisada.',
+          atencao: motivo,
+        }
       }
       // "Ajuda", logo depois do lembrete (rodada 3 do painel), ficava sem
       // resposta nenhuma. O pedido curto recebe o caminho mais curto.
@@ -8687,6 +8783,12 @@ async function tratarConversaPorDentro(opcoes: {
         const lista = await perguntarUnidade(admin, clinicId, conversationId)
         return { ...lista, resposta: `Tudo bem, em outra unidade. ${lista?.resposta ?? ''}` }
       }
+    }
+    // A desistencia vale aqui tambem, como na pergunta da unidade (25/10/2026,
+    // rodada 5 do painel): "nao quero marcar agora nao, so queria saber msm.
+    // obg" e "obrigada" receberam duas vezes "Responda com o numero do convenio".
+    if (desistiuDoAgendamento(texto)) {
+      return await sairDoAgendamento(admin, conversationId, clinicId, opcoes.consultaASubstituir ?? null, opcoes.consultas)
     }
 
     const plano = (escolhida.accepts_insurance ?? '').trim()

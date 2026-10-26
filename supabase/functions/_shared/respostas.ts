@@ -116,9 +116,18 @@ const EXAME_NO_CONSULTORIO =
   /\b(voces|vcs|vc|voce|dr|doutor|ele|consultorio|clinica)\s+(faz|fazem|realiza|realizam)\b|\b(faz|fazem|realiza|realizam)\b.{0,30}\b(ai|aqui|no consultorio|na clinica)\b/
 const NOME_DE_EXAME = /\bexames? d[eo] (sangue|fezes|urina)\b/g
 
+/**
+ * Intervalo de dose (25/10/2026, rodada 5 do painel): "so fala se pode ou nao
+ * rapidinho, de 8 em 8h ta bom?", sobre o antibiotico, foi lido como horario
+ * de consulta e recebeu "Tem, sim 🙂 Às 8h...", que soa como liberar o
+ * remedio. "De 8 em 8h" e "3 vezes ao dia" sao dose, nunca agenda.
+ */
+const DOSE = /\bde \d{1,2} ?(h|hs|hr|hrs|hora|horas)? em \d{1,2} ?(h|hs|hr|hrs|hora|horas)\b|\b\d{1,2} (vezes|vez) (ao|por|no) dia\b/
+
 /** A mensagem fala de sintoma, remédio ou queixa? */
 export function assuntoClinico(texto: string): boolean {
   let limpo = normalizar(texto).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').replace(NAO_E_CLINICO, ' ')
+  if (DOSE.test(limpo)) return true
   let palavras = new Set(palavrasDe(limpo))
   if (ADMINISTRATIVO.test(limpo) || EXAME_NO_CONSULTORIO.test(limpo)) {
     limpo = limpo.replace(NOME_DE_EXAME, 'exames')

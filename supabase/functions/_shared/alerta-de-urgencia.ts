@@ -1,3 +1,5 @@
+import { anexoQueVai, cabecalhoDoAnexo, ehAudio, mensagemDoAnexo, notaDoAnexo, type AnexoParaEquipe } from './anexo-para-equipe.ts'
+import { registrarEnvioDoAnexo } from './anexos-pendentes.ts'
 import { montarConteudo } from './conteudo.ts'
 import { textoDoModelo } from './modelos.ts'
 import { quemAtende } from './quem-atende.ts'
@@ -332,6 +334,47 @@ export type PedidoDeAlerta = {
   conversationId?: string
   /** Para o teste da tela e o simulador: manda para estes, sem ler o banco. */
   numeros?: string[]
+  /**
+   * A foto, o audio ou o documento da mensagem, que vai logo atras do alerta
+   * (25/10/2026, ver anexo-para-equipe.ts).
+   */
+  anexo?: AnexoParaEquipe
+  /**
+   * So o arquivo, sem alerta novo: o paciente mandou depois, com o alerta
+   * ainda aberto (ver alertaEmAberto). Sem arquivo, nao manda nada.
+   */
+  soOAnexo?: boolean
+}
+
+const JANELA_DO_ALERTA_ABERTO_MS = 6 * 3600 * 1000
+
+/**
+ * Ha alerta desta conversa sem veredito e sem resposta do medico nas ultimas
+ * 6 horas? E quando o arquivo que o paciente manda depois vai sozinho aos
+ * celulares (25/10/2026): a foto do nariz que chega um minuto depois do
+ * "esta sangrando" e o que o medico precisa ver. Depois do "Eu respondo", o
+ * repasse da resposta do paciente ja leva o arquivo (resposta-ao-alerta.ts);
+ * depois do veredito, o caso esta decidido e o arquivo fica na Central. Na
+ * duvida (tabela fora, erro), diz que nao: o arquivo continua na Central.
+ */
+export async function alertaEmAberto(admin: Admin, clinicId: string, conversationId: string, agora: Date): Promise<boolean> {
+  try {
+    const { data, error } = await admin
+      .from('alertas_de_urgencia')
+      .select('id')
+      .eq('clinic_id', clinicId)
+      .eq('conversation_id', conversationId)
+      .eq('teste', false)
+      .is('veredito', null)
+      .is('respondido_em', null)
+      .gte('criado_em', new Date(agora.getTime() - JANELA_DO_ALERTA_ABERTO_MS).toISOString())
+      .limit(1)
+    if (error) throw error
+    return Boolean(data?.length)
+  } catch (erro) {
+    console.error('Anexo para a equipe: nao li alertas_de_urgencia; o arquivo fica na Central', erro)
+    return false
+  }
 }
 
 export type ResultadoDoAlerta = {
@@ -397,8 +440,13 @@ export async function enviarAlertaDeUrgencia(admin: Admin, p: PedidoDeAlerta, en
     }
   }
 
+  // So o arquivo, sem arquivo ou sem numero: nada a mandar, e nada a anotar (a
+  // conversa ja tem a nota do alerta de antes).
+  const nadaAMandar = { envios: [], alertaId: null, detalhe: 'sem arquivo', nota: '', falhou: false }
+  if (p.soOAnexo && !(p.anexo && anexoQueVai(p.anexo.tipo))) return nadaAMandar
   try {
     const lidos = p.numeros ?? (await lerNumeros(admin, p.clinicId))
+    if (p.soOAnexo && !numerosDoAlerta(lidos).length) return nadaAMandar
     if (lidos === null) {
       const nota = naoSaiu('não consegui ler os números do alerta')
       await registrarNaConversa(nota, 'falhou: sem a lista de numeros')
@@ -420,6 +468,62 @@ export async function enviarAlertaDeUrgencia(admin: Admin, p: PedidoDeAlerta, en
     const numeroDoRobo = (ajustes as { whatsapp_phone_number_id?: string } | null)?.whatsapp_phone_number_id
     const idioma = (ajustes as { whatsapp_template_language?: string } | null)?.whatsapp_template_language || 'pt_BR'
     const mandar = enviar ?? (numeroDoRobo ? whatsAppPelaApi(numeroDoRobo, chaveDoWhatsApp(numeroDoRobo)) : null)
+
+    // O arquivo do paciente (25/10/2026, ver anexo-para-equipe.ts): logo atras
+    // do alerta, so para quem recebeu o alerta. Cada envio fica registrado,
+    // porque a Meta aceita na hora e pode recusar depois (anexos-pendentes.ts).
+    const corpoDoAnexo = p.anexo && anexoQueVai(p.anexo.tipo) ? mensagemDoAnexo(p.anexo, p.quem) : null
+    const enviosDoAnexo: EnvioDoAlerta[] = []
+    const mandarAnexo = async (numero: string, comCabecalho: boolean) => {
+      if (!corpoDoAnexo || !p.anexo || !mandar) return
+      const recebidoEm = p.anexo.recebidoEm ?? p.agora.toISOString()
+      // Sem alerta na frente, a linha antes diz de quem e.
+      if (comCabecalho) await mandar(numero, { type: 'text', text: { body: cabecalhoDoAnexo(p.anexo.tipo, p.quem, recebidoEm) } })
+      let r: Enviado
+      try {
+        r = await mandar(numero, corpoDoAnexo)
+      } catch (erro) {
+        r = { ok: false, erro: String(erro).slice(0, 200) }
+      }
+      enviosDoAnexo.push(r.ok ? { numero, ok: true } : { numero, ok: false, erro: r.erro })
+      if (p.anexo.caminho && p.conversationId) {
+        await registrarEnvioDoAnexo(admin, {
+          clinicId: p.clinicId,
+          conversationId: p.conversationId,
+          numero,
+          tipo: p.anexo.tipo,
+          caminho: p.anexo.caminho,
+          nome: p.anexo.nome,
+          quem: p.quem,
+          recebidoEm,
+          metaId: r.ok ? r.id : null,
+          ok: r.ok,
+          erro: r.ok ? undefined : r.erro,
+        })
+      }
+    }
+    const notaDoArquivo = () => (corpoDoAnexo && p.anexo ? notaDoAnexo(p.anexo.tipo, enviosDoAnexo) : '')
+
+    // So o arquivo, com o alerta ja aberto: sem modelo, sem alerta novo, sem
+    // evento. A nota so aparece se nao foi para algum celular.
+    if (p.soOAnexo) {
+      if (!corpoDoAnexo) return { envios: [], alertaId: null, detalhe: 'sem arquivo', nota: '', falhou: false }
+      // Foto, video e documento levam "Enviado por" na legenda; o audio nao tem
+      // legenda, e vai com a linha antes.
+      for (const numero of numeros) await mandarAnexo(numero, ehAudio(p.anexo?.tipo))
+      const nota = notaDoArquivo()
+      if (nota && p.conversationId) {
+        try {
+          const { error } = await admin.from('conversation_notes').insert({ clinic_id: p.clinicId, conversation_id: p.conversationId, texto: nota })
+          if (error) console.error('Anexo para a equipe: nota nao gravada', error)
+        } catch (erro) {
+          console.error('Anexo para a equipe: nota nao gravada', erro)
+        }
+      }
+      const certos = enviosDoAnexo.filter((e) => e.ok).length
+      return { envios: enviosDoAnexo, alertaId: null, detalhe: `arquivo ${certos}/${enviosDoAnexo.length}`, nota, falhou: certos < enviosDoAnexo.length }
+    }
+
     const parametros = pedido ? parametrosDoPedido(p) : parametrosDoAlerta({ ...p, motivo: p.motivo as MotivoDoAlerta })
     const corpoDoModelo = { type: 'body', parameters: parametros.map((text) => ({ type: 'text', text })) }
 
@@ -494,6 +598,8 @@ export async function enviarAlertaDeUrgencia(admin: Admin, p: PedidoDeAlerta, en
         if (r.ok) {
           envios.push({ numero, ok: true })
           if (r.id) mensagens.push(r.id)
+          // O arquivo logo atras do alerta, so para quem recebeu o alerta.
+          await mandarAnexo(numero, false)
         } else {
           envios.push({ numero, ok: false, erro: r.erro })
         }
@@ -512,8 +618,10 @@ export async function enviarAlertaDeUrgencia(admin: Admin, p: PedidoDeAlerta, en
 
     const descricao = descreverEnvio(envios, p.clinicId, p.motivo)
     if (descricao.falhou) console.error('Alerta de urgencia nao saiu para todos', descricao.detalhe)
-    await registrarNaConversa(descricao.nota, descricao.detalhe)
-    return { envios, alertaId, ...descricao }
+    if (enviosDoAnexo.some((e) => !e.ok)) console.warn('Anexo nao foi para todos os celulares', JSON.stringify(enviosDoAnexo))
+    const nota = [descricao.nota, notaDoArquivo()].filter(Boolean).join('\n')
+    await registrarNaConversa(nota, descricao.detalhe)
+    return { envios, alertaId, ...descricao, nota }
   } catch (erro) {
     console.error('Alerta de urgencia: falhou antes de enviar', erro)
     const nota = naoSaiu(String(erro).slice(0, 120))

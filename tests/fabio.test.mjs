@@ -1543,4 +1543,145 @@ await caso('botao velho no meio da ficha nao vira nome do paciente', () => {
   for (const t of ['Ana Paula Ribeiro', 'Antônio Carlos', 'Fábio Dario']) assert.equal(pareceBotao(t), false, t)
 })
 
+// ---------------------------------------------------------------
+// Rodada 5 do painel (25/10/2026, robo com as melhorias do Dr. Marcello)
+// ---------------------------------------------------------------
+
+await caso('rodada 5: tontura com o gerundio falado e o "ta" no meio acende na primeira mensagem', async () => {
+  assert.equal(sinalDeAlarme('tontera forte a casa ta girano. vomitano. nao paro de pe'), 'tontura')
+  assert.equal(sinalDeAlarme('tudo rodano, vomitei varias vez, nao levanto da cama'), 'tontura', 'a critica da rodada 4')
+  // Cada jeito sozinho, para um nao cobrir o outro.
+  assert.equal(sinalDeAlarme('a casa ta girando e ja vomitei'), 'tontura')
+  assert.equal(sinalDeAlarme('tontera forte desde cedo'), 'tontura')
+  assert.equal(sinalDeAlarme('tudo girano e ja vomitei duas vez'), 'tontura')
+  assert.equal(sinalDeAlarme('faz um ano que tenho tontura leve as vezes'), null)
+  const s = nova('nova')
+  const r = await conversar(s, ['tontera forte a casa ta girano. vomitano. nao paro de pe'])
+  assert.equal(r.noMedico.length, 1, 'o alerta no WhatsApp sai na primeira mensagem')
+  assert.doesNotMatch(r.texto, /Seja muito bem-vindo/)
+})
+
+await caso('rodada 5: na fila de urgencia, quem nao consegue ir recebe o 192, e nunca silencio', async () => {
+  const s = nova('nova')
+  await conversar(s, ['bom dia. tontura mt forte desde cedo, ja vomitei 3 vez e nao consigo fica em pe'])
+  let r = await conversar(s, ['como vo se nem consigo levanta'])
+  assert.match(r.texto, /ligue \*192\* \(SAMU\): eles vão até você/)
+  r = await conversar(s, ['nao da pra ir nao consigo anda'])
+  assert.match(r.texto, /Ligue 192 \(SAMU\) agora/, 'o 192 ja saiu, e a insistencia tem resposta')
+  r = await conversar(s, ['chama uma ambulancia pra mim pfv'])
+  assert.match(r.texto, /Por aqui não conseguimos chamar a ambulância/)
+  // O lembrete com o 192 quando o de antes saiu sem ele: o comeco igual nao
+  // e repeticao.
+  const s2 = nova('nova')
+  await conversar(s2, ['bom dia. tontura mt forte desde cedo, ja vomitei 3 vez e nao consigo fica em pe', 'to muito mal'])
+  r = await conversar(s2, ['nao da pra ir nao consigo anda'])
+  assert.match(r.texto, /O alerta já está com a nossa equipe[\s\S]*ligue \*192\*/)
+})
+
+await caso('rodada 5: intervalo de dose e remedio, e nao horario de consulta', async () => {
+  const s = nova('nova')
+  await conversar(s, ['posso tomar amoxi q tenho em casa? to com sinusite acho'])
+  const r = await conversar(s, ['so fala se pode ou nao rapidinho, de 8 em 8h ta bom?'])
+  assert.doesNotMatch(r.texto, /Tem, sim|primeiro horário livre/)
+  assert.match(r.texto, /remédio e sintoma só o Dr\. Fábio pode orientar/)
+  const s2 = nova('nova')
+  const r2 = await conversar(s2, ['tem horario as 8h?'])
+  assert.match(r2.texto, /Às 8h/, 'a hora da agenda continua valendo')
+})
+
+await caso('rodada 5: a Unimed de Sao Paulo e a que "pega em todo lugar" nao viram a Unimed Santos', async () => {
+  let s = nova('nova')
+  let r = await conversar(s, ['quero marcar uma consulta pela unimed, a minha é a Unimed daqui de São Paulo'])
+  assert.doesNotMatch(r.texto, /Pela \*Unimed Santos\*/)
+  assert.match(r.texto, /O plano \*Unimed de São Paulo\* não está entre os convênios/)
+  assert.match(r.texto, /Cada Unimed é uma cooperativa diferente/)
+  s = nova('nova')
+  r = await conversar(s, ['quero marcar pela unimed, a minha pega em todo lugar'])
+  assert.doesNotMatch(r.texto, /Pela \*Unimed Santos\*/)
+  assert.match(r.texto, /Unimed de outra cidade/)
+  s = nova('nova')
+  r = await conversar(s, ['quero marcar pela unimed santos'])
+  assert.match(r.texto, /pela \*Unimed Santos\*/, 'a Unimed Santos continua valendo')
+  s = nova('nova')
+  r = await conversar(s, ['tenho unimed, pode ser em qualquer lugar, quero marcar'])
+  assert.doesNotMatch(r.texto, /Unimed de outra cidade/, '"qualquer lugar" ali e a unidade, e nao o plano')
+})
+
+await caso('rodada 5: "é o Davi Oliveira Costa" grava so o nome', async () => {
+  const s = nova('nova')
+  await conversar(s, ['Oi', '#2', '#1', '#1', '#1'])
+  await conversar(s, ['é o Davi Oliveira Costa'])
+  assert.equal(s.consultas()[0].intake_patient_name, 'Davi Oliveira Costa')
+})
+
+await caso('rodada 5: a pergunta de remedio nao vira a queixa da consulta', async () => {
+  const s = nova('nova')
+  await conversar(s, ['posso pinga umas gota no ouvido? ta saindo pus e doendo mt. qual o horario mais proximo q vcs tem'])
+  await conversar(s, ['o horario mais proximo?? to em santos', 'particular', '1', '1', 'Andre Luiz Ferreira', '12/03/1990', 'pular', 'pular'])
+  const [consulta] = s.consultas()
+  assert.ok(consulta, 'a consulta saiu')
+  assert.match(consulta.intake_complaint ?? '', /pus e doendo/)
+  assert.doesNotMatch(consulta.intake_complaint ?? '', /posso pinga/)
+})
+
+await caso('rodada 5: despedida, desculpa e "so queria saber" nao viram "nao entendi"', async () => {
+  for (const frase of ['puts, ok vlw', 'Eu que agradeço. Tenha um ótimo dia!', 'Ah, então eu me enganei mesmo. Desculpa, obrigada!']) {
+    const s = nova('nova')
+    await conversar(s, ['Oi'])
+    const r = await conversar(s, [frase])
+    assert.match(r.texto, /Por nada!/, frase)
+    assert.notEqual(s.motivo, 'atendente', `${frase}: nao acende a conversa`)
+  }
+  assert.equal(despedida('nao quero marcar agora nao, so queria saber msm. obg'), true)
+  assert.equal(despedida('ah ok, era so pra saber mesmo, obrigada'), true, 'so o "era so pra saber"')
+  // Na pergunta do convenio, a desistencia sai da marcacao.
+  const s = nova('nova')
+  await conversar(s, ['Oi', '2', '2'])
+  assert.equal(s.etapa, 'aguardando_convenio')
+  const r = await conversar(s, ['nao quero marcar agora nao, so queria saber msm. obg'])
+  assert.match(r.texto, /Tudo bem, não marquei nada/)
+  assert.doesNotMatch(r.texto, /Responda com o número do convênio/)
+})
+
+await caso('rodada 5: unidade com dia e hora e pedido de marcar, e nunca a lista de enderecos', async () => {
+  let s = nova('nova')
+  let r = await conversar(s, ['Certo. Mesmo assim já quero deixar marcado: Higienópolis, terça à tarde.'])
+  assert.doesNotMatch(r.texto, /Onde o Dr\. Fábio atende/)
+  assert.match(r.texto, /Horários de terça, 20\/10 \(tarde\)/)
+  assert.equal(pediuAgendamento('deixa marcado pra mim em Higienópolis'), true, 'o "deixa marcado" sozinho, sem dia')
+  s = nova('nova')
+  await conversar(s, ['Oi'])
+  r = await conversar(s, ['quero a de terça às 8h em Higienópolis'])
+  assert.doesNotMatch(r.texto, /Onde o Dr\. Fábio atende/)
+  assert.match(r.texto, /Horários de terça, 20\/10/)
+  // A unidade negada nao leva a outra junto.
+  s = nova('nova')
+  await conversar(s, ['Oi', '2'])
+  r = await conversar(s, ['nao gente, santos nao. tatuape'])
+  assert.match(r.texto, /Datas disponíveis em Tatuapé/)
+  // O endereco continua respondendo quem pergunta.
+  s = nova('nova')
+  r = await conversar(s, ['qual o endereço de Higienópolis?'])
+  assert.match(r.texto, /Onde o Dr\. Fábio atende/)
+})
+
+// ---------------------------------------------------------------
+// O arquivo do paciente junto do alerta (25/10/2026, pedido do Edu)
+// ---------------------------------------------------------------
+
+await caso('anexo: a foto com "sangrando" na legenda dispara o alerta e vai atras dele; a de depois vai sozinha; a de conversa comum fica na Central', async () => {
+  const s = nova('nova')
+  let r = await s.enviarDaFamilia({ texto: 'meu nariz ta sangrando muito, olha', anexo: true })
+  assert.equal(r.alertas.length, 1, 'a legenda e lida, como no webhook')
+  assert.deepEqual(r.noMedico.map((m) => (m.anexo ? 'arquivo' : 'alerta')), ['alerta', 'arquivo'])
+  assert.match(r.noMedico[1].texto, /^📷 Foto\n📎 Enviado por Carla pela Central de Cuidado$/)
+  r = await s.enviarDaFamilia({ texto: 'ainda ta saindo' })
+  assert.equal(r.noMedico.length, 0, 'texto depois do alerta nao manda nada ao WhatsApp do medico')
+  r = await s.enviarDaFamilia({ texto: '', anexo: true })
+  assert.deepEqual(r.noMedico.map((m) => (m.anexo ? 'arquivo' : 'alerta')), ['arquivo'], 'so o arquivo, com o alerta ainda aberto')
+  const comum = nova('nova')
+  r = await comum.enviarDaFamilia({ texto: 'segue o exame', anexo: true })
+  assert.equal(r.noMedico.length, 0, 'arquivo de conversa comum nao toca o celular (relatorio da Cintia)')
+})
+
 console.log(`fabio.test: ${ok} casos ok`)

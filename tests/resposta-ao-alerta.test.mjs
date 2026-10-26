@@ -403,6 +403,26 @@ await caso('repasse: texto livre recusado vira o modelo; sem a tabela ou alerta 
   assert.equal(await R.repassarRespostaDoPaciente(velho.amb, { conversationId: 'conv-1', quem: 'x', texto: 'oi' }), false, 'depois de 6 horas, nao')
 })
 
+await caso('repasse com arquivo (25/10/2026): vai atras do texto livre; quem so recebeu o modelo fica com ele pendente', async () => {
+  const c = cenario({ alertas: [alerta({ respondido_em: haMinutos(10), respondido_por: MEDICO })] })
+  // O medico esta na janela de 24 horas (acabou de responder); a Dayane nao.
+  c.amb.enviarWhatsApp = async (para, conteudo) => {
+    c.enviados.push({ para, conteudo })
+    if (para === DAYANE && conteudo.type !== 'template') return { ok: false, erro: '(#131047) Re-engagement message' }
+    return { ok: true, id: 'wamid.r' + c.enviados.length }
+  }
+  const foto = { tipo: 'image', link: 'https://acervo/foto', caminho: 'c/wamid.F', recebidoEm: new Date().toISOString() }
+  assert.equal(await R.repassarRespostaDoPaciente(c.amb, { conversationId: 'conv-1', quem: 'Paciente de Teste', texto: '[image]', anexo: foto }), true)
+  assert.deepEqual(
+    c.enviados.map((e) => [e.para, e.conteudo.type]),
+    [[MEDICO, 'interactive'], [MEDICO, 'image'], [DAYANE, 'interactive'], [DAYANE, 'template']],
+    'para a Dayane, o modelo, e nao o arquivo (seria recusado)',
+  )
+  assert.equal(c.enviados[1].conteudo.image.caption, '📎 Enviado por Paciente de Teste pela Central de Cuidado')
+  const registros = c.banco.linhas('anexos_para_equipe')
+  assert.deepEqual(registros.map((r) => [r.numero, r.situacao]), [[MEDICO, 'enviado'], [DAYANE, 'pendente']], 'o da Dayane vai quando ela escrever')
+})
+
 await caso('o webhook: o repasse depois de gravar a mensagem do paciente, e a migration das colunas', () => {
   const f = ler('supabase', 'functions', 'meta-webhook', 'index.ts')
   const repasse = f.indexOf('await repassarRespostaDoPaciente(')

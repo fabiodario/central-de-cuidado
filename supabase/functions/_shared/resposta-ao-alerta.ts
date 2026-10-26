@@ -6,6 +6,8 @@ import {
   type EnviarWhatsApp,
   type VereditoDoAlerta,
 } from './alerta-de-urgencia.ts'
+import { anexoQueVai, mensagemDoAnexo, type AnexoParaEquipe } from './anexo-para-equipe.ts'
+import { registrarEnvioDoAnexo } from './anexos-pendentes.ts'
 import { montarConteudo } from './conteudo.ts'
 import { quemAtende } from './quem-atende.ts'
 import { mesmoTelefone } from './telefone-br.ts'
@@ -671,7 +673,7 @@ const MIDIA_DO_PACIENTE: Record<string, string> = {
 
 export async function repassarRespostaDoPaciente(
   amb: Pick<AmbienteDaResposta, 'admin' | 'clinicId' | 'agora' | 'numeros' | 'enviarWhatsApp'>,
-  p: { conversationId: string; quem: string; texto: string; idioma?: string },
+  p: { conversationId: string; quem: string; texto: string; idioma?: string; anexo?: AnexoParaEquipe },
 ): Promise<boolean> {
   try {
     if (!amb.numeros.length) return false
@@ -705,12 +707,38 @@ export async function repassarRespostaDoPaciente(
         ],
       },
     }
+    // O arquivo vai atras do texto livre (25/10/2026, vindo do sistema do
+    // Dr. Marcello, ver anexo-para-equipe.ts): se o texto livre passou, a
+    // janela de 24 horas daquele celular esta aberta e o arquivo passa tambem.
+    // Quem so recebeu o modelo fica com o arquivo pendente, que vai quando
+    // ele escrever (anexos-pendentes.ts).
+    const corpoDoAnexo = p.anexo && anexoQueVai(p.anexo.tipo) ? mensagemDoAnexo(p.anexo, quem) : null
     const ids: string[] = []
     for (const numero of amb.numeros) {
       let envio = await amb.enviarWhatsApp(numero, livre)
+      const livrePassou = envio.ok
       if (!envio.ok) envio = await amb.enviarWhatsApp(numero, modelo)
       if (envio.ok && envio.id) ids.push(envio.id)
       if (!envio.ok) console.error('Repasse do paciente nao chegou a', numero.slice(-4), envio.erro)
+      if (corpoDoAnexo && p.anexo) {
+        const doAnexo = livrePassou ? await amb.enviarWhatsApp(numero, corpoDoAnexo) : { ok: false as const, erro: 'fora da janela de 24 horas' }
+        if (!doAnexo.ok) console.warn('Repasse do paciente: o arquivo ficou pendente para', numero.slice(-4), doAnexo.erro)
+        if (p.anexo.caminho) {
+          await registrarEnvioDoAnexo(amb.admin, {
+            clinicId: amb.clinicId,
+            conversationId: p.conversationId,
+            numero,
+            tipo: p.anexo.tipo,
+            caminho: p.anexo.caminho,
+            nome: p.anexo.nome,
+            quem,
+            recebidoEm: p.anexo.recebidoEm ?? amb.agora.toISOString(),
+            metaId: doAnexo.ok ? doAnexo.id : null,
+            ok: doAnexo.ok,
+            erro: doAnexo.ok ? undefined : doAnexo.erro,
+          })
+        }
+      }
     }
     if (ids.length) {
       const { error: erroDosIds } = await amb.admin

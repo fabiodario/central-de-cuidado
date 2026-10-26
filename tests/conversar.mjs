@@ -111,6 +111,19 @@ for (const [i, passo] of roteiro.mensagens.entries()) {
   const como = entrada.anexo ? ' (mandou uma foto)' : entrada.idDoToque ? ' (tocou na opcao)' : ''
   bloco.push(`[${hora(r.familia.em)}] PACIENTE${como}: ${r.familia.texto}`)
   for (const a of r.alertas) bloco.push(`    >>> NOTIFICACAO URGENTE no celular de ${a.para.join(' e ')}: ${a.titulo}`)
+  // O alerta no WhatsApp do medico e da equipe (25/10/2026, rodada 5 do
+  // painel): o juiz confere se saiu quando devia, e so entao. A Meta de
+  // mentira guarda so o balao do medico; o da Dayane e o mesmo, e a nota da
+  // Central diz para quantos numeros foi.
+  for (const m of r.noMedico ?? []) {
+    const botoes = m.toques ? `\n      [botoes: ${m.toques.opcoes.map((o) => o.titulo).join(' | ')}]` : ''
+    bloco.push(`    >>> ALERTA NO WHATSAPP de ${IDENTIDADES.fabio.alertaPara.join(' e ')}:\n${recuo(recuo(m.texto))}${botoes}`)
+  }
+  for (const g of r.registros ?? []) {
+    if (g.tipo === 'alerta' || g.tipo === 'bandeira' || /alerta|whatsapp/i.test(g.titulo)) {
+      bloco.push(`    [na Central] ${g.titulo}${g.detalhe ? ` ${g.detalhe}` : ''}`)
+    }
+  }
   if (r.respostas.length === 0) bloco.push('    (robo em silencio)')
   for (const m of r.respostas) bloco.push(`[${hora(m.em)}] ROBO:\n${recuo(m.texto)}${descreverToques(m)}`)
   ultimaComToques = [...r.respostas].reverse().find((m) => m.toques) ?? (r.respostas.length ? null : ultimaComToques)

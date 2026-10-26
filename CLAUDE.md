@@ -80,9 +80,12 @@ juiz confere sete critérios (`tests/painel/README.md`). Toda falha achada vira
 caso em `tests/fabio.test.mjs`, e a correção é desligada uma vez para provar
 que o caso falha sem ela. Rodadas de 16/10/2026: 14, 41 e 40 de 80 conversas
 passaram; as falhas críticas foram de 20 para 2 e depois 5, todas de urgência
-escrita de um jeito que a regra ainda não lia. O painel acha falhas novas a
-cada rodada, mas não mede quanto falta. Rode de novo depois de mudança grande
-no robô; o resultado de cada rodada fica anotado no README do painel.
+escrita de um jeito que a regra ainda não lia. Rodada 5 (25/10/2026): 52 de
+80, e desde ela `conversar.mjs` mostra o alerta no WhatsApp do Dr. Fábio e da
+Dayane, que o juiz confere (saiu nas 14 urgências, nenhum alarme falso). O
+painel acha falhas novas a cada rodada, mas não mede quanto falta. Rode de
+novo depois de mudança grande no robô; o resultado de cada rodada fica
+anotado no README do painel.
 
 Resposta pronta pode **chamar a equipe** (`bot_answers.hand_off`, desde
 16/10/2026): o robô responde e acende a conversa para a equipe, sem tirar a
@@ -157,8 +160,16 @@ registrado antes em `alertas_de_urgencia`, com o id nos botões
 - O simulador usa as mesmas peças, com a Meta de mentira (`peloWhatsApp` em
   `sessao.ts`): o cartão "WhatsApp do Dr. Fábio Dario" mostra o alerta e deixa
   tocar nos botões e responder como ele.
-- Testes em `tests/alerta-de-urgencia.test.mjs` e
-  `tests/resposta-ao-alerta.test.mjs`. Para provar que um caso pega o defeito
+- **O arquivo do paciente vai junto** (25/10/2026, técnica do sistema do
+  Dr. Marcello): foto, áudio, vídeo ou documento logo atrás do alerta; o que
+  chega depois, com o alerta aberto (`alertaEmAberto`), vai sozinho; no
+  repasse depois do "Eu respondo" e no "Mandar para o celular" também. Fora
+  da janela de 24 horas da Meta o arquivo fica pendente (`anexos_para_equipe`)
+  e vai quando aquele celular escrever. Arquivo de conversa comum fica só na
+  Central. Ver `_shared/anexo-para-equipe.ts` e `_shared/anexos-pendentes.ts`.
+- Testes em `tests/alerta-de-urgencia.test.mjs`,
+  `tests/resposta-ao-alerta.test.mjs`, `tests/anexo-para-equipe.test.mjs` e
+  `tests/anexos-pendentes.test.mjs`. Para provar que um caso pega o defeito
   sem mexer no código, `DESLIGAR` (ver `tests/montar-para-teste.mjs`) troca um
   trecho na hora de montar.
 

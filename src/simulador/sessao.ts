@@ -34,6 +34,7 @@ import {
   type Veredito,
 } from '../../supabase/functions/_shared/veredito.ts'
 import {
+  alertaEmAberto,
   BOTOES_DO_ALERTA,
   deveAlertar,
   enviarAlertaDeUrgencia,
@@ -41,6 +42,7 @@ import {
   type MotivoDoAlerta,
   quemNoAlerta,
 } from '../../supabase/functions/_shared/alerta-de-urgencia.ts'
+import type { AnexoParaEquipe } from '../../supabase/functions/_shared/anexo-para-equipe.ts'
 import {
   marcarVereditoDaTela,
   type MensagemRecebida,
@@ -328,7 +330,19 @@ export class Simulacao {
       const botoes = (c.interactive.action?.buttons ?? []).map((b) => ({ id: b.reply.id, titulo: b.reply.title }))
       return this.mensagem(autor, String(c.interactive.body?.text ?? ''), this.agoraDaAcao, { toques: { tipo: 'botoes', opcoes: botoes } })
     }
+    // O arquivo do paciente que vai ao celular (25/10/2026): na tela, o balao
+    // com o tipo e a legenda, como o WhatsApp mostra.
+    const arquivo = { image: '📷 Foto', video: '🎥 Vídeo', document: '📄 Documento', audio: '🎤 Áudio' }[String(c.type)]
+    if (arquivo) {
+      const legenda = (conteudo as Record<string, { caption?: string } | undefined>)[String(c.type)]?.caption
+      return this.mensagem(autor, legenda ? `${arquivo}\n${legenda}` : arquivo, this.agoraDaAcao, { anexo: true })
+    }
     return this.mensagem(autor, String(c.text?.body ?? ''), this.agoraDaAcao)
+  }
+
+  /** O arquivo do paciente no simulador: nao ha acervo, so o tipo e a hora. */
+  private anexoDeMentira(agora: Date): AnexoParaEquipe {
+    return { tipo: 'image', link: 'simulado://foto-do-paciente', recebidoEm: agora.toISOString() }
   }
 
   get conversa(): Linha {
@@ -482,7 +496,10 @@ export class Simulacao {
       posAcompanhamento: false,
       consultaHoje,
       motivoDaAtencao: (conversa.attention_reason as string | null) ?? null,
-      texto: entrada.anexo ? '' : (entrada.idDoToque ?? entrada.texto),
+      // A legenda da foto vai ao robo, como no webhook (messageBody): "meu
+      // nariz ta sangrando, olha" com a foto dispara o alerta. Sem legenda, o
+      // "[image]" de la (25/10/2026: aqui ia vazio, e a legenda se perdia).
+      texto: entrada.anexo ? (entrada.texto.trim() || '[image]') : (entrada.idDoToque ?? entrada.texto),
       telefone: this.familia.telefone,
       pacientes,
       pacienteEmAndamento: (conversa.booking_patient_id as string | null) ?? null,
@@ -673,11 +690,41 @@ export class Simulacao {
           texto: familia.texto,
           agora,
           conversationId: CONVERSA,
+          // A foto vai logo atras do alerta (25/10/2026, ver anexo-para-equipe.ts).
+          anexo: entrada.anexo ? this.anexoDeMentira(agora) : undefined,
         },
         this.peloWhatsApp,
       )
       noMedico.push(...this.caixaDoMedico)
       registros.push(...this.traduzirEscritas(this.banco.escritas.slice(antesDoAlerta), agora))
+    } else if (
+      // A foto mandada depois, com o alerta ainda aberto: so ela vai, como no
+      // webhook (25/10/2026, ver alertaEmAberto).
+      entrada.anexo && atencaoAntes.ligada && MOTIVOS_COM_VEREDITO.includes(String(atencaoAntes.motivo ?? '')) &&
+      (await alertaEmAberto(this.banco, this.identidade.clinicId, CONVERSA, agora))
+    ) {
+      this.caixaDoMedico = []
+      const antesDoArquivo = this.banco.escritas.length
+      await enviarAlertaDeUrgencia(
+        this.banco,
+        {
+          clinicId: this.identidade.clinicId,
+          motivo: atencaoAntes.motivo as MotivoDoAlerta,
+          quem: quemNoAlerta({
+            pacientes: this.pacientes().map((p) => ({ name: String(p.name ?? '') })),
+            nomeDoPerfil: this.familia.nomeDoPerfil,
+            telefone: this.familia.telefone,
+          }),
+          texto: familia.texto,
+          agora,
+          conversationId: CONVERSA,
+          anexo: this.anexoDeMentira(agora),
+          soOAnexo: true,
+        },
+        this.peloWhatsApp,
+      )
+      noMedico.push(...this.caixaDoMedico)
+      registros.push(...this.traduzirEscritas(this.banco.escritas.slice(antesDoArquivo), agora))
     }
 
     return { familia, respostas, registros, alertas, noMedico }
