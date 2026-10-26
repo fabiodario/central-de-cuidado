@@ -1,5 +1,6 @@
 import { adminClient, corsHeaders, json, userClient } from '../_shared/whatsapp.ts'
 import { montarPdfDoAtendimento } from '../_shared/pdf-do-prontuario.ts'
+import { LICENCA_NAO_CONFIGURADA, licencaDaAssinatura } from '../_shared/licenca-da-assinatura.ts'
 
 /**
  * Assinatura digital do atendimento com o certificado ICP-Brasil do medico.
@@ -217,6 +218,12 @@ Deno.serve(async (req) => {
 
   const autorizacao = req.headers.get('Authorization') ?? ''
   if (!autorizacao.startsWith('Bearer ')) return json({ error: 'Sessão obrigatória.' }, 401)
+
+  // Clinica sem o modulo de assinatura: uma mensagem so, antes de qualquer
+  // leitura no banco (ver _shared/licenca-da-assinatura.ts).
+  if (!licencaDaAssinatura((nome) => Deno.env.get(nome))) {
+    return json({ error: LICENCA_NAO_CONFIGURADA, code: 'SEM_LICENCA' }, 503)
+  }
 
   const env = ambiente()
   const admin = adminClient()
