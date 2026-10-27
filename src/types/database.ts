@@ -242,6 +242,8 @@ export type Database = {
           created_by: string | null
           current_medications: string
           encounter_type: string
+          retorno_ate: string | null
+          visita: string | null
           family_history: string
           height_cm: number | null
           id: string
@@ -270,6 +272,8 @@ export type Database = {
           created_by?: string | null
           current_medications?: string
           encounter_type?: string
+          retorno_ate?: string | null
+          visita?: string | null
           family_history?: string
           height_cm?: number | null
           id?: string
@@ -298,6 +302,8 @@ export type Database = {
           created_by?: string | null
           current_medications?: string
           encounter_type?: string
+          retorno_ate?: string | null
+          visita?: string | null
           family_history?: string
           height_cm?: number | null
           id?: string

@@ -148,6 +148,13 @@ import { publicoDaClinica } from '@/lib/publico'
 import { ExamesDoPaciente } from '@/sections/prontuario/ExamesDoPaciente'
 import { MarcarRetorno } from '@/sections/prontuario/MarcarRetorno'
 import { AdendosDaConsulta } from '@/sections/prontuario/AdendosDaConsulta'
+import { comoVisita, visitaParaGravar } from '@/lib/consulta-ou-retorno'
+import {
+  classificarVisitas,
+  retornoPadrao,
+  sugestaoDeVisita,
+  type VisitaClassificada,
+} from '../../supabase/functions/_shared/prazo-do-retorno.ts'
 
 interface PatientRecordProps {
   patient: Patient | null
@@ -161,7 +168,7 @@ interface PatientRecordProps {
 }
 
 const consultationLabels: Record<ConsultationType, string> = {
-  initial: 'Consulta inicial',
+  initial: 'Consulta',
   return: 'Retorno',
   telemedicine: 'Telemedicina',
   other: 'Outro atendimento',
@@ -931,7 +938,10 @@ function editorValue(value: string) {
 function emptyConsultation(patient: Patient | null, unidadePadrao = ''): ConsultationDraft {
   return {
     data: todayISO(),
-    tipo: 'return',
+    // Era 'return' fixo (26/10/2026): no Dr. Marcello, 47 de 59 atendimentos
+    // sairam "Retorno" sem ninguem escolher. Quem decide agora e visita (ver
+    // ConsultaOuRetorno), e o tipo acompanha ao salvar.
+    tipo: 'initial',
     unidade: patient?.unidade || unidadePadrao,
     peso: '',
     altura: '',
@@ -948,6 +958,8 @@ function emptyConsultation(patient: Patient | null, unidadePadrao = ''): Consult
     prescricao: '',
     retorno: '',
     observacoes: '',
+    visita: '',
+    retornoAte: '',
   }
 }
 
@@ -971,6 +983,8 @@ function consultationToDraft(consultation: Consultation): ConsultationDraft {
     prescricao: consultation.prescricao,
     retorno: consultation.retorno,
     observacoes: consultation.observacoes,
+    visita: consultation.visita,
+    retornoAte: consultation.retornoAte,
   }
 }
 
@@ -1645,6 +1659,118 @@ function Detail({ label, value, alerta = false }: { label: string; value: string
   )
 }
 
+/**
+ * Consulta ou retorno, e ate quando vale o retorno (26/10/2026).
+ *
+ * No lugar do "Tipo de atendimento", que abria sempre em "Retorno" (veio do
+ * sistema do Dr. Marcello, onde uma familia ouviu da equipe que o retorno ia
+ * ate 02/11, contado de uma visita que ja era o retorno). A regra: toda
+ * consulta da direito a um retorno, so um, no prazo que o medico define aqui.
+ * A tela sugere pelo historico e diz por que; ele toca so quando a sugestao
+ * esta errada ou o exame demora.
+ */
+function ConsultaOuRetorno({
+  form,
+  outras,
+  onChange,
+  desabilitado,
+}: {
+  form: ConsultationDraft
+  /** Os outros atendimentos do paciente (sem o que esta aberto). */
+  outras: Consultation[]
+  onChange: (campos: Partial<ConsultationDraft>) => void
+  desabilitado: boolean
+}) {
+  const valida = /^\d{4}-\d{2}-\d{2}$/.test(form.data)
+  const sugestao = valida ? sugestaoDeVisita(outras.map(comoVisita), form.data) : { tipo: 'consulta' as const, consulta: null, ate: null }
+  const tipo = form.visita || sugestao.tipo
+  const padrao = valida ? retornoPadrao(form.data) : ''
+  const ate = form.retornoAte || padrao
+  const semRetorno = Boolean(ate) && ate <= form.data
+  const curta = (iso: string | null) => (iso ? fmtBR(iso).slice(0, 5) : '')
+
+  const opcao = (valor: 'consulta' | 'retorno', titulo: string, descricao: string) => (
+    <button
+      type="button"
+      disabled={desabilitado}
+      onClick={() => onChange({ visita: valor })}
+      aria-pressed={tipo === valor}
+      className={`rounded-[13px] border px-3.5 py-2.5 text-left transition disabled:cursor-not-allowed disabled:opacity-60 ${
+        tipo === valor
+          ? 'border-[#557f75] bg-[#eef3f2] shadow-[0_0_0_3px_rgba(85,127,117,.14)]'
+          : 'border-[#081b2c]/10 bg-[#fafaf8] hover:border-[#081b2c]/25'
+      }`}
+    >
+      <span className="block text-[13px] font-extrabold text-[#081b2c]">
+        {titulo}
+        {tipo === valor && <span className="text-[#557f75]"> ✓</span>}
+      </span>
+      <span className="text-[11px] font-medium text-slate-500">{descricao}</span>
+    </button>
+  )
+
+  const atalho = (rotulo: string, ativo: boolean, campos: Partial<ConsultationDraft>) => (
+    <button
+      type="button"
+      disabled={desabilitado}
+      onClick={() => onChange(campos)}
+      className={`rounded-full border px-3 py-1.5 text-[11px] font-bold transition disabled:cursor-not-allowed disabled:opacity-60 ${
+        ativo ? 'border-[#1f4f78] bg-[#1f4f78] text-white' : 'border-[#081b2c]/10 bg-[#fafaf8] text-[#081b2c] hover:border-[#081b2c]/25'
+      }`}
+    >
+      {rotulo}
+    </button>
+  )
+
+  return (
+    <div className="sm:col-span-2">
+      <span className="text-[11px] font-extrabold uppercase tracking-[0.08em] text-slate-500">Este atendimento foi</span>
+      <div className="mt-1.5 grid grid-cols-2 gap-2">
+        {opcao('consulta', 'Consulta', 'Abre um retorno')}
+        {opcao('retorno', 'Retorno', 'Usa o retorno de uma consulta')}
+      </div>
+      {!form.visita && valida && (
+        <p className="mt-2 rounded-[11px] bg-[#f3f6f9] px-3 py-2 text-[11.5px] leading-relaxed text-slate-600">
+          <b className="text-[#081b2c]">Sugestão do sistema:</b>{' '}
+          {sugestao.tipo === 'retorno'
+            ? `retorno da consulta de ${curta(sugestao.consulta)} (incluído até ${curta(sugestao.ate)}).`
+            : 'consulta (não há retorno em aberto nesta data).'}{' '}
+          Troque se não for.
+        </p>
+      )}
+      {tipo === 'consulta' ? (
+        <div className="mt-3">
+          <span className="text-[11px] font-extrabold uppercase tracking-[0.08em] text-slate-500">Retorno até</span>
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+            <input
+              type="date"
+              className={`${inputClass} !mt-0 w-auto`}
+              value={semRetorno ? '' : ate}
+              min={valida ? form.data : undefined}
+              disabled={desabilitado}
+              onChange={(event) => onChange({ retornoAte: event.target.value })}
+              aria-label="Retorno até"
+            />
+            {atalho('30 dias', !semRetorno && ate === padrao, { retornoAte: '' })}
+            {atalho('Sem retorno', semRetorno, { retornoAte: form.data })}
+          </div>
+          <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+            {semRetorno
+              ? 'Sem retorno incluído: a próxima visita será consulta.'
+              : 'Vem com 30 dias. Exame que demora? Escolha a data, e o WhatsApp passa a oferecer o retorno até ela.'}
+          </p>
+        </div>
+      ) : (
+        <p className="mt-2 text-[11.5px] leading-relaxed text-slate-500">
+          {sugestao.consulta && sugestao.tipo === 'retorno'
+            ? `Usa o retorno da consulta de ${curta(sugestao.consulta)}. A próxima visita será consulta.`
+            : 'O retorno não abre outro: a próxima visita será consulta.'}
+        </p>
+      )}
+    </div>
+  )
+}
+
 function ConsultationTypeIcon({ type }: { type: ConsultationType }) {
   if (type === 'telemedicine') return <Video className="h-4 w-4" />
   if (type === 'return') return <RefreshCw className="h-4 w-4" />
@@ -1715,6 +1841,7 @@ const SELO_DO_ESTADO: Record<EstadoDaConsulta, { texto: string; classe: string }
 
 function ConsultationCard({
   consultation,
+  visita,
   anterior,
   onEdit,
   onAssinar,
@@ -1758,6 +1885,8 @@ function ConsultationCard({
   onAbrirRetorno: (consultation: Consultation) => void
   onFecharRetorno: () => void
   onRetornoMarcado: (mensagem: string) => void
+  /** Consulta ou retorno pela regra do retorno (marcado ou deduzido). */
+  visita?: VisitaClassificada
 }) {
   // Os campos guardam HTML (negrito, cor). Para a linha de resumo so interessa
   // o texto: sem esta limpeza o cartao exibia a marcacao crua, tipo
@@ -1806,8 +1935,17 @@ function ConsultationCard({
                   estado === 'agendada' ? 'text-slate-500' : 'text-[#081b2c]'
                 }`}
               >
-                {consultationLabels[consultation.tipo]}
+                {visita ? (visita.tipo === 'consulta' ? 'Consulta' : 'Retorno') : consultationLabels[consultation.tipo]}
               </span>
+              {visita?.tipo === 'consulta' && (
+                <span
+                  title={visita.sugerido ? 'Deduzido pela sequência de visitas. Abra o atendimento para confirmar.' : 'Definido no prontuário.'}
+                  className="rounded-full bg-[#eef3f2] px-2 py-1 text-[10px] font-extrabold text-[#557f75]"
+                >
+                  {visita.ate ? `retorno até ${fmtBR(visita.ate).slice(0, 5)}` : 'sem retorno'}
+                  {visita.sugerido ? ' · sugerido' : ''}
+                </span>
+              )}
               {SELO_DO_ESTADO[estado] && (
                 <span
                   className={`rounded-full px-2 py-1 text-[10px] font-extrabold uppercase tracking-[0.06em] ${
@@ -2819,6 +2957,9 @@ export default function PatientRecord({
     editingConsultationId &&
       consultations.find((item) => item.id === editingConsultationId)?.assinadoEm,
   )
+  // Consulta ou retorno de cada atendimento, pela regra do retorno
+  // (26/10/2026): o marcado no prontuario, ou o deduzido pela sequencia.
+  const visitasPorDia = new Map(classificarVisitas(consultations.map(comoVisita)).map((v) => [v.data, v]))
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   // Guardado no navegador de quem usa: o tamanho e preferencia de pessoa, nao
@@ -3023,9 +3164,13 @@ export default function PatientRecord({
     setSaving(true)
     setFormError('')
     try {
-      const draft = Object.fromEntries(
+      const limpo = Object.fromEntries(
         Object.entries(form).map(([key, value]) => [key, typeof value === 'string' ? value.trim() : value]),
       ) as unknown as ConsultationDraft
+      const draft: ConsultationDraft = {
+        ...limpo,
+        ...visitaParaGravar(limpo, consultations.filter((c) => c.id !== editingConsultationId)),
+      }
       if (editingConsultationId) {
         await updateConsultation(patient.id, editingConsultationId, draft)
       } else {
@@ -3552,6 +3697,7 @@ export default function PatientRecord({
                         <ConsultationCard
                           key={consultation.id}
                           consultation={consultation}
+                          visita={visitasPorDia.get(consultation.data)}
                           // A lista vem da mais recente para a mais antiga,
                           // entao a anterior no tempo e a proxima na lista.
                           anterior={
@@ -3679,17 +3825,12 @@ export default function PatientRecord({
                     onChange={(event) => set('data', event.target.value)}
                   />
                 </Field>
-                <Field label="Tipo de atendimento">
-                  <select
-                    className={inputClass}
-                    value={form.tipo}
-                    onChange={(event) => set('tipo', event.target.value as ConsultationType)}
-                  >
-                    {Object.entries(consultationLabels).map(([value, label]) => (
-                      <option key={value} value={value}>{label}</option>
-                    ))}
-                  </select>
-                </Field>
+                <ConsultaOuRetorno
+                  form={form}
+                  outras={consultations.filter((c) => c.id !== editingConsultationId)}
+                  onChange={(campos) => setForm((atual) => ({ ...atual, ...campos }))}
+                  desabilitado={consultaEmEdicaoAssinada}
+                />
                 <Field label="Unidade" className="sm:col-span-2">
                   <select className={inputClass} value={form.unidade} onChange={(event) => set('unidade', event.target.value)}>
                     {opcoesDeUnidade(unidadesDaClinica, form.unidade).map((unidade) => (

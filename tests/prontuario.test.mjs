@@ -223,7 +223,7 @@ conferir(
 
 conferir(
   'Título do atendimento tem tipo, data e unidade',
-  tituloDoAtendimento(consultaVazia) === 'Consulta inicial · 03/09/2026 · Santos',
+  tituloDoAtendimento(consultaVazia) === 'Consulta · 03/09/2026 · Santos',
   tituloDoAtendimento(consultaVazia),
 )
 

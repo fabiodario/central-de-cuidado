@@ -148,6 +148,41 @@ certeza naquela etapa (`rotaDoAssunto`), na conversa como estava antes do
 - O simulador faz o mesmo (`leitorDoCaminho`; no sistema, `jev-ler` com
   `acao: 'caminho'`). Testes em `tests/caminho-pelo-jev.test.mjs`.
 
+## Consulta e retorno (26/10/2026, vindo do sistema do Dr. Marcello)
+
+Toda consulta dá direito a UM retorno, no prazo que o médico define no
+prontuário; o retorno não abre outro. A regra mora em
+`supabase/functions/_shared/prazo-do-retorno.ts` e é a mesma no prontuário
+(`ConsultaOuRetorno` em `PatientRecord.tsx`, ponte em
+`src/lib/consulta-ou-retorno.ts`), no cabeçalho da conversa
+(`PrazoDoRetorno`), na etiqueta da Agenda e no robô.
+
+- `consultations.visita` ('consulta' ou 'retorno') e `retorno_ate` são
+  administrativas: ficam fora da trava da consulta assinada e são gravadas em
+  UPDATE separado (`gravarVisita`). Sem marcação, a classificação é deduzida
+  pela sequência de visitas (prontuário e agenda que passou) e aparece como
+  "sugerido"/"a confirmar". **O robô só usa o que o médico marcou.**
+- No robô (`atendimento.ts`, bloco "Retorno incluido"): datas só até o prazo,
+  "Retorno marcado!", data pedida depois do prazo explicada
+  (`dataDepoisDoPrazo`, nos passos do dia e do horário), e na terceira
+  explicação a equipe com a etiqueta `retorno` (`explicarOuPassarORetorno`).
+  Telefone sem o paciente pedindo retorno: nome e nascimento ou CPF (estado
+  `aguardando_crianca_do_retorno`, nome herdado do Dr. Marcello). **Diferença
+  daqui:** essa busca só acontece depois que a clínica marcou a primeira
+  consulta ou retorno no prontuário (`clinicaMarcaORetorno`), porque os
+  pacientes de antes do sistema estão no ISA. Sem a regra da Trasmontano.
+- Do mesmo dia: na fila, pedido de marcar abre a agenda e remarcar/cancelar
+  mostra a consulta, com a equipe conversando ou não (fica de fora a frase
+  comprida que não pede nada, `conversaDaEquipe`); `equipeSeguraORobo` em
+  `lembrete.ts` (toque e pedido vencem a regra das 12 horas); resposta pronta
+  sem mudança vai como automática; `_shared/meta-tentativa.ts` repete o envio
+  no erro passageiro da Meta; a Agenda mostra o convênio
+  (`src/lib/convenio-do-horario.ts`) com filtro.
+- Testes: `tests/prazo-do-retorno.test.mjs`, `tests/consulta-ou-retorno.test.mjs`,
+  `tests/meta-tentativa.test.mjs`, `tests/convenio-do-horario.test.mjs` e o
+  bloco "Retorno incluido" de `tests/atendimento.test.mjs` (o caso aceita
+  `clinicId` para rodar no perfil do Dr. Fábio).
+
 ## Veredito da urgência (17/10/2026)
 
 Conversa acesa como urgência ou sangramento ganha, na tela de Respostas, os

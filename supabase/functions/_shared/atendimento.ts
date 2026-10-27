@@ -21,7 +21,8 @@
 import { avisoDeHorario, dentroDoExpediente, EXPEDIENTE } from './expediente.ts'
 import { dataDeNascimentoIso } from './datas.ts'
 import type { adminClient } from './whatsapp.ts'
-import { cadastrarDaFicha, type ConsultaParaCadastro } from './cadastro.ts'
+import { cadastrarDaFicha, mesmaCrianca, type ConsultaParaCadastro } from './cadastro.ts'
+import { situacaoDoRetorno, visitasDoBanco, type FichaDoBanco, type SituacaoDoRetorno } from './prazo-do-retorno.ts'
 import { quemAtende, type QuemAtende } from './quem-atende.ts'
 import { preencherCampos, temCampo, type Lugar } from './campos-do-texto.ts'
 import {
@@ -66,6 +67,10 @@ export type Estado =
   | 'confirmar_cancelamento'
   | 'ja_tem_consulta'
   | 'aguardando_paciente'
+  // Retorno pedido de um telefone sem o paciente (26/10/2026): o nome e o
+  // nascimento (ou o CPF) para achar o cadastro. O nome do estado ficou o do
+  // sistema do Dr. Marcello, que o criou.
+  | 'aguardando_crianca_do_retorno'
   | 'aguardando_unidade'
   | 'aguardando_convenio'
   | 'aguardando_dia'
@@ -96,6 +101,8 @@ export type MotivoAtencao =
   // Paciente falou em sangramento (Dr. Fabio, 15/10/2026): o alerta vai na
   // hora para o celular do medico e da secretaria. Ver falouDeSangramento.
   | 'sangramento'
+  /** Insistiu no retorno fora da regra (26/10/2026): a equipe avalia. */
+  | 'retorno'
 
 /**
  * A etiqueta que fica na conversa quando o robo levanta outra (17 e 18/10/2026
@@ -215,6 +222,10 @@ let relogioEmFoco: Date | null = null
 // dela ("Estamos aqui para cuidar de Helena"). Presa a conversa: o menu tambem
 // e chamado por fora (whatsapp-reply), e ali vale o texto generico.
 let criancaEmFoco: { conversa: string; nome: string } | null = null
+// A mensagem em tratamento, presa a conversa como a de cima: e por ela (e
+// pelas ultimas gravadas) que o agendamento sabe que o pedido e de retorno
+// (26/10/2026).
+let textoEmFoco: { conversa: string; texto: string } | null = null
 
 // O perfil da clinica da conversa em tratamento (15/10/2026, ver
 // quem-atende.ts). Preso ao foco como o relogio e a crianca: o menu, a ficha e
@@ -1710,6 +1721,425 @@ async function horizonteDaAgenda(admin: Admin, clinicId: string): Promise<number
   } catch (erro) {
     console.warn('Nao consegui ler o horizonte da agenda; usando 15 dias', erro)
     return 15
+  }
+}
+
+// ---------------------------------------------------------------
+// Retorno incluido (26/10/2026, vindo do sistema do Dr. Marcello no mesmo dia)
+// ---------------------------------------------------------------
+
+/**
+ * Onde o paciente esta no retorno incluido: aberto ate tal dia, usado, vencido.
+ *
+ * A regra: toda consulta da direito a UM retorno, no prazo que o medico
+ * define no prontuario. Ate aqui o robo mostrava a agenda inteira para todo
+ * mundo, e quem vinha para o retorno escolhia uma data depois do prazo sem
+ * saber (no Dr. Marcello, uma familia marcou 25/11 e a equipe teve de
+ * explicar depois). A conta mora em prazo-do-retorno.ts, a mesma da tela.
+ *
+ * Falha na leitura devolve nulo: o paciente ve a agenda de sempre, como antes,
+ * e o log diz por que.
+ */
+async function retornoDoPaciente(admin: Admin, clinicId: string, patientId: string, agora: Date): Promise<SituacaoDoRetorno | null> {
+  try {
+    const { data: agenda, error } = await admin
+      .from('appointments')
+      .select('starts_at,status')
+      .eq('clinic_id', clinicId)
+      .eq('patient_id', patientId)
+      .not('status', 'in', '(cancelled,no_show)')
+      .lt('starts_at', agora.toISOString())
+      .order('starts_at', { ascending: false })
+      .limit(60)
+    if (error) throw error
+    const fichas = await fichasDoRetorno(admin, clinicId, patientId)
+    return situacaoDoRetorno(
+      visitasDoBanco(fichas, (agenda ?? []) as { starts_at: string }[]),
+      agora.toLocaleDateString('en-CA', { timeZone: EXPEDIENTE.fuso }),
+    )
+  } catch (erro) {
+    console.warn('Nao consegui ver o retorno do paciente; mostrando a agenda de sempre', { patientId, erro })
+    return null
+  }
+}
+
+/**
+ * Os atendimentos do prontuario. Sem as colunas de 26/10/2026 o Postgres
+ * recusa o SELECT inteiro; aqui isso basta, porque sem marcacao no prontuario
+ * o robo nao afirma retorno nenhum: o erro sobe, retornoDoPaciente avisa no
+ * log e o paciente ve a agenda de sempre.
+ */
+async function fichasDoRetorno(admin: Admin, clinicId: string, patientId: string): Promise<FichaDoBanco[]> {
+  const { data, error } = await admin
+    .from('consultations')
+    .select('consultation_date,visita,retorno_ate')
+    .eq('clinic_id', clinicId)
+    .eq('patient_id', patientId)
+    .is('archived_at', null)
+  if (error) throw error
+  return (data ?? []) as unknown as FichaDoBanco[]
+}
+
+type RetornoAberto = {
+  /** Ultimo dia do retorno (AAAA-MM-DD). */
+  ate: string
+  /** Dia da consulta que deu direito a ele. */
+  consulta: string
+  /** Primeiro nome do paciente, para a mensagem. */
+  nome: string
+}
+
+/**
+ * O retorno do paciente desta marcacao: em aberto (para as datas) ou, ja usado
+ * ou vencido, a frase que diz que e consulta. Os dois vazios: paciente novo,
+ * nada confirmado no prontuario, ou leitura que falhou.
+ */
+async function retornoDaConversa(
+  admin: Admin,
+  clinicId: string,
+  conversationId: string,
+): Promise<{ aberto: RetornoAberto | null; fechado: string }> {
+  try {
+    const { data, error } = await admin
+      .from('whatsapp_conversations')
+      .select('booking_patient_id')
+      .eq('id', conversationId)
+      .maybeSingle()
+    if (error) throw error
+    const patientId = (data as { booking_patient_id?: string | null } | null)?.booking_patient_id ?? null
+    if (!patientId || patientId === OUTRA_CRIANCA) return { aberto: null, fechado: '' }
+    const situacao = await retornoDoPaciente(admin, clinicId, patientId, relogioEmFoco ?? new Date())
+    return {
+      aberto: await retornoAbertoDaSituacao(admin, patientId, situacao),
+      fechado: retornoFechadoEmTexto(situacao),
+    }
+  } catch (erro) {
+    console.warn('Nao consegui ler o paciente da marcacao; mostrando a agenda de sempre', erro)
+    return { aberto: null, fechado: '' }
+  }
+}
+
+/** O paciente desta marcacao tem retorno em aberto? Nulo: nao (ou paciente novo). */
+async function retornoEmAberto(admin: Admin, clinicId: string, conversationId: string): Promise<RetornoAberto | null> {
+  return (await retornoDaConversa(admin, clinicId, conversationId)).aberto
+}
+
+/**
+ * O retorno ja usado, vencido ou dispensado, confirmado no prontuario, em uma
+ * frase para o paciente. Vazio no resto: o deduzido nao vira frase.
+ */
+function retornoFechadoEmTexto(situacao: SituacaoDoRetorno | null): string {
+  if (!situacao?.confirmado) return ''
+  if (situacao.tipo === 'usado') {
+    return `O retorno da consulta de ${diaCurto(situacao.consulta)} já foi feito em ${diaCurto(situacao.usadoEm)}, então esta marcação é uma *consulta*.`
+  }
+  if (situacao.tipo === 'vencido') {
+    return `O prazo do retorno da consulta de ${diaCurto(situacao.consulta)} terminou em ${diaCurto(situacao.ate)}, então esta marcação é uma *consulta*.`
+  }
+  if (situacao.tipo === 'sem') return 'Pelo prontuário, esta marcação é uma *consulta*.'
+  return ''
+}
+
+async function retornoAbertoDoPaciente(admin: Admin, clinicId: string, patientId: string, agora: Date): Promise<RetornoAberto | null> {
+  return await retornoAbertoDaSituacao(admin, patientId, await retornoDoPaciente(admin, clinicId, patientId, agora))
+}
+
+async function retornoAbertoDaSituacao(admin: Admin, patientId: string, situacao: SituacaoDoRetorno | null): Promise<RetornoAberto | null> {
+  // So o confirmado no prontuario: o deduzido pode estar errado, e o robo
+  // prometeria retorno incluido a quem deve consulta (ver situacaoDoRetorno).
+  if (situacao?.tipo !== 'aberto' || !situacao.confirmado) return null
+  let nome = ''
+  try {
+    const { data } = await admin.from('patients').select('name').eq('id', patientId).maybeSingle()
+    nome = String((data as { name?: string | null } | null)?.name ?? '').trim().split(/\s+/)[0] ?? ''
+  } catch (erro) {
+    console.warn('Retorno em aberto, mas sem o nome do paciente', erro)
+  }
+  return { ate: situacao.ate, consulta: situacao.consulta, nome }
+}
+
+/** "16/10" */
+function diaCurto(iso: string): string {
+  return `${iso.slice(8, 10)}/${iso.slice(5, 7)}`
+}
+
+/** " de Maria", ou nada sem nome. Sem asterisco: vai dentro de titulo em negrito. */
+function doRetornoDe(retorno: RetornoAberto): string {
+  return retorno.nome ? ` de ${retorno.nome}` : ''
+}
+
+/**
+ * Data pedida depois do prazo do retorno (escrita por extenso). A lista so
+ * mostra o que cabe no prazo; pedir outra data e excecao, e excecao e da
+ * equipe (o medico decide, como no retorno que espera exame).
+ */
+function foraDoPrazoDoRetorno(retorno: RetornoAberto): Resultado {
+  return {
+    resposta:
+      `Essa data passa do prazo do retorno${doRetornoDe(retorno)}, que vai até *${diaCurto(retorno.ate)}*.\n\n` +
+      'Escolha uma das datas da lista acima, ou digite *9* que a nossa equipe vê com você uma data depois do prazo.',
+    botoes: [
+      { id: '9', titulo: 'Falar com a equipe' },
+      { id: '0', titulo: 'Voltar ao menu' },
+    ],
+  }
+}
+
+/**
+ * O dia escrito ("28/10", "dia 28"), como AAAA-MM-DD, no proximo que ainda
+ * vem (26/10/2026). Serve para comparar com o prazo do retorno: o robo daqui
+ * le a data escrita contra a lista, e a lista do retorno so vai ate o prazo.
+ * Nulo quando o texto nao tem data. "Dia 9h" e hora, e fica de fora.
+ */
+function diaEscritoAdiante(texto: string, agora: Date): string | null {
+  const hoje = agora.toLocaleDateString('en-CA', { timeZone: EXPEDIENTE.fuso })
+  const [ano, mesDeHoje, diaDeHoje] = hoje.split('-').map(Number)
+  const escrita = dataEscrita(texto)
+  const soDia = escrita ? null : normalizar(texto).match(/\bdia\s+(\d{1,2})\b(?!\s*(?:h\b|hs\b|horas|:))/)
+  if (!escrita && !soDia) return null
+  const dia = escrita ? escrita.dia : Number(soDia![1])
+  if (dia < 1 || dia > 31) return null
+  let mes = escrita ? escrita.mes : dia >= diaDeHoje ? mesDeHoje : mesDeHoje + 1
+  let anoDoDia = ano
+  if (mes > 12) {
+    mes = 1
+    anoDoDia++
+  }
+  const chave = (a: number) => `${a}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`
+  return chave(anoDoDia) < hoje ? chave(anoDoDia + 1) : chave(anoDoDia)
+}
+
+/**
+ * A data escrita passa do prazo do retorno em aberto? Devolve a explicacao (ou
+ * a equipe, na insistencia); nulo quando nao passa, nao tem data ou nao ha
+ * retorno em aberto.
+ */
+async function dataDepoisDoPrazo(admin: Admin, clinicId: string, conversationId: string, texto: string, agora: Date): Promise<Resultado | null> {
+  const escrito = diaEscritoAdiante(texto, agora)
+  if (!escrito) return null
+  const retorno = await retornoEmAberto(admin, clinicId, conversationId)
+  if (!retorno || escrito <= retorno.ate) return null
+  return await explicarOuPassarORetorno(admin, clinicId, conversationId, foraDoPrazoDoRetorno(retorno))
+}
+
+/** Trechos das explicacoes do prazo do retorno: e por eles que se contam. */
+const EXPLICACOES_DO_RETORNO = ['passa do prazo do retorno', 'marcação é uma *consulta*']
+
+/** Quantas vezes o robo explicou o prazo do retorno nesta conversa, em 24 horas. */
+async function vezesQueExplicouORetorno(admin: Admin, conversationId: string): Promise<number> {
+  try {
+    const desde = new Date((relogioEmFoco ?? new Date()).getTime() - 24 * 3600 * 1000).toISOString()
+    const { data, error } = await admin
+      .from('whatsapp_messages')
+      .select('body')
+      .eq('conversation_id', conversationId)
+      .eq('direction', 'outbound')
+      .gte('created_at', desde)
+      .order('created_at', { ascending: false })
+      .limit(30)
+    if (error) throw error
+    return ((data ?? []) as { body?: string | null }[]).filter((m) =>
+      EXPLICACOES_DO_RETORNO.some((trecho) => String(m.body ?? '').includes(trecho)),
+    ).length
+  } catch (erro) {
+    console.warn('Nao consegui contar as explicacoes do retorno', erro)
+    return 0
+  }
+}
+
+/**
+ * Explica o prazo do retorno, ou passa para a equipe (26/10/2026).
+ *
+ * Pedido do Edu: "quando cliente insistir no retorno, para nao ficar chato",
+ * depois de o robo explicar duas vezes, ele diz que a equipe vai avaliar, e a
+ * conversa ganha a etiqueta laranja "Retorno". Retorno fora da regra e
+ * excecao, e excecao quem decide e o medico - repetir a mesma recusa uma
+ * terceira vez so irrita quem ja entendeu e discorda.
+ */
+async function explicarOuPassarORetorno(
+  admin: Admin,
+  clinicId: string,
+  conversationId: string,
+  explicacao: Resultado,
+): Promise<Resultado> {
+  if ((await vezesQueExplicouORetorno(admin, conversationId)) < 2) return explicacao
+  registrar('retorno_para_equipe')
+  await chamarEquipe(admin, conversationId)
+  return {
+    resposta:
+      `Entendi. Vou passar o seu pedido de retorno para a nossa equipe avaliar com ${quemAtende(clinicId).o}, e ela responde por aqui. 💙\n\n` +
+      avisoDeHorario(relogioEmFoco ?? new Date()) + '\n\n' + VOLTA,
+    atencao: 'retorno',
+  }
+}
+
+/**
+ * Pediu retorno (26/10/2026)? "aguardo retorno" e "retorno sua mensagem" nao
+ * contam: e resposta, nao pedido de consulta.
+ */
+export function pediuRetorno(texto: string | null | undefined): boolean {
+  const t = normalizar(String(texto ?? ''))
+  if (!/\bretorno\b/.test(t)) return false
+  return !/\b(aguardo|aguardando|espero|esperando|sem|tenho|tive|deem|der|dar) (o |um |seu |algum |uma )?retorno\b|\bretorno (sua|seu|a|o) (mensagem|contato|ligacao)\b|\bretorno (depois|mais tarde|em breve|assim que)\b/.test(t)
+}
+
+/** A mensagem de agora, ou uma das ultimas do paciente, pede retorno? */
+async function falouEmRetorno(admin: Admin, conversationId: string): Promise<boolean> {
+  if (textoEmFoco?.conversa === conversationId && pediuRetorno(textoEmFoco.texto)) return true
+  try {
+    const desde = new Date((relogioEmFoco ?? new Date()).getTime() - 2 * 3600 * 1000).toISOString()
+    const { data, error } = await admin
+      .from('whatsapp_messages')
+      .select('body,direction')
+      .eq('conversation_id', conversationId)
+      .eq('direction', 'inbound')
+      .gte('created_at', desde)
+      .order('created_at', { ascending: false })
+      .limit(5)
+    if (error) throw error
+    return ((data ?? []) as { body?: string | null; direction?: string }[]).some(
+      (m) => m.direction === 'inbound' && pediuRetorno(m.body),
+    )
+  } catch (erro) {
+    console.warn('Nao consegui ler as ultimas mensagens para saber se e retorno', erro)
+    return false
+  }
+}
+
+/**
+ * A clinica ja marca consulta e retorno no prontuario? (26/10/2026)
+ *
+ * Diferenca do Dr. Fabio para o Dr. Marcello: aqui os pacientes de antes do
+ * sistema estao no ISA, e nao no banco. Ate o medico comecar a marcar consulta
+ * e retorno, nenhum cadastro tem prazo confirmado, e perguntar nome e
+ * nascimento a quem pede retorno so faria a pessoa ouvir "Nao achei esse
+ * cadastro" duas vezes antes das datas. Falha na leitura: nao pergunta.
+ */
+async function clinicaMarcaORetorno(admin: Admin, clinicId: string): Promise<boolean> {
+  try {
+    const { data, error } = await admin
+      .from('consultations')
+      .select('id')
+      .eq('clinic_id', clinicId)
+      .not('visita', 'is', null)
+      .limit(1)
+    if (error) throw error
+    return (data ?? []).length > 0
+  } catch (erro) {
+    console.warn('Nao consegui ver se a clinica marca o retorno; seguindo sem procurar o cadastro', erro)
+    return false
+  }
+}
+
+const BOTOES_DO_CADASTRO_DO_RETORNO = [
+  { id: 'NOVA', titulo: 'Consulta nova' },
+  { id: '0', titulo: 'Voltar ao menu' },
+]
+
+/** "do paciente" no perfil geral, "da criança" na pediatria. */
+function doPacienteDoRetorno(): string {
+  return geral() ? 'do paciente' : 'da criança'
+}
+
+/** O exemplo de nome e nascimento: de adulto no perfil geral. */
+function exemploDeCadastro(): string {
+  return geral() ? 'Maria Clara Souza, 12/03/1985' : 'Maria Clara Souza, 12/03/2019'
+}
+
+/**
+ * Retorno pedido de um telefone que nao tem o paciente (26/10/2026).
+ *
+ * Pedido do Edu: quem cadastrou foi outra pessoa (o filho marca para a mae, a
+ * esposa para o marido) ou o paciente trocou de numero. Sem achar o paciente o
+ * robo nao sabe o prazo do retorno, e mostraria a agenda inteira como para
+ * uma consulta nova. Nome e nascimento e o que o cadastro automatico ja usa
+ * para reconhecer a mesma pessoa (ver mesmaCrianca); o CPF, quando preferir.
+ */
+async function perguntarPacienteDoRetorno(admin: Admin, conversationId: string, outraPessoa: boolean): Promise<Resultado> {
+  await salvarEstado(admin, conversationId, {
+    booking_state: 'aguardando_crianca_do_retorno',
+    booking_options: null,
+    booking_unit_id: null,
+    booking_patient_id: outraPessoa ? OUTRA_CRIANCA : null,
+  })
+  return {
+    resposta:
+      `🔎 Para achar o cadastro e ver o prazo do retorno, me mande o *nome completo* e a *data de nascimento* ${doPacienteDoRetorno()} (ou o *CPF*).\n\n` +
+      `Exemplo: ${exemploDeCadastro()}\n\n` +
+      'Se for uma consulta nova, toque em *Consulta nova*.',
+    botoes: BOTOES_DO_CADASTRO_DO_RETORNO,
+  }
+}
+
+/**
+ * O paciente pelo CPF, ou pelo nome com a data de nascimento. 'sem_dados'
+ * quando a mensagem nao traz nem um nem outro; nulo quando nao acha (ou acha
+ * mais de um: adivinhar entre dois e pior do que perguntar).
+ */
+async function acharPacienteDoRetorno(
+  admin: Admin,
+  clinicId: string,
+  texto: string,
+): Promise<{ id: string; name: string } | null | 'sem_dados'> {
+  const cpf = (texto.match(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/)?.[0] ?? '').replace(/\D/g, '')
+  if (cpf.length === 11) {
+    const { data, error } = await admin
+      .from('patients')
+      .select('id,name')
+      .eq('clinic_id', clinicId)
+      .eq('cpf', cpf)
+      .is('archived_at', null)
+      .limit(2)
+    if (error) throw error
+    const achados = (data ?? []) as { id: string; name: string }[]
+    return achados.length === 1 ? achados[0] : null
+  }
+  const dataNoTexto = texto.match(/\b\d{1,2}\s*[/.-]\s*\d{1,2}\s*[/.-]\s*\d{2,4}\b/)?.[0] ?? ''
+  const nascimento = dataNoTexto
+    ? dataDeNascimentoIso(dataNoTexto.replace(/\s/g, ''), relogioEmFoco ?? new Date(), { adulto: geral() })
+    : null
+  const nome = texto
+    .replace(dataNoTexto, ' ')
+    .replace(/\b(nascid[ao]|nasceu|nascimento|data de nascimento|nome|dia|em)\b/gi, ' ')
+    .replace(/[^A-Za-zÀ-ÿ\s]/g, ' ')
+    .trim()
+  if (!nascimento || nome.length < 2) return 'sem_dados'
+  const { data, error } = await admin
+    .from('patients')
+    .select('id,name')
+    .eq('clinic_id', clinicId)
+    .eq('birth_date', nascimento)
+    .is('archived_at', null)
+    .limit(20)
+  if (error) throw error
+  const achados = ((data ?? []) as { id: string; name: string }[]).filter((p) => mesmaCrianca(p.name, nome))
+  return achados.length === 1 ? achados[0] : null
+}
+
+/** O paciente achado por nome e nascimento: nao e deste telefone, vem do banco. */
+async function pacientePorId(admin: Admin, clinicId: string, id: string): Promise<Paciente | null> {
+  try {
+    const { data, error } = await admin
+      .from('patients')
+      .select('id,name,birth_date,guardian_name,cpf,email')
+      .eq('id', id)
+      .eq('clinic_id', clinicId)
+      .is('archived_at', null)
+      .maybeSingle()
+    if (error) throw error
+    const p = data as Record<string, string | null> | null
+    if (!p?.id) return null
+    return {
+      id: p.id,
+      name: p.name ?? '',
+      nascimento: p.birth_date ?? null,
+      responsavel: p.guardian_name ?? null,
+      cpf: p.cpf ?? null,
+      email: p.email ?? null,
+    }
+  } catch (erro) {
+    console.warn('Nao consegui ler o paciente escolhido para a consulta', erro)
+    return null
   }
 }
 
@@ -3348,6 +3778,14 @@ async function iniciarAgendamento(
     }
   }
 
+  // Telefone sem paciente pedindo retorno (26/10/2026): antes das datas, achar
+  // o paciente para saber o prazo (ver perguntarPacienteDoRetorno). So quando
+  // a clinica ja marca consulta e retorno no prontuario: antes disso nenhum
+  // cadastro tem prazo confirmado, e a busca so atrasaria a marcacao.
+  if (pacientes.length === 0 && (await falouEmRetorno(admin, conversationId)) && (await clinicaMarcaORetorno(admin, clinicId))) {
+    return await perguntarPacienteDoRetorno(admin, conversationId, false)
+  }
+
   // "Marcar mais uma" pergunta para quem, mesmo com um paciente so: a outra
   // consulta quase sempre e de outro filho (ver OUTRA_CRIANCA). Quem ja disse
   // o nome no pedido ("queria marcar pro teo") nao e perguntado.
@@ -4033,11 +4471,19 @@ async function perguntarUnidade(
     return await perguntarDia(admin, clinicId, conversationId, unidades[0], false)
   }
 
+  // Retorno em aberto (26/10/2026): a contagem e a do prazo, e nao a da
+  // agenda inteira - "51 horarios livres" para quem so pode usar tres. Ja
+  // usado ou vencido, e o paciente pediu retorno: ele le que e consulta ANTES
+  // de escolher a data.
+  const { aberto: retorno, fechado } = await retornoDaConversa(admin, clinicId, conversationId)
+  const avisoDeConsulta = !retorno && fechado && (await falouEmRetorno(admin, conversationId)) ? `${fechado}\n\n` : ''
+  const noPrazo: Periodo | undefined = retorno ? { de: null, ate: retorno.ate } : undefined
+
   // Consulta a agenda de cada unidade antes de listar. Custa uma chamada por
   // unidade, mas evita o pior roteiro possivel: a pessoa escolhe, espera, e
   // descobre que ali nao tinha nada.
   const comAgenda = await Promise.all(
-    unidades.map(async (u) => ({ unidade: u, ...(await horariosLivres(admin, clinicId, u.id)) })),
+    unidades.map(async (u) => ({ unidade: u, ...(await horariosLivres(admin, clinicId, u.id, noPrazo)) })),
   )
 
   if (comAgenda.every((u) => u.falhou)) {
@@ -4050,8 +4496,10 @@ async function perguntarUnidade(
   if (abertas.length === 0) {
     await limparEstado(admin, conversationId)
     return {
-      resposta:
-        'No momento não temos horários abertos para agendamento pelo WhatsApp.\n\n' + SAIDAS,
+      resposta: retorno
+        ? `Não temos horário livre até *${diaCurto(retorno.ate)}*, o prazo do retorno${doRetornoDe(retorno)}. ` +
+          'A nossa equipe vê um encaixe com você por aqui.\n\n' + SAIDAS
+        : 'No momento não temos horários abertos para agendamento pelo WhatsApp.\n\n' + SAIDAS,
       atencao: 'atendente',
     }
   }
@@ -4101,9 +4549,13 @@ async function perguntarUnidade(
     booking_insurance: null,
   })
 
+  // O titulo diz que e retorno: e o paciente vendo que o robo o reconheceu,
+  // antes de estranhar a lista curta.
   return {
     resposta:
-      `📍 *Vamos agendar!* Em qual unidade você prefere ser atendido?\n\n${linhas}\n\n` +
+      (retorno
+        ? `📍 *Vamos marcar o retorno${doRetornoDe(retorno)}!* Ele está incluído até *${diaCurto(retorno.ate)}*. Em qual unidade?\n\n${linhas}\n\n`
+        : `${avisoDeConsulta}📍 *Vamos agendar!* Em qual unidade você prefere ser atendido?\n\n${linhas}\n\n`) +
       `Responda com o número da unidade. ${SAIDAS}`,
     lista: {
       rotulo: 'Escolher unidade',
@@ -4377,7 +4829,15 @@ async function perguntarDia(
   periodo?: Periodo,
 ): Promise<Resultado> {
   const timezone = await fusoDaClinica(admin, clinicId)
-  const { horarios, falhou } = await horariosLivres(admin, clinicId, unidade.id, periodo)
+  // Retorno em aberto (26/10/2026): so as datas ate o prazo que o medico
+  // definiu. Periodo pedido pela equipe passa na frente: ela ja escolheu.
+  const retorno = periodo ? null : await retornoEmAberto(admin, clinicId, conversationId)
+  const { horarios, falhou } = await horariosLivres(
+    admin,
+    clinicId,
+    unidade.id,
+    periodo ?? (retorno ? { de: null, ate: retorno.ate } : undefined),
+  )
   const tele = unidade.id === TELE_ID
 
   if (falhou) {
@@ -4386,11 +4846,13 @@ async function perguntarDia(
   }
 
   if (horarios.length === 0) {
+    const semVaga = retorno
+      ? `Não temos horário livre em ${unidade.name} até *${diaCurto(retorno.ate)}*, o prazo do retorno${doRetornoDe(retorno)}.`
+      : `No momento não temos horários abertos em ${unidade.name}.`
     if (!podeTrocarUnidade) {
       await limparEstado(admin, conversationId)
       return {
-        resposta:
-          `No momento não temos horários abertos em ${unidade.name}.\n\n` + SAIDAS,
+        resposta: `${semVaga}\n\n` + (retorno ? 'A nossa equipe vê um encaixe com você por aqui.\n\n' : '') + SAIDAS,
         atencao: 'atendente',
       }
     }
@@ -4398,7 +4860,7 @@ async function perguntarDia(
     // unidade, sem obrigar a recomecar.
     return {
       resposta:
-        `No momento não temos horários abertos em ${unidade.name}.\n\n` +
+        `${semVaga}\n\n` +
         'Você pode responder com o número de outra unidade da lista acima.\n' + SAIDAS,
     }
   }
@@ -4439,7 +4901,8 @@ async function perguntarDia(
   // distante fala com a equipe, que enxerga o calendario inteiro.
   // O 9 da lista para tocar e "Falar com a equipe" (rodada 3 do painel): o
   // texto diz o mesmo, e a data distante e um dos motivos.
-  const nove = geral() ? '*9* para falar com a nossa equipe (para uma data mais distante, por exemplo)' : '*9* se precisar de uma data mais distante'
+  const distante = retorno ? 'uma data depois do prazo do retorno' : 'uma data mais distante'
+  const nove = geral() ? `*9* para falar com a nossa equipe (para ${distante}, por exemplo)` : `*9* se precisar de ${distante}`
   const rodape = podeTrocarUnidade
     ? `Digite VOLTAR para escolher outra unidade, ${nove}, ou *0* para o início.`
     : `Digite ${nove}, ou *0* para o início.`
@@ -4458,7 +4921,10 @@ async function perguntarDia(
 
   return {
     resposta:
-      `🗓️ *Datas disponíveis${tele ? ' para telemedicina' : ` em ${unidade.name}`}:*\n\n${linhas}\n\n` +
+      (retorno
+        ? `🗓️ *Datas para o retorno${doRetornoDe(retorno)}${tele ? ' por telemedicina' : ` em ${unidade.name}`}:*\n` +
+          `(incluído no valor da consulta de ${diaCurto(retorno.consulta)})\n\n${linhas}\n\n`
+        : `🗓️ *Datas disponíveis${tele ? ' para telemedicina' : ` em ${unidade.name}`}:*\n\n${linhas}\n\n`) +
       `Responda com o número do dia.\n${rodape}${urgencia}`,
     lista: {
       rotulo: 'Escolher o dia',
@@ -5352,7 +5818,14 @@ async function marcar(
   const onde = tele
     ? 'Telemedicina, por vídeo. O link da consulta chega aqui pelo WhatsApp antes do horário.'
     : `${unidade?.name ?? 'nossa unidade'}${unidade?.address ? `\n${unidade.address}` : ''}`
-  const aviso = remarcou ? '*Consulta remarcada!*' : '*Consulta marcada!*'
+  // Retorno no prazo (26/10/2026, vindo do sistema do Dr. Marcello): o
+  // comprovante diz que e retorno. "Incluido no valor" so no particular: com
+  // convenio, a linha do plano logo abaixo ja diz como e, e "valor" nao cabe.
+  const retorno = paciente ? await retornoAbertoDoPaciente(admin, clinicId, paciente.id, relogioEmFoco ?? new Date()) : null
+  const ehRetorno = Boolean(retorno && chaveDoDia(slot.inicio, timezone) <= retorno.ate)
+  const aviso = ehRetorno && retorno
+    ? `${remarcou ? '*Retorno remarcado!*' : '*Retorno marcado!*'} ${convenio ? `Retorno da consulta de ${diaCurto(retorno.consulta)}.` : `Incluído no valor da consulta de ${diaCurto(retorno.consulta)}.`}`
+    : remarcou ? '*Consulta remarcada!*' : '*Consulta marcada!*'
 
   // Esta mensagem e um comprovante, e nao uma etapa: e ela que a pessoa vai
   // rolar a conversa para reencontrar semanas depois, atras do endereco. Por
@@ -5444,7 +5917,7 @@ async function marcar(
     return {
       ...abertura,
       resposta:
-        `📋 Seu horário de *${quando}* está guardado.\n\n` +
+        `📋 Seu ${ehRetorno ? '*retorno*' : 'horário'} de *${quando}* está guardado.\n\n` +
         // No perfil 'geral' a ficha tem o motivo da consulta, que nao e
         // cadastro: quem ja e paciente responde so ele.
         `Para completar ${geral() ? 'a ficha da consulta' : 'o cadastro'}, ${quantas}.\n\n` +
@@ -5863,7 +6336,7 @@ async function terminarDados(
       // irmaos no mesmo celular a mae nao sabia de quem era a consulta.
       const { data: consulta } = await admin
         .from('appointments')
-        .select('starts_at,modality,intake_patient_name,patients(name),clinic_units(name,address)')
+        .select('starts_at,modality,intake_patient_name,patient_id,patients(name),clinic_units(name,address)')
         .eq('id', appointmentId)
         .maybeSingle()
       // Consulta que ja passou nao vira comprovante, venha de onde vier.
@@ -5883,17 +6356,26 @@ async function terminarDados(
         // Convenio ou particular (16/10/2026), como no comprovante de marcar. A
         // coluna vem num pedido proprio: sem ela, o comprovante sai sem a linha.
         let pagamento = ''
+        let convenioDaConsulta = ''
         if (geral() && !tele) {
           try {
             const { data: plano, error: erroDoPlano } = await admin.from('appointments').select('insurance').eq('id', appointmentId).maybeSingle()
-            if (!erroDoPlano) pagamento = `💳 ${String((plano as { insurance?: string | null } | null)?.insurance ?? '').trim() || 'Particular'}\n`
+            convenioDaConsulta = String((plano as { insurance?: string | null } | null)?.insurance ?? '').trim()
+            if (!erroDoPlano) pagamento = `💳 ${convenioDaConsulta || 'Particular'}\n`
           } catch (erro) {
             console.warn('Nao consegui ler o convenio para o comprovante', erro)
           }
         }
         const lembrete = avisoDoLembrete(consulta.starts_at, timezone, relogioEmFoco ?? new Date())
+        // Retorno no prazo (26/10/2026): o comprovante diz, como o de marcar().
+        const doPaciente = (consulta as { patient_id?: string | null }).patient_id ?? null
+        const retorno = doPaciente ? await retornoAbertoDoPaciente(admin, clinicId, doPaciente, relogioEmFoco ?? new Date()) : null
+        const ehRetorno = Boolean(retorno && chaveDoDia(consulta.starts_at, timezone) <= retorno.ate)
+        const titulo = ehRetorno && retorno
+          ? `*Retorno marcado!* ${convenioDaConsulta ? `Retorno da consulta de ${diaCurto(retorno.consulta)}.` : `Incluído no valor da consulta de ${diaCurto(retorno.consulta)}.`}`
+          : '*Consulta marcada!*'
         comprovante =
-          `✅ *Consulta marcada!*\n\n${nomeDaCrianca ? `${iconeDoPaciente()} ${nomeDaCrianca}\n` : ''}🗓️ ${formatarData(consulta.starts_at, timezone)}\n${tele ? '💻' : '📍'} ${onde}\n${pagamento}\n` +
+          `✅ ${titulo}\n\n${nomeDaCrianca ? `${iconeDoPaciente()} ${nomeDaCrianca}\n` : ''}🗓️ ${formatarData(consulta.starts_at, timezone)}\n${tele ? '💻' : '📍'} ${onde}\n${pagamento}\n` +
           (lembrete ? `${lembrete}\n\n` : '')
       }
     } catch (causa) {
@@ -6774,12 +7256,21 @@ async function tratarConversaPorDentro(opcoes: {
       : opcoes.textos.saudacao
   ).trim() || quemAtende(clinicId).saudacaoPadrao
   criancaEmFoco = unico && primeiroNome ? { conversa: conversationId, nome: primeiroNome } : null
+  textoEmFoco = { conversa: conversationId, texto }
 
+  // Paciente achado por nome e nascimento (26/10/2026, ver
+  // perguntarPacienteDoRetorno): nao e deste telefone, entao vem do banco.
+  const deOutroTelefone =
+    opcoes.pacienteEmAndamento &&
+    opcoes.pacienteEmAndamento !== OUTRA_CRIANCA &&
+    !opcoes.pacientes.some((p) => p.id === opcoes.pacienteEmAndamento)
+      ? await pacientePorId(admin, clinicId, opcoes.pacienteEmAndamento)
+      : null
   /** Quem vai no prontuario da consulta: o escolhido, ou o unico que existe. */
   const pacienteDaConsulta =
     opcoes.pacienteEmAndamento === OUTRA_CRIANCA
       ? null
-      : (opcoes.pacientes.find((p) => p.id === opcoes.pacienteEmAndamento) ?? unico ?? null)
+      : (deOutroTelefone ?? opcoes.pacientes.find((p) => p.id === opcoes.pacienteEmAndamento) ?? unico ?? null)
 
   // MENU vem antes de tudo, ate de "a equipe assumiu": e a saida de emergencia
   // que prometemos em toda mensagem, e promessa que falha uma vez nao vale.
@@ -7129,13 +7620,8 @@ async function tratarConversaPorDentro(opcoes: {
     // Quer marcar, estando na fila (25/09/2026). Em 24/09 a atendente
     // respondeu "basta escolher a opcao 2"; a mae digitou "Pode agendar", "2",
     // e o robo, calado na fila, nao fez nada - 35 minutos ate ela escrever
-    // "nao estou conseguindo marcar". O robo nao abre a agenda sozinho (pode
-    // haver conversa humana em andamento); ele OFERECE um botao. Tocar nele
-    // manda "Marcar uma consulta", que o bloco acima ja atende.
-    //
-    // Vale mesmo com gente conversando: e so um botao, e em geral e a propria
-    // atendente que mandou a familia marcar pelo menu. O limite de respostas na
-    // espera continua valendo, para nao virar eco.
+    // "nao estou conseguindo marcar". Ate 26/10/2026 o robo oferecia um botao;
+    // desde entao abre a agenda ele mesmo (ver o querMarcar abaixo).
     // Pergunta de verdade nao e pedido de marcar (06/10/2026): "Tenho gemeas
     // de 3 anos. Poderia agendar a consulta pro valor de 450 para as duas?"
     // recebeu "toque em Marcar uma consulta" - ela queria uma resposta da
@@ -7157,13 +7643,37 @@ async function tratarConversaPorDentro(opcoes: {
     }
     const perguntaLonga =
       parecePergunta(texto) && normalizar(texto).split(/\s+/).filter(Boolean).length >= 10
-    const querMarcar = !perguntaLonga && (pediuAgendamento(texto) || texto.trim() === '2')
+    // Com a equipe conversando, so o pedido curto (20/10/2026 no sistema do
+    // Dr. Marcello, trazido em 26/10/2026). La, alguem do credenciamento de um
+    // convenio conversava com a equipe sobre uma paciente e escreveu "Ja
+    // coloquei a informacao que sera a ultima vez que iremos agendar pra":
+    // recebeu "toque em Marcar uma consulta" no meio da conversa. Frase
+    // comprida com gente conversando so vale se pede alguma coisa ("Preciso
+    // agendar o retorno em 6 meses" continua pedido).
+    const pedeAlgo =
+      /\?|\b(preciso|precisava|precisamos|quero|queria|queremos|gostaria|gostariamos|pode|poderia|podemos|consigo|consegue|conseguimos|da pra|tem como|marca|marque|agende|agenda)\b/
+    const conversaDaEquipe =
+      !opcoes.podeIniciarMenu &&
+      normalizar(texto).split(/\s+/).filter(Boolean).length > 6 &&
+      !pedeAlgo.test(normalizar(texto))
+    // Remarcar ou cancelar na fila (26/10/2026, vindo do sistema do Dr.
+    // Marcello; o Edu: "se tiver tb com a equipe e perguntarem, a IA pode
+    // entrar e conduzir"): vai direto para a consulta, com os botoes de
+    // remarcar e cancelar, como no menu. Sem consulta neste numero, fica com a
+    // equipe - ela pode estar no telefone de outra pessoa da familia.
+    if (!perguntaLonga && !conversaDaEquipe && pediuMudarConsulta(texto) && !assuntoClinico(texto) && opcoes.consultas.length > 0) {
+      registrar('opcao_escolhida', '4')
+      const minha = await mostrarMinhaConsulta(admin, clinicId, conversationId, opcoes.consultas)
+      if (minha) return minha
+    }
+    const querMarcar = !perguntaLonga && !conversaDaEquipe && (pediuAgendamento(texto) || texto.trim() === '2')
     // O "2", e o pedido de marcar, sem ninguem da equipe escrevendo (rodadas 2
     // e 3 do painel): o robo tinha escrito "se quiser marcar, digite 2", e a
     // resposta ao 2 era um botao, duas vezes; "entao marca uma consulta em
     // santos pela porto" ganhou o botao e, depois dele, as perguntas da
     // unidade e do convenio. Abre a agenda, como o toque no botao abriria, com
-    // o que o pedido ja diz. Com gente da equipe conversando, fica o botao.
+    // o que o pedido ja diz. Com gente da equipe conversando tambem, desde
+    // 26/10/2026 (o bloco logo abaixo).
     if (geral() && querMarcar && opcoes.podeIniciarMenu) {
       const distante = await retornoDistante()
       if (distante) return await pedirRetornoDistante(admin, conversationId, distante.pedido, distante.horizonte, true)
@@ -7171,9 +7681,16 @@ async function tratarConversaPorDentro(opcoes: {
       const pedido = await contextoDoPedido(admin, clinicId, conversationId, texto.trim() === '2' ? '' : texto)
       return await iniciarAgendamento(admin, clinicId, conversationId, opcoes.pacientes, opcoes.consultas, false, false, pedido)
     }
-    if (querMarcar && jaRespondidas < LIMITE_NA_ESPERA) {
-      // Na fila, retorno para daqui a meses: o botao de marcar levaria a uma
-      // agenda que nao chega la. Ver retornoAlemDaAgenda.
+    // Desde 26/10/2026 o robo abre a agenda ele mesmo tambem com a equipe na
+    // conversa, sem o botao no meio e sem o limite de respostas na espera
+    // (vindo do sistema do Dr. Marcello: la, uma familia esperou 18 minutos
+    // com "Oi quero marcar", e o Edu pediu que o pedido de agendamento seja
+    // sempre atendido pelo robo, "mesmo que esteja com a solicitacao
+    // humana"). As travas de cima continuam: pergunta longa e conversa da
+    // equipe ficam com a equipe.
+    if (querMarcar) {
+      // Na fila, retorno para daqui a meses: a agenda nao chega la. Ver
+      // retornoAlemDaAgenda.
       const distante = await retornoDistante()
       if (distante) {
         await admin
@@ -7186,17 +7703,10 @@ async function tratarConversaPorDentro(opcoes: {
       // "Marca consulta pra minha filha, e valor da consulta": as duas coisas.
       const achadoJunto = acharResposta(texto, lista, 2)
       const junto = achadoJunto && !(await jaMandada(admin, conversationId, achadoJunto.resposta)) ? achadoJunto : null
-      await admin
-        .from('whatsapp_conversations')
-        .update({ auto_replies_while_waiting: jaRespondidas + 1 })
-        .eq('id', conversationId)
-      return {
-        resposta:
-          (junto ? `${junto.resposta}\n\n` : '') +
-          '📅 Para ver os horários livres e marcar agora, toque em *Marcar uma consulta*. ' +
-          'Sua conversa continua na fila da equipe.',
-        botoes: [{ id: 'MARCAR_AGORA', titulo: 'Marcar uma consulta' }],
-      }
+      registrar('opcao_escolhida', '2')
+      const pedido = await contextoDoPedido(admin, clinicId, conversationId, texto.trim() === '2' ? '' : texto)
+      const agenda = await iniciarAgendamento(admin, clinicId, conversationId, opcoes.pacientes, opcoes.consultas, false, false, pedido)
+      return junto && agenda ? { ...agenda, resposta: `${junto.resposta}\n\n${agenda.resposta}` } : agenda
     }
 
     if (opcoes.podeIniciarMenu && jaRespondidas < LIMITE_NA_ESPERA) {
@@ -8664,6 +9174,84 @@ async function tratarConversaPorDentro(opcoes: {
     }
   }
 
+  // ---- Insistencia no retorno ja usado ou vencido (26/10/2026) ----
+  // "Mas e retorno", "o medico falou que era retorno" no meio do agendamento,
+  // com o retorno ja usado ou vencido no prontuario: explica (ate duas vezes,
+  // contando a do comeco) e depois passa para a equipe. Numero e escolha da
+  // lista seguem o caminho de sempre.
+  if (
+    (estadoAtual === 'aguardando_unidade' || estadoAtual === 'aguardando_convenio' || estadoAtual === 'aguardando_dia' || estadoAtual === 'aguardando_horario') &&
+    pediuRetorno(texto) &&
+    !/^\s*\d+\s*$/.test(texto)
+  ) {
+    const { aberto, fechado } = await retornoDaConversa(admin, clinicId, conversationId)
+    if (!aberto && fechado) {
+      return await explicarOuPassarORetorno(admin, clinicId, conversationId, {
+        resposta:
+          `${fechado}\n\nSe ${quemAtende(clinicId).o} combinou outra coisa com você, digite *9* que a nossa equipe confere. ` +
+          'Para seguir com a marcação, escolha uma opção da lista acima.',
+        botoes: [
+          { id: '9', titulo: 'Falar com a equipe' },
+          { id: '0', titulo: 'Voltar ao menu' },
+        ],
+      })
+    }
+  }
+
+  // ---- Paciente do retorno, de um telefone sem ele (26/10/2026) ----
+  if (estadoAtual === 'aguardando_crianca_do_retorno') {
+    const t = normalizar(texto)
+    const deOutra = opcoes.pacienteEmAndamento === OUTRA_CRIANCA
+    if (t === 'nova' || /\b(consulta nova|nova consulta|primeira (vez|consulta)|nao e retorno)\b/.test(t)) {
+      await salvarEstado(admin, conversationId, { booking_patient_id: deOutra ? OUTRA_CRIANCA : null, booking_options: null })
+      return await perguntarUnidade(admin, clinicId, conversationId)
+    }
+    let achado: Awaited<ReturnType<typeof acharPacienteDoRetorno>> = null
+    try {
+      achado = await acharPacienteDoRetorno(admin, clinicId, texto)
+    } catch (erro) {
+      console.warn('Nao consegui procurar o paciente do retorno', erro)
+    }
+    if (achado === 'sem_dados') {
+      return {
+        resposta:
+          `Para achar o cadastro preciso do *nome completo* e da *data de nascimento* ${doPacienteDoRetorno()} (ex.: ${exemploDeCadastro()}), ou do *CPF*.\n\n` +
+          'Se for uma consulta nova, toque em *Consulta nova*.',
+        botoes: BOTOES_DO_CADASTRO_DO_RETORNO,
+      }
+    }
+    if (!achado) {
+      const jaTentou = Array.isArray(opcoes.opcoesAtuais) && (opcoes.opcoesAtuais as unknown[]).includes('tentou')
+      if (!jaTentou) {
+        await salvarEstado(admin, conversationId, { booking_options: ['tentou'] })
+        return {
+          resposta:
+            'Não achei esse cadastro. Confira o nome completo e a data de nascimento, ou mande o CPF.\n\n' +
+            'Se for uma consulta nova, toque em *Consulta nova*.',
+          botoes: BOTOES_DO_CADASTRO_DO_RETORNO,
+        }
+      }
+      // Segunda vez sem achar: ninguem fica preso. Segue a marcacao, e a
+      // equipe confere depois pela ficha (o cadastro automatico junta quando o
+      // nome e o nascimento batem).
+      registrar('retorno_sem_cadastro')
+      await salvarEstado(admin, conversationId, { booking_patient_id: deOutra ? OUTRA_CRIANCA : null, booking_options: null })
+      const unidades = await perguntarUnidade(admin, clinicId, conversationId)
+      if (!unidades) return unidades
+      return {
+        ...unidades,
+        resposta: `Não encontrei o cadastro, então sigo com a marcação. A nossa equipe confere se é retorno.\n\n${unidades.resposta}`,
+      }
+    }
+    await salvarEstado(admin, conversationId, { booking_patient_id: achado.id, booking_options: null })
+    const primeiro = achado.name.trim().split(/\s+/)[0] ?? ''
+    // Aberto, o titulo das unidades diz ate quando; usado ou vencido,
+    // perguntarUnidade diz que e consulta (o paciente pediu retorno).
+    const unidades = await perguntarUnidade(admin, clinicId, conversationId)
+    if (!unidades) return unidades
+    return { ...unidades, resposta: `✅ Achei o cadastro de *${primeiro}*.\n\n${unidades.resposta}` }
+  }
+
   // ---- Escolha do paciente ----
   if (estadoAtual === 'aguardando_paciente') {
     if (pediuVoltar(texto)) return await mostrarMenu(admin, conversationId, saudacao)
@@ -8709,6 +9297,11 @@ async function tratarConversaPorDentro(opcoes: {
       return pedido ? await unidadeDoPedido(admin, clinicId, conversationId, pedido) : await perguntarUnidade(admin, clinicId, conversationId)
     }
     if (ids[indice] === OUTRA_CRIANCA) {
+      // Outra pessoa para o retorno: pode ser quem esta cadastrado em outro
+      // celular da familia (26/10/2026).
+      if ((await falouEmRetorno(admin, conversationId)) && (await clinicaMarcaORetorno(admin, clinicId))) {
+        return await perguntarPacienteDoRetorno(admin, conversationId, true)
+      }
       await salvarEstado(admin, conversationId, { booking_patient_id: OUTRA_CRIANCA })
       return await seguirDoPedido()
     }
@@ -9003,6 +9596,13 @@ async function tratarConversaPorDentro(opcoes: {
         if (doMes.length === 1) indice = dias.indexOf(doMes[0])
       }
     }
+    // Data escrita depois do prazo do retorno (26/10/2026, vindo do sistema do
+    // Dr. Marcello): a lista e curta de proposito, e a data escrita nao fura o
+    // prazo. Explica, e na insistencia passa para a equipe.
+    if (indice === null) {
+      const depoisDoPrazo = await dataDepoisDoPrazo(admin, clinicId, conversationId, pedido, agora)
+      if (depoisDoPrazo) return depoisDoPrazo
+    }
     // Dia da semana sem vaga: "sexta" quando a unidade nao atende sexta. Dizer
     // isso e mais util que "nao entendi" - a pessoa foi entendida.
     const diaCitado = indice === null ? DIAS_DA_SEMANA.find((d) => new RegExp(`\\b${d}\\b`).test(semErroNosDias(normalizar(pedido)))) : undefined
@@ -9295,6 +9895,10 @@ async function tratarConversaPorDentro(opcoes: {
     // nao ha ano para adivinhar, e um dia sem vaga responde que nao tem vaga.
     const outroDia = dataEscrita(pedido)
     if (outroDia && unidadeEmAndamento) {
+      // Mesmo cuidado do passo do dia: outro dia, so dentro do prazo do
+      // retorno (26/10/2026).
+      const depoisDoPrazo = await dataDepoisDoPrazo(admin, clinicId, conversationId, pedido, agora)
+      if (depoisDoPrazo) return depoisDoPrazo
       const timezone = await fusoDaClinica(admin, clinicId)
       const { horarios } = await horariosLivres(admin, clinicId, unidadeEmAndamento)
       const chave = horarios
@@ -9325,6 +9929,12 @@ async function tratarConversaPorDentro(opcoes: {
         const dias = agruparPorDia(horarios, timezoneDaClinica).map((d) => d.chave)
         const qual = diaPeloNome(pedido, dias, agora)
         if (qual >= 0 && dias[qual] !== diaInteiro) {
+          // O dia pelo nome vem da agenda inteira: depois do prazo do retorno,
+          // explica (26/10/2026).
+          const retorno = await retornoEmAberto(admin, clinicId, conversationId)
+          if (retorno && dias[qual] > retorno.ate) {
+            return await explicarOuPassarORetorno(admin, clinicId, conversationId, foraDoPrazoDoRetorno(retorno))
+          }
           return await perguntarHorario(admin, clinicId, conversationId, unidadeEmAndamento, dias[qual], periodoEscrito(pedido))
         }
       }

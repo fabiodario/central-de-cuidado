@@ -43,7 +43,9 @@ export type PacienteParaImpressao = {
 export type Bloco = { titulo: string; texto: string }
 
 const TIPOS: Record<string, string> = {
-  initial: 'Consulta inicial',
+  // "Consulta", e nao "Consulta inicial" (26/10/2026): desde a regra do
+  // retorno, toda consulta paga e 'initial', nao so a primeira.
+  initial: 'Consulta',
   return: 'Retorno',
   telemedicine: 'Teleconsulta',
   other: 'Atendimento',

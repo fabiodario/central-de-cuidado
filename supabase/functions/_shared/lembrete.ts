@@ -147,6 +147,36 @@ export function equipeFalouRecentemente(
 }
 
 /**
+ * A equipe segura o robo nesta mensagem? (26/10/2026, vindo do sistema do
+ * Dr. Marcello no mesmo dia)
+ *
+ * A regra das 12h (equipeFalouRecentemente) existe para o robo nao atropelar a
+ * secretaria no meio de uma conversa. La ela fez o contrario: a equipe
+ * escreveu "no menu tem as opcoes de data e horario, tente primeiro", a
+ * familia tocou numa unidade da lista do robo e o robo ficou calado -
+ * "equipe conversando". O Edu: "toque em opcao do robo vence a regra das 12h".
+ *
+ * Toque numa lista ou botao do proprio robo (tipo interactive) e o paciente
+ * pedindo o robo. Texto digitado continua com a regra: "pode confirmar amanha
+ * 09h20" depois da secretaria e conversa com ela. Botao de modelo aprovado
+ * (tipo button: lembrete, acompanhamento) tambem fica com a regra.
+ *
+ * Pedido de marcar, remarcar ou cancelar tambem vence (mesmo dia): la, uma
+ * familia respondeu "Oi quero marcar" a uma mensagem da equipe e esperou 18
+ * minutos ate alguem mandar os horarios a mao. O Edu: "sempre que for um
+ * pedido, mesmo que esteja com a solicitacao humana, o robo interpretar e ele
+ * mesmo mandar". Quem decide se e pedido e pediuAgendamento e
+ * pediuMudarConsulta (atendimento.ts).
+ */
+export function equipeSeguraORobo(
+  equipeFalou: boolean,
+  tipoDaMensagem: string | null | undefined,
+  pedidoDeAgendamento = false,
+): boolean {
+  return equipeFalou && tipoDaMensagem !== 'interactive' && !pedidoDeAgendamento
+}
+
+/**
  * O que a pessoa quis dizer.
  *
  * `escolhido` e o id do botao quando ela tocou, ou o proprio texto quando ela

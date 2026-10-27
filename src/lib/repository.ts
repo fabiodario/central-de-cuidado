@@ -12,6 +12,14 @@ import type {
 import type { PatientDraft } from '@/lib/store'
 import type { Database } from '@/types/database'
 import { buscarTodas } from '@/lib/paginar'
+import {
+  situacaoDoRetorno,
+  sugestaoDeVisita,
+  visitasDoBanco,
+  type FichaDoBanco,
+  type SituacaoDoRetorno,
+  type Visita,
+} from '../../supabase/functions/_shared/prazo-do-retorno.ts'
 import { comNonoDigito } from '../../supabase/functions/_shared/telefone-br.ts'
 import { licencaPelaResposta } from '../../supabase/functions/_shared/licenca-da-assinatura.ts'
 import {
@@ -23,6 +31,7 @@ import {
   type HorarioDaAgenda,
 } from '../../supabase/functions/_shared/consulta-aconteceu.ts'
 import { pacientesAtendidos } from '@/lib/paciente-atendido'
+import { convenioDoHorario } from '@/lib/convenio-do-horario'
 
 type PatientInsert = Database['public']['Tables']['patients']['Insert']
 type PatientUpdate = Database['public']['Tables']['patients']['Update']
@@ -114,6 +123,10 @@ type ConsultationRow = {
   signed_at?: string | null
   signed_by_name?: string | null
   signed_pdf_path?: string | null
+  // Consulta ou retorno (26/10/2026). Opcionais pelo mesmo motivo: a coluna
+  // nova pode ainda nao existir no banco.
+  visita?: 'consulta' | 'retorno' | null
+  retorno_ate?: string | null
 }
 
 const FOLLOWUP_KEYS: FollowupKey[] = ['d15', 'd30', 'm90']
@@ -208,6 +221,8 @@ function mapConsultation(row: ConsultationRow): Consultation {
     assinadoEm: row.signed_at ?? null,
     assinadoPor: row.signed_by_name ?? null,
     arquivoAssinado: row.signed_pdf_path ?? null,
+    visita: row.visita ?? '',
+    retornoAte: row.retorno_ate ?? '',
   }
 }
 
@@ -578,13 +593,19 @@ export interface Appointment {
   /** Convenio informado no agendamento. Vazio = particular. */
   insurance: string
   /**
-   * A data da consulta anterior, quando esta marcacao cai dentro dos 30 dias.
-   *
-   * Nula quando nao e retorno, quando o paciente nao tem cadastro, ou quando
-   * ele veio de antes do sistema e a consulta antiga nunca foi registrada aqui.
-   * Serve para a etiqueta na agenda avisar a recepcao, nao para decidir preco.
+   * A data da consulta que da direito a este horario como retorno, quando ele
+   * cai no prazo e o retorno dela ainda nao foi usado (26/10/2026, ver
+   * prazo-do-retorno.ts). Nula quando e consulta, quando o paciente nao tem
+   * cadastro, ou quando ele veio de antes do sistema. Serve para a etiqueta na
+   * agenda avisar a recepcao, nao para decidir preco.
    */
   retornoDe: string | null
+  /**
+   * Convenio do horario para a etiqueta e o filtro da agenda (26/10/2026): o
+   * do agendamento ou o do cadastro; "Particular" no resto. Ver
+   * convenioDoHorario.
+   */
+  convenio: string
 }
 
 export const WEEKDAY_LABEL = [
@@ -1047,18 +1068,15 @@ export async function listAppointments(clinicId: string, unitId: string): Promis
 
   const rows = data ?? []
   const patientIds = [...new Set(rows.map((r) => r.patient_id).filter(Boolean))] as string[]
-  // consultation_date junto do nome: e a data da ultima consulta do paciente, e
-  // e ela que diz se a proxima e retorno. Vem do cadastro, e nao do prontuario,
-  // de proposito: a recepcao enxerga o cadastro, e e a recepcao quem precisa
-  // desta informacao na hora de cobrar.
   const { data: patients } = patientIds.length
-    ? await supabase.from('patients').select('id,name,consultation_date').in('id', patientIds)
+    ? await supabase.from('patients').select('id,name,insurance').in('id', patientIds)
     : { data: [] }
   const nameById = new Map((patients ?? []).map((p) => [p.id, p.name]))
-  const ultimaConsultaPorPaciente = new Map(
-    (patients ?? []).map((p) => [p.id, (p as { consultation_date?: string | null }).consultation_date ?? null]),
-  )
-  const fichas = await fichasDasConsultas(clinicId, unitId)
+  const convenioPorPaciente = new Map((patients ?? []).map((p) => [p.id, (p as { insurance?: string | null }).insurance ?? '']))
+  const [fichas, visitas] = await Promise.all([
+    fichasDasConsultas(clinicId, unitId),
+    visitasPorPaciente(clinicId, patientIds),
+  ])
 
   return rows.map((row) => ({
     id: row.id,
@@ -1087,11 +1105,57 @@ export async function listAppointments(clinicId: string, unitId: string): Promis
     reminderFailureReason: row.reminder_failure_reason,
     rescheduleCount: row.reschedule_count ?? 0,
     insurance: fichas.get(row.id)?.convenio ?? '',
-    retornoDe: dataDoRetorno(
-      row.patient_id ? ultimaConsultaPorPaciente.get(row.patient_id) ?? null : null,
-      row.starts_at,
-    ),
+    retornoDe: retornoDoHorario(row.patient_id ? visitas.get(row.patient_id) : undefined, row.starts_at),
+    convenio: convenioDoHorario(fichas.get(row.id)?.convenio, row.patient_id ? convenioPorPaciente.get(row.patient_id) : ''),
   }))
+}
+
+/**
+ * As visitas de cada paciente da agenda, para a etiqueta de retorno
+ * (26/10/2026). Ate aqui a etiqueta contava 30 dias da data do cadastro, fosse
+ * consulta ou retorno: o horario depois de um retorno saia "Retorno" de novo.
+ * Falha na leitura tira so a etiqueta, com aviso no log.
+ */
+async function visitasPorPaciente(clinicId: string, patientIds: string[]): Promise<Map<string, Visita[]>> {
+  const porPaciente = new Map<string, Visita[]>()
+  if (!patientIds.length) return porPaciente
+  try {
+    const ler = (colunas: string) =>
+      supabase.from('consultations').select(colunas).eq('clinic_id', clinicId).in('patient_id', patientIds).is('archived_at', null)
+    let fichas = await ler('patient_id,consultation_date,visita,retorno_ate')
+    // Coluna de 26/10/2026 que o banco ainda nao tem: segue pela sequencia.
+    if (fichas.error) fichas = await ler('patient_id,consultation_date')
+    if (fichas.error) throw fichas.error
+    const { data: passadas, error } = await supabase
+      .from('appointments')
+      .select('patient_id,starts_at')
+      .eq('clinic_id', clinicId)
+      .in('patient_id', patientIds)
+      .not('status', 'in', '(cancelled,no_show)')
+      .lt('starts_at', new Date().toISOString())
+    if (error) throw error
+    const linhas = (fichas.data ?? []) as unknown as (FichaDoBanco & { patient_id: string })[]
+    for (const id of patientIds) {
+      porPaciente.set(
+        id,
+        visitasDoBanco(
+          linhas.filter((f) => f.patient_id === id),
+          (passadas ?? []).filter((h) => h.patient_id === id) as { starts_at: string }[],
+        ),
+      )
+    }
+  } catch (causa) {
+    console.warn('Agenda sem a etiqueta de retorno: nao consegui ler as visitas', causa)
+  }
+  return porPaciente
+}
+
+/** A consulta que da direito a este horario como retorno, ou nulo. */
+function retornoDoHorario(visitas: Visita[] | undefined, inicio: string): string | null {
+  if (!visitas?.length) return null
+  const dia = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date(inicio))
+  const sugestao = sugestaoDeVisita(visitas, dia)
+  return sugestao.tipo === 'retorno' ? sugestao.consulta : null
 }
 
 /**
@@ -1124,9 +1188,10 @@ export async function listAppointmentHistory(
   const rows = data ?? []
   const patientIds = [...new Set(rows.map((r) => r.patient_id).filter(Boolean))] as string[]
   const { data: patients } = patientIds.length
-    ? await supabase.from('patients').select('id,name').in('id', patientIds)
+    ? await supabase.from('patients').select('id,name,insurance').in('id', patientIds)
     : { data: [] }
   const nameById = new Map((patients ?? []).map((p) => [p.id, p.name]))
+  const convenioPorPaciente = new Map((patients ?? []).map((p) => [p.id, (p as { insurance?: string | null }).insurance ?? '']))
   // Só pelo convênio: o histórico não mostra ficha, mas a recepção precisa
   // saber pelo que aquela consulta foi faturada.
   const [fichas, automaticas] = await Promise.all([
@@ -1161,6 +1226,7 @@ export async function listAppointmentHistory(
     rescheduleCount: row.reschedule_count ?? 0,
     insurance: fichas.get(row.id)?.convenio ?? '',
     retornoDe: null,
+    convenio: convenioDoHorario(fichas.get(row.id)?.convenio, row.patient_id ? convenioPorPaciente.get(row.patient_id) : ''),
   }))
 }
 
@@ -1328,31 +1394,6 @@ async function marcarPresencaPeloProntuario(
   } catch (causa) {
     console.warn('Não consegui marcar presença a partir do prontuário', causa)
   }
-}
-
-/**
- * A data da consulta anterior, quando esta marcacao e retorno.
- *
- * Retorno em ate 30 dias esta incluido no valor da consulta, e quem olha a
- * agenda nao tem como saber disso: "retorno" so existe dentro do prontuario,
- * escrito pelo medico no fim do atendimento. A recepcao cobrava no escuro.
- *
- * A conta e simples de proposito - ultima consulta, 30 dias, acabou. Nao vale
- * como veredicto: devolve a data para a etiqueta MOSTRAR, e quem decide o que
- * cobrar continua sendo a pessoa. A regra dos 30 dias e do consultorio, e
- * consultorio abre excecao.
- *
- * Estritamente ANTES: consulta e marcacao no mesmo dia e a propria consulta
- * sendo registrada, nao um retorno dela.
- */
-function dataDoRetorno(ultimaConsulta: string | null, inicioDaMarcacao: string): string | null {
-  if (!ultimaConsulta) return null
-  const anterior = new Date(`${ultimaConsulta}T12:00:00`)
-  const marcada = new Date(inicioDaMarcacao)
-  if (Number.isNaN(anterior.getTime()) || Number.isNaN(marcada.getTime())) return null
-
-  const dias = Math.floor((marcada.getTime() - anterior.getTime()) / 86_400_000)
-  return dias > 0 && dias <= 30 ? ultimaConsulta : null
 }
 
 export type MotivoDeLigar = 'remarcar' | 'lembrete_falhou' | 'sem_resposta' | 'sem_telefone'
@@ -1779,6 +1820,12 @@ export interface ResumoDoPaciente {
   /** Consultas futuras ainda de pe. */
   agendadas: number
   cancelamentos: number
+  /**
+   * Onde o retorno incluido esta: aberto ate tal dia, ja usado, vencido ou sem
+   * retorno. Nulo sem visita feita. Conta da ultima CONSULTA, no prazo que o
+   * medico definiu no prontuario (26/10/2026, ver prazo-do-retorno.ts).
+   */
+  retorno: SituacaoDoRetorno | null
 }
 
 /**
@@ -1791,7 +1838,7 @@ export interface ResumoDoPaciente {
 export async function resumoDoPaciente(clinicId: string, patientId: string) {
   const agora = new Date().toISOString()
 
-  const [contatos, realizadas, agendadas, cancelamentos] = await Promise.all([
+  const [contatos, realizadas, agendadas, cancelamentos, agendaQuePassou, fichas] = await Promise.all([
     supabase
       .from('whatsapp_messages')
       .select('id', { count: 'exact', head: true })
@@ -1817,14 +1864,54 @@ export async function resumoDoPaciente(clinicId: string, patientId: string) {
       .eq('clinic_id', clinicId)
       .eq('patient_id', patientId)
       .eq('status', 'cancelled'),
+    supabase
+      .from('appointments')
+      .select('starts_at')
+      .eq('clinic_id', clinicId)
+      .eq('patient_id', patientId)
+      .not('status', 'in', '(cancelled,no_show)')
+      .lt('starts_at', agora)
+      .order('starts_at', { ascending: false })
+      .limit(60),
+    fichasDoRetorno(clinicId, patientId),
   ])
 
+  const hoje = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date())
   return {
     contatos: contatos.count ?? 0,
     realizadas: realizadas.count ?? 0,
     agendadas: agendadas.count ?? 0,
     cancelamentos: cancelamentos.count ?? 0,
+    retorno: situacaoDoRetorno(
+      visitasDoBanco(fichas, (agendaQuePassou.data ?? []) as { starts_at: string }[]),
+      hoje,
+    ),
   } satisfies ResumoDoPaciente
+}
+
+/**
+ * Os atendimentos do prontuario para a conta do retorno. Consulta separada,
+ * com plano B sem as colunas de 26/10/2026: se o banco ainda nao as tem, o
+ * Postgres recusa o SELECT inteiro, e o selo cairia junto (ver o CLAUDE.md).
+ * Sem elas, a conta segue so pela sequencia de visitas.
+ */
+async function fichasDoRetorno(clinicId: string, patientId: string): Promise<FichaDoBanco[]> {
+  const ler = (colunas: string) =>
+    supabase
+      .from('consultations')
+      .select(colunas)
+      .eq('clinic_id', clinicId)
+      .eq('patient_id', patientId)
+      .is('archived_at', null)
+  const completa = await ler('consultation_date,visita,retorno_ate')
+  if (!completa.error) return (completa.data ?? []) as unknown as FichaDoBanco[]
+  console.warn('Retorno sem as colunas de consulta/retorno; contando pela sequencia', completa.error)
+  const simples = await ler('consultation_date')
+  if (simples.error) {
+    console.error('Nao consegui ler os atendimentos para o prazo do retorno', simples.error)
+    return []
+  }
+  return (simples.data ?? []) as unknown as FichaDoBanco[]
 }
 
 /* ------------------------------------------------------------------ *
@@ -1886,6 +1973,8 @@ export interface Conversation {
     | 'sangramento'
     // Talvez uma ligacao, sem a janela de 24h (16/10/2026, vindo do sistema do Dr. Marcello).
     | 'nao_suportada'
+    // Insistiu no retorno fora da regra: a equipe avalia (26/10/2026, idem).
+    | 'retorno'
     | null
   /** Etapa em que o robo parou nesta conversa. Nulo quando nao ha nada aberto. */
   bookingState: string | null
@@ -3282,9 +3371,34 @@ export async function createConsultation(
   if (error) fail(error)
   await marcarPresencaPeloProntuario(clinicId, patientId, draft.data)
   return {
-    consultation: mapConsultation(data as ConsultationRow),
+    consultation: await gravarVisita(clinicId, mapConsultation(data as ConsultationRow), draft),
     patient: await patientById(clinicId, patientId),
   }
+}
+
+/**
+ * Consulta ou retorno, e ate quando vale o retorno (26/10/2026).
+ *
+ * Em UPDATE separado, depois do atendimento salvo: coluna nova que o banco
+ * ainda nao tem recusaria o UPDATE inteiro, e o medico perderia o atendimento
+ * (ver o CLAUDE.md). Perder a marcacao e arranhao: o robo e a conversa caem na
+ * sequencia de visitas (prazo-do-retorno.ts). Vazio nao apaga nada - a receita
+ * da Memed regrava o atendimento com o que leu do banco.
+ */
+async function gravarVisita(clinicId: string, consulta: Consultation, draft: ConsultationDraft): Promise<Consultation> {
+  if (draft.visita !== 'consulta' && draft.visita !== 'retorno') return consulta
+  const retornoAte = draft.visita === 'consulta' && /^\d{4}-\d{2}-\d{2}$/.test(draft.retornoAte) ? draft.retornoAte : null
+  if (consulta.visita === draft.visita && (consulta.retornoAte || null) === retornoAte) return consulta
+  const { error } = await supabase
+    .from('consultations')
+    .update({ visita: draft.visita, retorno_ate: retornoAte } as ConsultationUpdate)
+    .eq('clinic_id', clinicId)
+    .eq('id', consulta.id)
+  if (error) {
+    console.error('Atendimento salvo, mas consulta/retorno nao foi gravado', error)
+    return consulta
+  }
+  return { ...consulta, visita: draft.visita, retornoAte: retornoAte ?? '' }
 }
 
 export async function editConsultation(
@@ -3326,7 +3440,7 @@ export async function editConsultation(
   if (error) fail(error)
   await marcarPresencaPeloProntuario(clinicId, patientId, draft.data)
   return {
-    consultation: mapConsultation(data as ConsultationRow),
+    consultation: await gravarVisita(clinicId, mapConsultation(data as ConsultationRow), draft),
     patient: await patientById(clinicId, patientId),
   }
 }

@@ -19,3 +19,25 @@ export function respostasDaEquipe<T extends RespostaDaLista>(lista: T[]): OpcaoD
     .filter((p) => p.resposta.trim())
     .map((p) => ({ ...p, rotulo: p.ativa ? p.assunto : `${p.assunto} (só equipe)` }))
 }
+
+/**
+ * A mensagem que a equipe vai mandar e uma resposta pronta, sem mudanca?
+ * (26/10/2026, vindo do sistema do Dr. Marcello no mesmo dia)
+ *
+ * La, o Edu mandou a apresentacao do medico pela Central para quatro
+ * familias. O texto termina com "se quiser, te mostro os proximos horarios
+ * livres. E so me responder aqui", mas saiu marcado como escrito pela equipe,
+ * e a regra das 12h calou o robo: uma familia respondeu "Oi quero marcar" e
+ * ficou 18 minutos sem nada, ate alguem mandar os horarios a mao.
+ *
+ * Resposta pronta enviada como esta nao segura o robo: sao os mesmos textos
+ * informativos que ele usa (valor, convenio, endereco) ou a apresentacao do
+ * medico, que chama o paciente de volta para ele. O que a equipe digita - ou
+ * muda no texto pronto - continua segurando, porque ai e conversa de gente.
+ * Espacos e quebras de linha nao contam como mudanca.
+ */
+export function ehRespostaProntaSemMudanca(enviado: string, prontasColocadas: readonly string[]): boolean {
+  const limpar = (t: string) => t.replace(/\s+/g, ' ').trim()
+  const alvo = limpar(enviado)
+  return Boolean(alvo) && prontasColocadas.some((p) => limpar(p) === alvo)
+}

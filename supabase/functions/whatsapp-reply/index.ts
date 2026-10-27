@@ -4,6 +4,7 @@ import { montarConteudo } from '../_shared/conteudo.ts'
 import { variantesDoTelefone } from '../_shared/telefone-br.ts'
 import { chaveDoWhatsApp } from '../_shared/whatsapp-teste.ts'
 import { clinicaDeQuemAtende } from '../_shared/papel.ts'
+import { postarNaMeta } from '../_shared/meta-tentativa.ts'
 import {
   botoesDoVeredito,
   conversaDepoisDoVeredito,
@@ -445,7 +446,9 @@ Deno.serve(async (req) => {
       if (original?.external_message_id) citada = { id: original.id, externo: original.external_message_id }
     }
 
-    const resposta = await fetch(
+    // Erro passageiro da Meta tenta de novo antes de virar "falhou" na tela
+    // (26/10/2026, vindo do sistema do Dr. Marcello; ver _shared/meta-tentativa.ts).
+    const resposta = await postarNaMeta(
       `https://graph.facebook.com/${graphVersion}/${settings.whatsapp_phone_number_id}/messages`,
       {
         method: 'POST',

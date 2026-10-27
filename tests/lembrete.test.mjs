@@ -14,6 +14,7 @@ import {
   lembreteRecente,
   respostaAoAcompanhamento,
   equipeFalouRecentemente,
+  equipeSeguraORobo,
   interpretarResposta,
   mudancaDaConsulta,
   respondendoEnvioNosso,
@@ -94,6 +95,31 @@ conferir(
 conferir(
   'Ninguém da equipe escreveu: o robô atende',
   equipeFalouRecentemente(null, AGORA) === false,
+)
+
+// Toque numa opcao do robo e pedido de marcar vencem a regra das 12h
+// (26/10/2026, vindo do sistema do Dr. Marcello: la, a equipe escreveu "tente
+// primeiro o menu", e o toque na lista e o "Oi quero marcar" ficaram sem
+// resposta).
+conferir(
+  'Equipe falou e o paciente tocou numa lista do robô: o robô responde',
+  equipeSeguraORobo(true, 'interactive') === false,
+)
+conferir(
+  'Equipe falou e o paciente digitou: o robô continua calado',
+  equipeSeguraORobo(true, 'text') === true,
+)
+conferir(
+  'Equipe falou e o paciente tocou num botão de modelo (lembrete): continua a regra',
+  equipeSeguraORobo(true, 'button') === true,
+)
+conferir(
+  'Equipe falou e o paciente digitou um pedido de agendamento: o robô responde',
+  equipeSeguraORobo(true, 'text', true) === false,
+)
+conferir(
+  'Equipe não falou: nada segura o robô',
+  equipeSeguraORobo(false, 'text') === false && equipeSeguraORobo(false, 'interactive') === false,
 )
 
 // Destravar (01/10/2026): a equipe devolveu a conversa ao robo. O Edu

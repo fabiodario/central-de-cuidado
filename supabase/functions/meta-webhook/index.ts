@@ -1,6 +1,14 @@
 import '../_shared/whatsapp.ts'
 import { adminClient, digits, sha256HmacHex, safeEqual } from '../_shared/whatsapp.ts'
-import { colherEventos, etiquetaQueFica, type Estado, type Toque, tratarConversa } from '../_shared/atendimento.ts'
+import {
+  colherEventos,
+  etiquetaQueFica,
+  type Estado,
+  pediuAgendamento,
+  pediuMudarConsulta,
+  type Toque,
+  tratarConversa,
+} from '../_shared/atendimento.ts'
 import { montarMensagens } from '../_shared/conteudo.ts'
 import { RegistroDeEventos } from '../_shared/eventos-do-webhook.ts'
 import { variantesDoTelefone } from '../_shared/telefone-br.ts'
@@ -26,6 +34,7 @@ import {
 } from '../_shared/alerta-de-urgencia.ts'
 import { ANEXO_RECENTE_MS, anexoQueVai, anexoRecenteDaConversa, type AnexoParaEquipe } from '../_shared/anexo-para-equipe.ts'
 import { acompanharEnvioDoAnexo, entregarAnexosPendentes } from '../_shared/anexos-pendentes.ts'
+import { postarNaMeta } from '../_shared/meta-tentativa.ts'
 import { MOTIVOS_COM_VEREDITO } from '../_shared/veredito.ts'
 import { pediuReset, podeResetar, resetarConversaDeTeste, respostaDoReset } from '../_shared/reset-de-teste.ts'
 import { repassarRespostaDoPaciente, tratarRespostaDaEquipe } from '../_shared/resposta-ao-alerta.ts'
@@ -75,6 +84,7 @@ import {
   unidadeNoLembrete,
   respostaAoAcompanhamento,
   equipeFalouRecentemente as equipeFalouHaPouco,
+  equipeSeguraORobo,
   interpretarResposta,
   mudancaDaConsulta,
   oQueFoiEscolhido,
@@ -850,7 +860,15 @@ Deno.serve(async (req) => {
             } catch (erro) {
               console.warn('Coluna robo_liberado_em indisponivel; Destravar nao vence a regra das 12h', erro)
             }
-            equipeFalouRecentemente = equipeFalouHaPouco(ultimoHumanoResult.data, Date.now(), roboLiberadoEm)
+            // Toque numa opcao do robo e pedido de marcar, remarcar ou cancelar
+            // vencem a regra das 12h (26/10/2026, ver equipeSeguraORobo em
+            // _shared/lembrete.ts).
+            const textoRecebido = messageBody(message)
+            equipeFalouRecentemente = equipeSeguraORobo(
+              equipeFalouHaPouco(ultimoHumanoResult.data, Date.now(), roboLiberadoEm),
+              message.type,
+              pediuAgendamento(textoRecebido) || pediuMudarConsulta(textoRecebido),
+            )
           }
 
           const body = messageBody(message)
@@ -1101,7 +1119,8 @@ Deno.serve(async (req) => {
             let envio = new Response(null, { status: 500 })
             let corpoEnvio: { messages?: { id?: string }[]; error?: { message?: string } } = {}
             for (const conteudo of montarMensagens(texto, toques)) {
-              envio = await fetch(
+              // Erro passageiro da Meta tenta de novo (26/10/2026, ver meta-tentativa.ts).
+              envio = await postarNaMeta(
                 `https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`,
                 {
                   method: 'POST',

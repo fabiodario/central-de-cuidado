@@ -75,6 +75,14 @@ export interface ConsultationDraft {
   prescricao: string
   retorno: string
   observacoes: string
+  /**
+   * Consulta ou retorno, para o retorno incluido (26/10/2026). Vazio: nao
+   * marcado (atendimento de antes da regra); a tela mostra a sugestao. Ver
+   * supabase/functions/_shared/prazo-do-retorno.ts.
+   */
+  visita: 'consulta' | 'retorno' | ''
+  /** Ate quando vale o retorno desta consulta (AAAA-MM-DD). Vazio: 30 dias. */
+  retornoAte: string
 }
 
 export interface Consultation extends ConsultationDraft {

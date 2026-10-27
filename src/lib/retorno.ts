@@ -81,3 +81,10 @@ export function agruparPorDia(horarios: string[], fuso = 'America/Sao_Paulo'): {
   }
   return [...grupos.entries()].map(([dia, lista]) => ({ dia, horarios: lista }))
 }
+
+/** Quantos dias faltam (negativo: venceu ha tantos dias), contando so a data. */
+export function diasAte(ate: string, hoje: string): number {
+  const a = Date.parse(`${ate.slice(0, 10)}T12:00:00Z`)
+  const h = Date.parse(`${hoje.slice(0, 10)}T12:00:00Z`)
+  return Math.round((a - h) / 86_400_000)
+}

@@ -6,6 +6,7 @@ import {
   Check,
   CalendarOff,
   CalendarPlus,
+  CreditCard,
   Clock,
   FileText,
   Pencil,
@@ -142,6 +143,26 @@ function diaEHora(iso: string) {
 /** Consulta marcada para alguem de fora da base, sem telefone utilizavel. */
 function telefoneCurto(escolha: { patientId: string; telefone: string }) {
   return !escolha.patientId && escolha.telefone.replace(/\D/g, '').length < 10
+}
+
+/**
+ * O convenio no cartao da agenda (26/10/2026, vindo do sistema do Dr. Marcello
+ * no mesmo dia). Pedido do Edu: a recepcao ver de bate-olho quem vem pelo
+ * plano, para pedir a carteirinha e a guia. Convenio em azul; particular,
+ * discreto. La a Trasmontano tem cor propria; aqui nenhum convenio e excecao.
+ */
+function EtiquetaDoConvenio({ convenio }: { convenio: string }) {
+  if (convenio === 'Particular') {
+    return <span className="shrink-0 text-[9px] font-bold text-white/45">Particular</span>
+  }
+  return (
+    <span
+      className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[#2f7fc1] px-2 py-0.5 text-[9px] font-extrabold text-white"
+    >
+      <CreditCard className="h-2.5 w-2.5" strokeWidth={3} />
+      {convenio}
+    </span>
+  )
 }
 
 function ehReserva(item: Appointment) {
@@ -899,6 +920,33 @@ export default function Agenda({
     return agruparPorDia(slots, appointments, bloqueios)
   }, [slots, appointments, exceptions, unitId, prefs.horizonDays])
 
+  // Filtro por convenio (26/10/2026, pedido do Edu: "campo de segmentacao para
+  // particular e convenios"). Filtrando, a agenda mostra so as consultas
+  // daquele convenio: os horarios livres e as reservas saem, porque nao sao de
+  // convenio nenhum.
+  const [filtroDeConvenio, setFiltroDeConvenio] = useState('Todos')
+  const opcoesDeConvenio = useMemo(() => {
+    const consultas = appointments.filter((item) => !ehReserva(item))
+    const contagem = new Map<string, number>()
+    for (const item of consultas) contagem.set(item.convenio, (contagem.get(item.convenio) ?? 0) + 1)
+    const nomes = [...contagem.keys()].sort((a, b) =>
+      a === 'Particular' ? -1 : b === 'Particular' ? 1 : a.localeCompare(b, 'pt-BR'),
+    )
+    return [{ nome: 'Todos', total: consultas.length }, ...nomes.map((nome) => ({ nome, total: contagem.get(nome) ?? 0 }))]
+  }, [appointments])
+  const diasVisiveis = useMemo(
+    () =>
+      filtroDeConvenio === 'Todos'
+        ? dias
+        : dias
+            .map(([dia, valor]) => [
+              dia,
+              { ...valor, livres: [], marcados: valor.marcados.filter((item) => !ehReserva(item) && item.convenio === filtroDeConvenio) },
+            ] as (typeof dias)[number])
+            .filter(([, valor]) => valor.marcados.length > 0),
+    [dias, filtroDeConvenio],
+  )
+
   /**
    * De quais horarios livres alguem desistiu.
    *
@@ -1225,6 +1273,34 @@ export default function Agenda({
                 ))}
               </div>
             </div>
+            {/* Filtrando, o seletor fica mesmo sem consulta: trocar de unidade
+                com um convenio escolhido deixava a agenda vazia e sem o "Todos"
+                para voltar. */}
+            {aba === 'calendario' && (opcoesDeConvenio.length > 1 || filtroDeConvenio !== 'Todos') && (
+              <div
+                role="radiogroup"
+                aria-label="Filtrar por convênio"
+                className="flex flex-wrap items-center gap-1 rounded-xl bg-[#eef3f2] p-1"
+              >
+                {opcoesDeConvenio.map((opcao) => {
+                  const ativo = filtroDeConvenio === opcao.nome
+                  return (
+                    <button
+                      key={opcao.nome}
+                      type="button"
+                      role="radio"
+                      aria-checked={ativo}
+                      onClick={() => setFiltroDeConvenio(opcao.nome)}
+                      className={`rounded-lg px-2.5 py-1.5 text-[10px] font-extrabold transition ${
+                        ativo ? 'bg-white text-[#081b2c] shadow-sm' : 'text-[#557f75] hover:text-[#081b2c]'
+                      }`}
+                    >
+                      {opcao.nome} <span className="opacity-70">{opcao.total}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            )}
             {/* Legenda das cores dos cartoes. Pedida em 23/09/2026: com
                 verde, laranja e dois vermelhos, a recepcao precisava saber o
                 que cada cor pede dela sem ter de perguntar. So no calendario,
@@ -1312,7 +1388,13 @@ export default function Agenda({
                 </div>
               )}
 
-              {dias.map(([dia, { livres, marcados, bloqueio }]) => (
+              {filtroDeConvenio !== 'Todos' && diasVisiveis.length === 0 && (
+                <div className="surface-card rounded-[22px] p-8 text-center text-xs font-semibold text-slate-500">
+                  Nenhuma consulta {filtroDeConvenio === 'Particular' ? 'particular' : `pela ${filtroDeConvenio}`} nesta unidade.
+                </div>
+              )}
+
+              {diasVisiveis.map(([dia, { livres, marcados, bloqueio }]) => (
                 <div key={dia} className={`surface-card rounded-[20px] p-4 ${bloqueio ? 'opacity-80' : ''}`}>
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="text-xs font-extrabold capitalize text-[#081b2c]">
@@ -1426,9 +1508,12 @@ export default function Agenda({
                             title="Abrir para editar"
                             className="min-w-0 flex-1 text-left"
                           >
-                            <p className="truncate text-[11px] font-bold text-white">
-                              {hora(item.startsAt)} · {item.patientName}
-                              {!item.confirmedByClinic && ' · AGUARDANDO CONFIRMAÇÃO'}
+                            <p className="flex min-w-0 items-center gap-1.5 text-[11px] font-bold text-white">
+                              <span className="truncate">
+                                {hora(item.startsAt)} · {item.patientName}
+                                {!item.confirmedByClinic && ' · AGUARDANDO CONFIRMAÇÃO'}
+                              </span>
+                              <EtiquetaDoConvenio convenio={item.convenio} />
                             </p>
                             {/* O paciente respondeu ao lembrete. Ate 31/08/2026
                                 isso ficava so no banco: a recepcao nao tinha
@@ -1482,18 +1567,10 @@ export default function Agenda({
                                 padrao merece ser visto antes da consulta e nao
                                 depois da falta. Por isso a partir da segunda a
                                 etiqueta acende, em vez de sempre sussurrar. */}
-                            {/* Convênio à vista, e não escondido no detalhe.
-                                A recepção precisa saber ANTES da pessoa chegar
-                                se fatura pelo plano ou cobra particular - do
-                                contrário descobre com a família na frente,
-                                sem tempo de conferir elegibilidade.
-                                Particular não ganha etiqueta: é a maioria, e
-                                etiquetar o normal só faz barulho. */}
-                            {item.insurance && (
-                              <span className="mt-1 ml-1 inline-flex items-center gap-1 rounded-full bg-[#2f7fc1] px-2 py-0.5 text-[9px] font-extrabold text-white">
-                                💳 {item.insurance}
-                              </span>
-                            )}
+                            {/* O convenio fica na linha do nome desde 26/10/2026
+                                (EtiquetaDoConvenio, que le o da ficha e, sem
+                                ele, o do cadastro). A etiqueta "💳" que ficava
+                                aqui repetia o mesmo plano duas vezes no cartao. */}
                             {item.rescheduleCount > 0 && (
                               <span
                                 className={`mt-1 ml-1 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-extrabold ${
@@ -1523,11 +1600,15 @@ export default function Agenda({
 
                                 Avisa, nao manda: o valor nao muda, nada e
                                 bloqueado, e a regra dos 30 dias e do consultorio,
-                                que abre excecao quando quer. */}
+                                que abre excecao quando quer.
+
+                                Desde 26/10/2026 conta da ultima CONSULTA, no prazo
+                                que o medico definiu, e some quando o retorno ja foi
+                                usado (ver prazo-do-retorno.ts). */}
                             {item.retornoDe && (
                               <span
                                 className="mt-1 ml-1 inline-flex items-center gap-1 rounded-full bg-[#3fa88a] px-2 py-0.5 text-[9px] font-extrabold text-white"
-                                title="O paciente se consultou há menos de 30 dias. O retorno costuma estar incluído no valor da consulta anterior."
+                                title="Dentro do prazo do retorno desta consulta (30 dias, ou o que o médico definiu no prontuário), e o retorno ainda não foi usado. Incluído no valor da consulta."
                               >
                                 <RotateCcw className="h-2.5 w-2.5" strokeWidth={3} />
                                 Retorno · consulta em {fmtDiaMes(item.retornoDe)}

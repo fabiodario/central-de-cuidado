@@ -9,7 +9,7 @@
 // O banco aqui e falso e mora neste arquivo. Isso e proposital: o objetivo e
 // exercitar as DECISOES do robo (o que responder, o que gravar, quando ficar
 // calado), e nao o Supabase.
-import { tratarConversa, iniciarQuestionario, colherEventos, abrirFichaPeloLembrete, faltamNaFicha, retornoAlemDaAgenda, pediuMudarConsulta, diaPeloNome, avisoDoDiaDaConsulta, respostaAutomaticaDaFamilia, despedida, oferecerHorarios } from './atendimento.build.mjs'
+import { tratarConversa, iniciarQuestionario, colherEventos, abrirFichaPeloLembrete, faltamNaFicha, retornoAlemDaAgenda, pediuMudarConsulta, diaPeloNome, avisoDoDiaDaConsulta, respostaAutomaticaDaFamilia, despedida, oferecerHorarios, pediuRetorno } from './atendimento.build.mjs'
 import { readFileSync } from 'node:fs'
 import { montarMensagens } from './conteudo.build.mjs'
 
@@ -35,6 +35,14 @@ function fazerAdmin({
   // Horarios alem da agenda aberta: so a funcao com periodo os enxerga, como
   // available_slots_periodo no banco (14/10/2026).
   slotsAlemDaAgenda = {},
+  // Retorno incluido (26/10/2026, vindo do sistema do Dr. Marcello): os
+  // atendimentos do prontuario e os horarios que ja passaram, do paciente da
+  // marcacao; os cadastros que a busca por nome e nascimento (ou CPF)
+  // enxerga; e a consulta relida no fim da ficha.
+  prontuario = [],
+  visitasPassadas = [],
+  pacientesDoBanco = [],
+  daConsulta = null,
 }) {
   const conversa = {
     booking_state: null,
@@ -54,12 +62,17 @@ function fazerAdmin({
   // O que o robo ja mandou nesta conversa, como o webhook grava. E daqui que
   // ele confere se uma resposta pronta acabou de sair (jaMandada).
   const enviadas = []
+  // O que o paciente escreveu, como o webhook grava antes de chamar o robo: e
+  // por aqui que o agendamento sabe que o pedido era de retorno (26/10/2026).
+  const recebidas = []
   const dadosDasConsultas = []
 
   const chain = (resultado) => ({
     select: () => chain(resultado),
     eq: (_col, valor) => chain(resultado._porId ? { ...resultado, single: resultado._porId(valor) } : resultado),
     gte: () => chain(resultado),
+    lt: () => chain(resultado),
+    not: () => chain(resultado),
     is: () => chain(resultado),
     in: () => chain(resultado),
     order: () => chain(resultado),
@@ -72,6 +85,8 @@ function fazerAdmin({
     from(tabela) {
       if (tabela === 'whatsapp_conversations') {
         return {
+          // O paciente da marcacao, lido pelo prazo do retorno (26/10/2026).
+          select: () => chain({ single: conversa }),
           update: (campos) => {
             const faltando = colunasAusentes.filter((c) => c in campos)
             if (faltando.length > 0) {
@@ -111,7 +126,21 @@ function fazerAdmin({
       // dispara o questionario para quem nao tem consulta marcada.
       if (tabela === 'patients') {
         return {
-          select: () => chain({ single: null, list: [] }),
+          // Com filtro de verdade (26/10/2026): a busca por nome e nascimento
+          // depende dele.
+          select: () => {
+            const filtros = []
+            const q = {
+              eq: (k, v) => { filtros.push((r) => r[k] === v); return q },
+              is: (k, v) => { filtros.push((r) => (r[k] ?? null) === v); return q },
+              order: () => q,
+              limit: () => q,
+              lista: () => pacientesDoBanco.filter((r) => filtros.every((f) => f(r))),
+              maybeSingle: async () => ({ data: q.lista()[0] ?? null, error: null }),
+              then: (r) => r({ data: q.lista(), error: null }),
+            }
+            return q
+          },
           update: (campos) => ({
             eq: async (_coluna, valor) => {
               fichas.push({ id: valor, ...campos })
@@ -122,6 +151,24 @@ function fazerAdmin({
       }
       if (tabela === 'clinics') {
         return { select: () => chain({ single: { timezone: 'America/Sao_Paulo' } }) }
+      }
+      // Prontuario do paciente (26/10/2026). Coluna nova ausente recusa o
+      // SELECT inteiro, como no Postgres.
+      if (tabela === 'consultations') {
+        return {
+          select: (colunas = '') => {
+            const faltando = colunasAusentes.find((c) => String(colunas).includes(c))
+            if (faltando) return chain({ erro: { code: '42703', message: `column ${faltando} does not exist` } })
+            // "A clinica ja marca consulta e retorno?" (clinicaMarcaORetorno):
+            // so as fichas marcadas, como o filtro not visita is null.
+            if (colunas === 'id') {
+              if (colunasAusentes.includes('visita')) return chain({ erro: { code: '42703', message: 'column visita does not exist' } })
+              return chain({ list: prontuario.filter((r) => r.visita) })
+            }
+            // So as colunas pedidas, como o banco devolve.
+            return chain({ list: String(colunas).includes('visita') ? prontuario : prontuario.map((r) => ({ consultation_date: r.consultation_date })) })
+          },
+        }
       }
       // Agenda da telemedicina (03/10/2026): o robo so pergunta se ha horario.
       if (tabela === 'availability_rules') {
@@ -137,7 +184,11 @@ function fazerAdmin({
         return { select: () => chain({ list: respostasProntas }) }
       }
       if (tabela === 'whatsapp_messages') {
-        return { select: () => chain({ list: [...enviadas].reverse() }) }
+        return {
+          // 'body,direction' e a leitura do que o paciente escreveu (pediu
+          // retorno?, 26/10/2026); o resto le o que o robo mandou.
+          select: (colunas = '') => chain({ list: colunas === 'body,direction' ? [...recebidas].reverse() : [...enviadas].reverse() }),
+        }
       }
       // Telemedicina: desligada por padrao, para os casos antigos continuarem
       // vendo so as unidades fisicas.
@@ -166,17 +217,21 @@ function fazerAdmin({
           // monta um comprovante. O horario e FUTURO de proposito, para o teste
           // do questionario manual provar que quem segura o comprovante e a
           // regra do "manual", e nao a data.
-          select: () =>
-            chain({
-              // Consultas lidas em lista (cadastro pela metade, 24/09/2026).
-              list: consultasComFicha,
-              single: {
-                reschedule_count: remarcacoesAnteriores,
-                starts_at: '2027-09-14T18:00:00Z',
-                modality: 'presencial',
-                clinic_units: { name: 'Livance Ibirapuera - São Paulo', address: 'Rua Y, 30' },
-              },
-            }),
+          select: (colunas = '') =>
+            // Os horarios que ja passaram, para o prazo do retorno (26/10/2026).
+            colunas === 'starts_at,status'
+              ? chain({ list: visitasPassadas })
+              : chain({
+                // Consultas lidas em lista (cadastro pela metade, 24/09/2026).
+                list: consultasComFicha,
+                single: {
+                  reschedule_count: remarcacoesAnteriores,
+                  starts_at: '2027-09-14T18:00:00Z',
+                  modality: 'presencial',
+                  clinic_units: { name: 'Livance Ibirapuera - São Paulo', address: 'Rua Y, 30' },
+                  ...(daConsulta ?? {}),
+                },
+              }),
           // A consulta marcada e lida de volta: e o id dela que a ficha de
           // dados (nome, nascimento, CPF...) usa para saber onde guardar.
           insert: (linha) => ({
@@ -239,7 +294,7 @@ function fazerAdmin({
       throw new Error('rpc nao prevista: ' + nome)
     },
   }
-  return { admin, conversa, marcadas, canceladas, fichas, enviadas, dadosDasConsultas }
+  return { admin, conversa, marcadas, canceladas, fichas, enviadas, dadosDasConsultas, recebidas }
 }
 
 const TRES_UNIDADES = [
@@ -300,7 +355,7 @@ const VAZIO = Symbol('vazio')
 const SEXTA_23H = new Date('2026-10-10T02:00:00Z')
 
 async function caso(titulo, passos, opcoes = {}) {
-  const { admin, conversa, marcadas, canceladas, fichas, enviadas, dadosDasConsultas } = fazerAdmin({
+  const { admin, conversa, marcadas, canceladas, fichas, enviadas, dadosDasConsultas, recebidas } = fazerAdmin({
     unidades: opcoes.unidades ?? TRES_UNIDADES,
     slotsPorUnidade: opcoes.slots ?? SLOTS_CHEIOS,
     falharSlots: opcoes.falharSlots,
@@ -312,6 +367,10 @@ async function caso(titulo, passos, opcoes = {}) {
     consultasComFicha: opcoes.fichas ?? [],
     regrasPorUnidade: opcoes.regras ?? {},
     slotsAlemDaAgenda: opcoes.alemDaAgenda ?? {},
+    prontuario: opcoes.prontuario ?? [],
+    visitasPassadas: opcoes.visitasPassadas ?? [],
+    pacientesDoBanco: opcoes.pacientesDoBanco ?? [],
+    daConsulta: opcoes.daConsulta ?? null,
   })
 
   // A conversa começa como se o menu já tivesse aparecido alguma vez.
@@ -346,9 +405,12 @@ async function caso(titulo, passos, opcoes = {}) {
   for (const [texto, esperado, mudanca] of passos) {
     if (mudanca) ajustes = { ...ajustes, ...mudanca }
     consultas = consultas.filter((c) => !canceladas.includes(c.id))
+    recebidas.push({ body: texto, direction: 'inbound' })
     const r = await tratarConversa({
       admin,
-      clinicId: 'c1',
+      // A clinica do Dr. Fabio (perfil 'geral') so nos casos que pedem: o
+      // resto deste arquivo prova o perfil de origem.
+      clinicId: opcoes.clinicId ?? 'c1',
       conversationId: 'conv1',
       estadoAtual: conversa.booking_state,
       opcoesAtuais: conversa.booking_options,
@@ -1401,20 +1463,19 @@ await caso('"Convênio?" na fila é respondido mesmo casando com uma palavra só
 ], { respostasProntas: RESPOSTAS })
 
 // E o pedido de marcar nao recebe a lista de documentos, porque "retorno"
-// sozinho nao e pergunta. Desde 25/09/2026 ele recebe o botao de marcar - e so
-// isso: a conversa continua na fila.
-await caso('"Quero marcar retorno para o Tomás" na fila ganha o botão, não os documentos', [
+// sozinho nao e pergunta. De 25/09 a 26/10/2026 ele recebia o botao de marcar;
+// desde 26/10 o robo abre a agenda ele mesmo (vindo do sistema do Dr.
+// Marcello; o Edu: "o robo interpretar e ele mesmo mandar").
+await caso('"Quero marcar retorno para o Tomás" na fila abre a agenda, não os documentos', [
   ['Oi', 'Como podemos ajudar'],
   ['3', 'direcionando você'],
-  ['quero marcar retorno para o Tomás', ['Marcar uma consulta', 'continua na fila']],
+  ['quero marcar retorno para o Tomás', 'Em qual unidade'],
 ], {
-  verificar: ({ transcricao, titulo, ultimoToque, conversa }) => {
+  verificar: ({ transcricao, titulo, conversa }) => {
     if ((transcricao.at(-1) ?? '').includes('Leve um documento')) falhas.push(`${titulo}: recebeu a lista de documentos`)
     else passou++
-    if (ultimoToque.botoes?.[0]?.titulo === 'Marcar uma consulta') passou++
-    else falhas.push(`${titulo}: sem o botão de marcar`)
-    if (conversa.booking_state === 'atendente') passou++
-    else falhas.push(`${titulo}: saiu da fila (${conversa.booking_state})`)
+    if (conversa.booking_state === 'aguardando_unidade') passou++
+    else falhas.push(`${titulo}: não entrou no agendamento (${conversa.booking_state})`)
   },
   respostasProntas: [...RESPOSTAS, {
   id: 'r4',
@@ -2116,31 +2177,50 @@ await caso('Resposta ao lembrete de ficha segue para a próxima pergunta', [
 }
 
 // 24/09/2026: a atendente disse "basta escolher a opção 2"; a mãe escreveu
-// "Pode agendar" e "2" e o robô ficou mudo por 35 minutos. Agora ela recebe o
-// botão, mesmo com a equipe na conversa.
-await caso('"Pode agendar" na fila recebe o botão de marcar', [
-  ['Pode agendar', 'Marcar uma consulta'],
-  ['2', 'Marcar uma consulta'],
-  ['Marcar uma consulta', 'Em qual unidade'],
+// "Pode agendar" e "2" e o robô ficou mudo por 35 minutos. De 25/09 a 26/10 ela
+// recebia um botão; desde 26/10 o robô abre a agenda direto, mesmo com a equipe
+// na conversa.
+await caso('"Pode agendar" na fila abre a agenda', [
+  ['Pode agendar', 'Em qual unidade'],
 ], { estadoInicial: { booking_state: 'atendente' }, podeIniciarMenu: false })
+await caso('"2" na fila abre a agenda', [
+  ['2', 'Em qual unidade'],
+], { estadoInicial: { booking_state: 'atendente' }, podeIniciarMenu: false })
+await caso('"Gostaria de agendar" na fila, depois de três respostas na espera, ainda abre a agenda', [
+  ['Gostaria de agendar', 'Em qual unidade'],
+], { estadoInicial: { booking_state: 'atendente', auto_replies_while_waiting: 3 }, podeIniciarMenu: false })
+
+// Remarcar e cancelar na fila também (26/10/2026, vindo do sistema do Dr.
+// Marcello; o Edu: "se tiver tb com a equipe e perguntarem, a IA pode entrar e
+// conduzir").
+await caso('"Quero remarcar" na fila, com a equipe conversando, mostra a consulta', [
+  ['quero remarcar a consulta', ['Sua consulta', 'REMARCAR']],
+], { estadoInicial: { booking_state: 'atendente' }, podeIniciarMenu: false, consultas: [CONSULTA_ANA], pacientes: [] })
+await caso('"Preciso cancelar" na fila mostra a consulta com o cancelar', [
+  ['preciso cancelar a consulta de quinta', ['Sua consulta', 'CANCELAR']],
+], { estadoInicial: { booking_state: 'atendente' }, podeIniciarMenu: false, consultas: [CONSULTA_ANA], pacientes: [] })
+await caso('"Quero remarcar" na fila sem consulta neste número fica com a equipe', [
+  ['quero remarcar', null],
+], { estadoInicial: { booking_state: 'atendente' }, podeIniciarMenu: false })
+await caso('"Não quero cancelar" na fila não abre a consulta', [
+  ['não quero cancelar, só tirar uma dúvida', null],
+], { estadoInicial: { booking_state: 'atendente' }, podeIniciarMenu: false, consultas: [CONSULTA_ANA], pacientes: [] })
 
 // Real 05/10/2026 (Leandro): o toque no botão manda o ID do botão, e não o
-// título. Com id "2", o toque virava "quero marcar" de novo e o robô oferecia o
-// mesmo botão - três vezes. O teste acima só mandava o título, que é o caso do
-// botão de mensagem antiga, e por isso não viu o laço.
-{
-  let idDoBotao = null
-  await caso('Real 05/10: na fila, o botão de marcar tem id próprio', [
-    ['Gostaria de agendar', 'Marcar uma consulta'],
-  ], {
-    estadoInicial: { booking_state: 'atendente' },
-    podeIniciarMenu: false,
-    verificar: ({ ultimoToque }) => { idDoBotao = ultimoToque.botoes?.[0]?.id ?? null },
-  })
-  await caso('Real 05/10: tocar no botão abre a agenda (não repete o convite)', [
-    [idDoBotao ?? '(sem botão)', 'Em qual unidade'],
-  ], { estadoInicial: { booking_state: 'atendente', auto_replies_while_waiting: 1 }, podeIniciarMenu: false })
-}
+// título. O botão "Marcar uma consulta" (id MARCAR_AGORA) ainda sai em outras
+// mensagens: tocado depois, de uma mensagem antiga, abre a agenda.
+await caso('Real 05/10: tocar no botão MARCAR_AGORA na fila abre a agenda', [
+  ['MARCAR_AGORA', 'Em qual unidade'],
+], { estadoInicial: { booking_state: 'atendente', auto_replies_while_waiting: 1 }, podeIniciarMenu: false })
+
+// Com a equipe conversando, frase comprida que nao pede nada fica com a equipe
+// (20/10/2026 no sistema do Dr. Marcello, trazido em 26/10/2026).
+await caso('Com a equipe conversando, "iremos agendar" no meio da frase não abre a agenda', [
+  ['Já coloquei a informação que será a última vez que iremos agendar pra', null],
+], { estadoInicial: { booking_state: 'atendente' }, podeIniciarMenu: false })
+await caso('Sem ninguém da equipe conversando, a mesma frase abre a agenda', [
+  ['Já coloquei a informação que será a última vez que iremos agendar pra', 'Em qual unidade'],
+], { estadoInicial: { booking_state: 'atendente' } })
 
 await caso('Real 05/10: "Voltar ao início" de uma mensagem antiga mostra o menu', [
   ['Voltar ao início', 'Como podemos ajudar'],
@@ -4155,6 +4235,337 @@ await caso('Campos: texto sem campo continua exatamente igual', [
   unidades: [TRES_UNIDADES[0], TRES_UNIDADES[1], { ...TRES_UNIDADES[2], info_text: '*Consulta em São Paulo: R$ 550,00.*' }],
   colunasAusentes: ['price_cents'],
 })
+
+// ---------------------------------------------------------------
+// Retorno incluido (26/10/2026, vindo do sistema do Dr. Marcello)
+// ---------------------------------------------------------------
+//
+// Toda consulta da direito a UM retorno, no prazo que o medico define no
+// prontuario (30 dias, se nao mudou). La, uma familia marcou pelo robo uma
+// data fora do prazo e ouviu da equipe, depois, que o retorno ia ate 02/11 -
+// contado de uma visita que ja era o retorno. Agora o robo mostra so as datas
+// do prazo, diz que e retorno, e quem escreve de outro telefone e achado por
+// nome e nascimento. Sem a regra da Trasmontano, que e so do Dr. Marcello.
+// Dados inventados: o repositorio e publico. Hoje no teste: quarta, 07/10/2026.
+{
+  const diasDoRetorno = ['2026-10-14', '2026-10-21', '2026-10-28', '2026-11-04']
+  const SLOTS_DO_RETORNO = {
+    'u-santos': diasDoRetorno.flatMap((d) => ['13:00', '13:40'].map((h) => ({ slot_start: `${d}T${h}:00Z`, slot_end: `${d}T${h}:40Z` }))),
+    'u-andre': [],
+    'u-vila': [],
+  }
+  // Consulta em 25/09 marcada no prontuario, prazo padrao: retorno ate 25/10.
+  const consultaDe25 = [{ consultation_date: '2026-09-25', visita: 'consulta', retorno_ate: null }]
+  // O caso que trouxe a regra, com as visitas marcadas: consulta e retorno.
+  const retornoUsado = [{ consultation_date: '2026-09-16', visita: 'consulta' }, { consultation_date: '2026-10-02', visita: 'retorno' }]
+  // O nome da mensagem vem do cadastro no banco.
+  const anaNoBanco = [{ id: 'p1', clinic_id: 'c1', name: 'Ana Paula Souza', archived_at: null }]
+
+  await caso('Retorno em aberto: so as datas ate o prazo, e o robo diz que e retorno', [
+    ['quero marcar o retorno', ['Vamos marcar o retorno de Ana', 'incluído até *25/10*', '4 horários livres']],
+    ['1', ['Datas para o retorno de Ana em Liferty · Santos', 'incluído no valor da consulta de 25/09', '14/10', '21/10', 'depois do prazo do retorno']],
+    ['1', '14/10'],
+    ['1', ['*Retorno marcado!*', 'Incluído no valor da consulta de 25/09']],
+  ], {
+    pacientes: [ANA],
+    slots: SLOTS_DO_RETORNO,
+    prontuario: consultaDe25,
+    pacientesDoBanco: anaNoBanco,
+    verificar: ({ transcricao, titulo, marcadas }) => {
+      const datas = transcricao.find((t) => t.includes('Datas para o retorno')) ?? ''
+      if (datas.includes('28/10') || datas.includes('04/11')) falhas.push(`${titulo}: mostrou data depois do prazo`)
+      else passou++
+      if (marcadas[0]?.patient_id === 'p1' && marcadas[0]?.starts_at?.startsWith('2026-10-14')) passou++
+      else falhas.push(`${titulo}: marcou ${JSON.stringify(marcadas[0])}`)
+    },
+  })
+
+  // Deduzido nao vale para o robo: so a agenda (o medico ainda nao escreveu o
+  // prontuario) ou so a sequencia de visitas antigas, sem marcacao. A agenda
+  // de sempre, como antes da regra - prometer retorno incluido a quem deve
+  // consulta e o erro que nao pode acontecer.
+  await caso('Visita so na agenda, sem prontuario marcado: agenda de sempre', [
+    ['quero marcar o retorno', 'Vamos agendar!'],
+  ], { pacientes: [ANA], slots: SLOTS_DO_RETORNO, pacientesDoBanco: anaNoBanco, visitasPassadas: [{ starts_at: '2026-09-25T13:00:00Z', status: 'attended' }] })
+  await caso('Consulta antiga sem marcacao: agenda de sempre', [
+    ['quero marcar o retorno', 'Vamos agendar!'],
+    ['1', ['Datas disponíveis', '28/10']],
+  ], { pacientes: [ANA], slots: SLOTS_DO_RETORNO, pacientesDoBanco: anaNoBanco, prontuario: [{ consultation_date: '2026-09-25' }] })
+
+  // O caso que trouxe a regra: consulta, retorno, e agora e consulta nova.
+  await caso('Retorno ja usado: agenda inteira, como consulta', [
+    ['quero marcar o retorno', 'Vamos agendar!'],
+    ['1', ['Datas disponíveis em Liferty · Santos', '28/10', '04/11']],
+  ], { pacientes: [ANA], slots: SLOTS_DO_RETORNO, prontuario: retornoUsado })
+
+  // O medico esticou o retorno ate o resultado do exame.
+  await caso('Retorno ate a data do medico: datas ate 05/11', [
+    ['quero marcar o retorno', 'incluído até *05/11*'],
+    ['1', ['28/10', '04/11']],
+  ], { pacientes: [ANA], slots: SLOTS_DO_RETORNO, prontuario: [{ consultation_date: '2026-09-01', visita: 'consulta', retorno_ate: '2026-11-05' }] })
+
+  // "Sem retorno" no prontuario: a proxima e consulta.
+  await caso('Sem retorno marcado pelo medico: agenda normal', [
+    ['quero marcar o retorno', 'Vamos agendar!'],
+  ], { pacientes: [ANA], slots: SLOTS_DO_RETORNO, prontuario: [{ consultation_date: '2026-10-01', visita: 'consulta', retorno_ate: '2026-10-01' }] })
+
+  // Data escrita depois do prazo nao fura a lista.
+  await caso('Data escrita depois do prazo do retorno: explica e oferece a equipe', [
+    ['quero marcar o retorno', 'Vamos marcar o retorno'],
+    ['1', 'Datas para o retorno'],
+    ['dia 28/10', ['passa do prazo do retorno de Ana', 'até *25/10*', '*9*']],
+  ], {
+    pacientes: [ANA],
+    slots: SLOTS_DO_RETORNO,
+    prontuario: consultaDe25,
+    pacientesDoBanco: anaNoBanco,
+    verificar: ({ marcadas, titulo }) => {
+      if (marcadas.length === 0) passou++
+      else falhas.push(`${titulo}: marcou fora do prazo`)
+    },
+  })
+
+  // Outro dia pedido na tela dos horarios: o mesmo prazo, por data ou pelo dia.
+  for (const pedido of ['nao da, pode ser 28/10?', 'nao da, pode ser dia 28?']) {
+    await caso(`Outro dia depois do prazo, na tela dos horarios ("${pedido}"): explica`, [
+      ['quero marcar o retorno', 'Vamos marcar o retorno'],
+      ['1', 'Datas para o retorno'],
+      ['1', '14/10'],
+      [pedido, ['passa do prazo do retorno de Ana', 'até *25/10*']],
+    ], {
+      pacientes: [ANA],
+      slots: SLOTS_DO_RETORNO,
+      prontuario: consultaDe25,
+      pacientesDoBanco: anaNoBanco,
+      verificar: ({ marcadas, titulo }) => {
+        if (marcadas.length === 0) passou++
+        else falhas.push(`${titulo}: marcou fora do prazo`)
+      },
+    })
+  }
+  // Dentro do prazo, o outro dia continua valendo.
+  await caso('Outro dia dentro do prazo, na tela dos horarios: abre o dia', [
+    ['quero marcar o retorno', 'Vamos marcar o retorno'],
+    ['1', 'Datas para o retorno'],
+    ['1', '14/10'],
+    ['nao da, pode ser dia 21?', '21/10'],
+  ], { pacientes: [ANA], slots: SLOTS_DO_RETORNO, prontuario: consultaDe25, pacientesDoBanco: anaNoBanco })
+
+  // Sem vaga no prazo: a equipe ve um encaixe, em vez de marcar fora do prazo
+  // sem saber.
+  await caso('Retorno sem vaga no prazo: passa para a equipe', [
+    ['quero marcar o retorno', ['Não temos horário livre até *25/10*', 'encaixe']],
+  ], {
+    pacientes: [ANA],
+    slots: { 'u-santos': SLOTS_DO_RETORNO['u-santos'].filter((h) => h.slot_start >= '2026-10-28'), 'u-andre': [], 'u-vila': [] },
+    prontuario: consultaDe25,
+  })
+
+  // Horarios mandados pela equipe passam do prazo de proposito (ela decidiu):
+  // marca, e a visita sai como consulta.
+  PEDIDOS.length = 0
+  await caso('Equipe manda datas depois do prazo: marca como consulta', [
+    ['1', ['Horários de quarta, 28/10']],
+    ['1', '*Consulta marcada!*'],
+  ], {
+    antes: pedirHorarios({ unidade: 'u-santos', de: '2026-10-28', ate: '2026-11-04', pacienteId: 'p1' }),
+    pacientes: [ANA],
+    slots: SLOTS_DO_RETORNO,
+    prontuario: consultaDe25,
+    pacientesDoBanco: anaNoBanco,
+  })
+
+  // Tres visitas em 10 dias: consulta, retorno, consulta. A ultima abre prazo
+  // novo; o retorno nao abre outro.
+  await caso('Retorno de retorno nao: a terceira visita e consulta e abre prazo novo', [
+    ['quero marcar o retorno', 'incluído até *20/10*'],
+  ], {
+    pacientes: [ANA],
+    slots: SLOTS_DO_RETORNO,
+    pacientesDoBanco: anaNoBanco,
+    prontuario: [{ consultation_date: '2026-09-10', visita: 'consulta' }, { consultation_date: '2026-09-15', visita: 'retorno' }, { consultation_date: '2026-09-20', visita: 'consulta' }],
+  })
+
+  // Coluna nova ainda ausente no banco: sem marcacao, a agenda de sempre, e
+  // nada quebra.
+  await caso('Sem as colunas novas no banco, agenda de sempre', [
+    ['quero marcar o retorno', 'Vamos agendar!'],
+  ], { pacientes: [ANA], slots: SLOTS_DO_RETORNO, prontuario: consultaDe25, colunasAusentes: ['visita'] })
+
+  // Insistencia (26/10/2026, o Edu: "para nao ficar chato"): duas explicacoes,
+  // e na terceira a equipe avalia, com a etiqueta laranja "Retorno".
+  await caso('Insistiu na data depois do prazo: na terceira, a equipe avalia', [
+    ['quero marcar o retorno', 'Vamos marcar o retorno'],
+    ['1', 'Datas para o retorno'],
+    ['dia 28/10', 'passa do prazo do retorno'],
+    ['dia 28/10', 'passa do prazo do retorno'],
+    ['dia 28/10', ['Vou passar o seu pedido de retorno para a nossa equipe avaliar com o Dr. Marcello']],
+  ], {
+    pacientes: [ANA],
+    slots: SLOTS_DO_RETORNO,
+    prontuario: consultaDe25,
+    pacientesDoBanco: anaNoBanco,
+    verificar: ({ ultimoToque, conversa, marcadas, titulo }) => {
+      if (ultimoToque.atencao === 'retorno') passou++
+      else falhas.push(`${titulo}: etiqueta ${ultimoToque.atencao}`)
+      if (conversa.booking_state === 'atendente' && marcadas.length === 0) passou++
+      else falhas.push(`${titulo}: estado ${conversa.booking_state}, marcadas ${marcadas.length}`)
+    },
+  })
+
+  // Retorno ja usado: le que e consulta antes das datas; insistindo ("mas e
+  // retorno"), explica de novo; na terceira, a equipe.
+  await caso('Retorno usado e a pessoa insiste: explica, e depois a equipe avalia', [
+    ['quero marcar o retorno', ['já foi feito em 02/10', 'é uma *consulta*', 'Vamos agendar!']],
+    ['mas o dr falou que era retorno', ['já foi feito em 02/10', 'digite *9*']],
+    ['é retorno sim', 'Vou passar o seu pedido de retorno'],
+  ], {
+    pacientes: [ANA],
+    slots: SLOTS_DO_RETORNO,
+    prontuario: retornoUsado,
+    pacientesDoBanco: anaNoBanco,
+    verificar: ({ ultimoToque, titulo }) => {
+      if (ultimoToque.atencao === 'retorno') passou++
+      else falhas.push(`${titulo}: etiqueta ${ultimoToque.atencao}`)
+    },
+  })
+
+  // Numero da lista nao e insistencia, mesmo com o retorno usado.
+  await caso('Retorno usado: escolher a unidade segue normal', [
+    ['quero marcar o retorno', 'é uma *consulta*'],
+    ['1', 'Datas disponíveis'],
+  ], { pacientes: [ANA], slots: SLOTS_DO_RETORNO, prontuario: retornoUsado, pacientesDoBanco: anaNoBanco })
+
+  // --- Outro telefone: o paciente por nome e nascimento, ou CPF ---
+  const daAvo = { id: 'p9', clinic_id: 'c1', name: 'Helena Martins Costa', birth_date: '2021-05-12', cpf: '52998224725', guardian_name: 'Clara Costa', email: null, archived_at: null }
+
+  await caso('Retorno de telefone sem o paciente: acha pelo nome e nascimento', [
+    ['quero marcar o retorno da minha neta', ['Para achar o cadastro', '*nome completo*', '*data de nascimento*']],
+    ['Helena Costa, 12/05/2021', ['Achei o cadastro de *Helena*', 'Vamos marcar o retorno de Helena', 'incluído até *25/10*']],
+    ['1', 'Datas para o retorno de Helena'],
+    ['1', '14/10'],
+    // Helena nao tem e-mail no cadastro: a ficha pergunta so isso.
+    ['1', ['retorno', 'está guardado', 'e-mail']],
+    ['nao tenho', '*Retorno marcado!*'],
+  ], {
+    slots: SLOTS_DO_RETORNO,
+    prontuario: consultaDe25,
+    pacientesDoBanco: [daAvo],
+    // O comprovante rele a consulta marcada (com o paciente achado).
+    daConsulta: { patient_id: 'p9', starts_at: '2026-10-14T13:00:00Z' },
+    verificar: ({ marcadas, titulo }) => {
+      if (marcadas[0]?.patient_id === 'p9') passou++
+      else falhas.push(`${titulo}: a consulta nao ficou no cadastro achado (${marcadas[0]?.patient_id})`)
+    },
+  })
+
+  await caso('Retorno de telefone sem o paciente: acha pelo CPF', [
+    ['preciso marcar o retorno', 'Para achar o cadastro'],
+    ['o cpf dela é 529.982.247-25', 'Achei o cadastro de *Helena*'],
+  ], { slots: SLOTS_DO_RETORNO, prontuario: consultaDe25, pacientesDoBanco: [daAvo] })
+
+  // Por outro telefone, com o retorno ja usado: avisado ANTES das datas.
+  await caso('Achado com o retorno ja usado: avisa que e consulta', [
+    ['quero marcar o retorno', 'Para achar o cadastro'],
+    ['Helena Martins Costa 12/05/2021', ['Achei o cadastro de *Helena*', 'já foi feito em 02/10', 'é uma *consulta*', 'Vamos agendar!']],
+  ], { slots: SLOTS_DO_RETORNO, prontuario: retornoUsado, pacientesDoBanco: [daAvo] })
+
+  // Achado, com as visitas so deduzidas: nao afirma consulta nem retorno. A
+  // clinica ja marca (uma ficha marcada de outro paciente).
+  await caso('Achado sem marcacao no prontuario: nao afirma consulta', [
+    ['quero marcar o retorno', 'Para achar o cadastro'],
+    ['Helena Martins Costa 12/05/2021', ['Achei o cadastro de *Helena*', 'Vamos agendar!']],
+  ], {
+    slots: SLOTS_DO_RETORNO,
+    prontuario: [{ consultation_date: '2026-09-16' }, { consultation_date: '2026-10-02' }, { consultation_date: '2026-08-01', visita: 'consulta' }],
+    pacientesDoBanco: [daAvo],
+    verificar: ({ transcricao, titulo }) => {
+      if ((transcricao.at(-1) ?? '').includes('*consulta*')) falhas.push(`${titulo}: afirmou consulta pelo deduzido`)
+      else passou++
+    },
+  })
+
+  await caso('Nascimento que nao bate: pede de novo, e na segunda segue a marcacao', [
+    ['quero marcar o retorno', 'Para achar o cadastro'],
+    ['Helena Costa, 13/05/2021', 'Não achei esse cadastro'],
+    ['Helena Costa, 14/05/2021', ['Não encontrei o cadastro', 'A nossa equipe confere se é retorno', 'Vamos agendar!']],
+  ], { slots: SLOTS_DO_RETORNO, prontuario: consultaDe25, pacientesDoBanco: [daAvo] })
+
+  await caso('Sem data na resposta: pede o nascimento', [
+    ['quero marcar o retorno', 'Para achar o cadastro'],
+    ['Helena', ['preciso do *nome completo* e da *data de nascimento*']],
+  ], { slots: SLOTS_DO_RETORNO, prontuario: consultaDe25, pacientesDoBanco: [daAvo] })
+
+  await caso('"Consulta nova" pula a busca', [
+    ['quero marcar o retorno', 'Para achar o cadastro'],
+    ['NOVA', 'Vamos agendar!'],
+  ], { slots: SLOTS_DO_RETORNO, prontuario: consultaDe25, pacientesDoBanco: [daAvo] })
+
+  // Dois cadastros com o mesmo nome e nascimento (cadastro repetido): nao
+  // adivinha.
+  await caso('Dois cadastros iguais: nao escolhe sozinho', [
+    ['quero marcar o retorno', 'Para achar o cadastro'],
+    ['Helena Costa 12/05/2021', 'Não achei esse cadastro'],
+  ], { slots: SLOTS_DO_RETORNO, prontuario: consultaDe25, pacientesDoBanco: [daAvo, { ...daAvo, id: 'p10' }] })
+
+  // Com paciente no telefone, "Outra criança" para o retorno tambem procura.
+  await caso('Outro paciente para o retorno: procura o cadastro', [
+    ['quero marcar o retorno', 'Você já tem uma consulta'],
+    ['2', ['Para quem é a consulta', 'Outra criança']],
+    ['Outra criança', 'Para achar o cadastro'],
+    ['Helena Costa, 12/05/2021', 'Achei o cadastro de *Helena*'],
+  ], { consultas: [CONSULTA_ANA], pacientes: [ANA], slots: SLOTS_DO_RETORNO, prontuario: consultaDe25, pacientesDoBanco: [daAvo] })
+
+  // Consulta nova de telefone sem paciente continua direto na agenda.
+  await caso('Consulta nova de telefone sem paciente: direto na agenda', [
+    ['quero marcar uma consulta', 'Vamos agendar!'],
+  ], { slots: SLOTS_DO_RETORNO, prontuario: consultaDe25 })
+
+  // Diferenca do Dr. Fabio: enquanto ninguem marcou consulta ou retorno no
+  // prontuario, o pedido de retorno vai direto para a agenda (os pacientes de
+  // antes do sistema estao no ISA, e a busca so diria "nao achei" duas vezes).
+  await caso('Clinica que ainda nao marca retorno: nao pergunta o cadastro', [
+    ['quero marcar o retorno', 'Vamos agendar!'],
+  ], { slots: SLOTS_DO_RETORNO, prontuario: [{ consultation_date: '2026-09-25' }], pacientesDoBanco: [daAvo] })
+
+  // No perfil do Dr. Fabio quem escreve costuma ser o proprio paciente,
+  // adulto: "do paciente", e o exemplo de nascimento de adulto.
+  const FABIO = 'b5d0f6a2-3c71-4e8a-9f2d-7a1c4e9b0d63'
+  const adultoNoBanco = { ...daAvo, clinic_id: FABIO, name: 'Helena Martins Costa', birth_date: '1985-05-12', guardian_name: null }
+  await caso('Perfil do Dr. Fabio: retorno de telefone sem o paciente pede os dados do paciente', [
+    ['quero marcar o retorno', ['Para achar o cadastro', '*data de nascimento* do paciente', '12/03/1985']],
+    ['Helena Costa, 12/05/85', ['Achei o cadastro de *Helena*', 'Vamos marcar o retorno de Helena', 'incluído até *25/10*']],
+    ['1', 'Datas para o retorno de Helena'],
+  ], {
+    clinicId: FABIO,
+    slots: SLOTS_DO_RETORNO,
+    prontuario: consultaDe25,
+    pacientesDoBanco: [adultoNoBanco],
+    verificar: ({ transcricao, titulo }) => {
+      if (transcricao.join('\n').includes('criança')) falhas.push(`${titulo}: falou em criança no perfil do Dr. Fabio`)
+      else passou++
+    },
+  })
+  await caso('Perfil do Dr. Fabio: "Outra pessoa" para o retorno procura o cadastro', [
+    ['quero marcar o retorno', 'Você já tem uma consulta'],
+    ['2', ['Para quem é a consulta', 'Outra pessoa']],
+    ['Outra pessoa', ['Para achar o cadastro', 'do paciente']],
+    ['Helena Costa 12/05/1985', 'Achei o cadastro de *Helena*'],
+  ], { clinicId: FABIO, consultas: [CONSULTA_ANA], pacientes: [ANA], slots: SLOTS_DO_RETORNO, prontuario: consultaDe25, pacientesDoBanco: [adultoNoBanco] })
+
+  for (const [frase, esperado] of [
+    ['quero marcar o retorno', true],
+    ['preciso agendar retorno do Pedro', true],
+    ['aguardo retorno', false],
+    ['Retorno sua mensagem assim que possível', false],
+    ['tenho retorno com vcs?', false],
+    ['retorno depois', false],
+    ['quero marcar uma consulta', false],
+  ]) {
+    if (pediuRetorno(frase) === esperado) passou++
+    else falhas.push(`pediuRetorno("${frase}") deveria ser ${esperado}`)
+  }
+}
 
 console.log('\n============================================')
 console.log(`VERIFICAÇÕES QUE PASSARAM: ${passou}`)

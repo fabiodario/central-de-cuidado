@@ -11,6 +11,7 @@ import {
   ChevronUp,
   CircleSlash,
   Clock3,
+  CalendarCheck,
   CalendarClock,
   MessageSquareText,
   Paperclip,
@@ -34,7 +35,7 @@ import { supabase } from '@/lib/supabase'
 import { criarNota, listarNotas, type NotaDaConversa } from '@/lib/notas-da-conversa'
 import { mandarParaOCelular } from '@/lib/notificacoes'
 import { linhaDoTempo } from '@/lib/linha-do-tempo'
-import { respostasDaEquipe, type OpcaoDaEquipe } from '@/lib/respostas-da-equipe'
+import { ehRespostaProntaSemMudanca, respostasDaEquipe, type OpcaoDaEquipe } from '@/lib/respostas-da-equipe'
 import { CHAVE_DO_VISUAL, EVENTO_MODO_WHATSAPP } from '@/lib/modo-whatsapp'
 import { VisualizadorDeArquivo, type ArquivoAberto } from '@/components/VisualizadorDeArquivo'
 import { marcaSemClinicaConhecida } from '@/lib/marca'
@@ -75,6 +76,8 @@ import {
   desligarConversaDoPaciente,
 } from '@/lib/repository'
 import { lugaresDoRobo } from '@/lib/lugares'
+import { diasAte } from '@/lib/retorno'
+import type { SituacaoDoRetorno } from '../../supabase/functions/_shared/prazo-do-retorno.ts'
 import MandarHorarios from '@/sections/MandarHorarios'
 import SimuladorNasRespostas from '@/sections/SimuladorNasRespostas'
 import VereditoDaUrgencia from '@/sections/VereditoDaUrgencia'
@@ -253,6 +256,14 @@ const MOTIVO_ATENCAO: Record<
     classe: 'bg-[#fef3c7] text-[#92400e]',
     borda: 'border-[#f59e0b]',
   },
+  // O paciente insistiu no retorno fora da regra e o robo passou para a equipe
+  // avaliar com o medico (26/10/2026, vindo do sistema do Dr. Marcello).
+  // Laranja, pedido do Edu: e decisao a tomar, nao so leitura.
+  retorno: {
+    rotulo: '🔁 Retorno: avaliar pedido',
+    classe: 'bg-orange-500 text-white',
+    borda: 'border-orange-400 ring-1 ring-orange-400/30',
+  },
   urgencia: {
     rotulo: '🚨 Urgência: ligar agora',
     classe: 'bg-[#b42318] text-white',
@@ -309,6 +320,7 @@ const ORDEM_DOS_MOTIVOS: NonNullable<Conversation['attentionReason']>[] = [
   'farmacia',
   'numero_errado',
   'nao_suportada',
+  'retorno',
   'remarcacao',
   'cancelamento',
   'cancelou_sozinho',
@@ -590,6 +602,45 @@ function BotaoResponder({ onClick }: { onClick: () => void }) {
     >
       <Reply className="h-3.5 w-3.5" />
     </button>
+  )
+}
+
+/**
+ * O retorno incluido, no cabecalho da conversa (26/10/2026, vindo do sistema
+ * do Dr. Marcello).
+ *
+ * Conta da ultima CONSULTA, no prazo que o medico definiu no prontuario, e diz
+ * quando o retorno ja foi usado. La, a equipe disse a uma familia que o
+ * retorno ia ate 02/11, contado de 02/10, que ja tinha sido o retorno da
+ * consulta de 16/09: a recepcao fazia a conta de cabeca.
+ */
+function PrazoDoRetorno({ retorno }: { retorno: SituacaoDoRetorno }) {
+  const hoje = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date())
+  const curta = (iso: string) => `${iso.slice(8, 10)}/${iso.slice(5, 7)}`
+  const aberto = retorno.tipo === 'aberto'
+  const faltam = aberto ? diasAte(retorno.ate, hoje) : 0
+  const texto =
+    retorno.tipo === 'aberto'
+      ? `Retorno até ${curta(retorno.ate)} · ${faltam === 0 ? 'vence hoje' : faltam === 1 ? 'falta 1 dia' : `faltam ${faltam} dias`}`
+      : retorno.tipo === 'usado'
+        ? `Retorno usado em ${curta(retorno.usadoEm)} · próxima é consulta`
+        : retorno.tipo === 'vencido'
+          ? `Prazo do retorno venceu em ${curta(retorno.ate)}`
+          : 'Sem retorno incluído · próxima é consulta'
+  // Deduzido pela sequencia, e nao marcado no prontuario: aparece, mas como
+  // conta a conferir (o robo nao usa).
+  return (
+    <span
+      title={
+        `Consulta de ${curta(retorno.consulta)}. Toda consulta dá direito a um retorno, no prazo definido no prontuário (30 dias, se o médico não mudou).` +
+        (retorno.confirmado ? '' : ' Deduzido pelas datas das visitas: confirme no prontuário.')
+      }
+      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 ${aberto ? 'bg-[#e8f5ec] text-[#1c6b3a]' : 'bg-slate-100 text-slate-500'}`}
+    >
+      <CalendarCheck className="h-3 w-3" />
+      {texto}
+      {!retorno.confirmado && ' · a confirmar'}
+    </span>
   )
 }
 
@@ -1126,6 +1177,12 @@ export default function Conversations({
     }
   }
 
+  // Os textos de resposta pronta colocados no campo desde o ultimo envio.
+  const prontasColocadas = useRef<string[]>([])
+  useEffect(() => {
+    prontasColocadas.current = []
+  }, [selectedId])
+
   async function enviarResposta() {
     const texto = resposta.trim()
     if (!selectedId || (!texto && !arquivo) || enviando) return
@@ -1135,7 +1192,10 @@ export default function Conversations({
       // Com arquivo, o texto vira a legenda dele.
       const citada = respondendo?.id ?? null
       if (arquivo) await sendConversationFile(selectedId, arquivo, texto, citada)
-      else await sendConversationReply(selectedId, texto, false, citada)
+      // Resposta pronta sem mudanca vai marcada como automatica: nao cala o
+      // robo pela regra das 12h (26/10/2026, ver ehRespostaProntaSemMudanca).
+      else await sendConversationReply(selectedId, texto, ehRespostaProntaSemMudanca(texto, prontasColocadas.current), citada)
+      prontasColocadas.current = []
       setResposta('')
       setArquivo(null)
       setRespondendo(null)
@@ -2497,6 +2557,10 @@ export default function Conversations({
                             {resumo.cancelamentos === 1 ? 'cancelamento' : 'cancelamentos'}
                           </span>
                         )}
+                        {/* Ate quando o retorno esta incluido (26/10/2026):
+                            a recepcao respondia "ainda da para marcar o
+                            retorno?" fazendo a conta de cabeca. */}
+                        {resumo.retorno && <PrazoDoRetorno retorno={resumo.retorno} />}
                       </div>
                     )}
                   </div>
@@ -2916,6 +2980,9 @@ export default function Conversations({
                                     setError('Não consegui ler os valores das unidades: a resposta entrou com os campos {…}. Troque-os antes de enviar.')
                                   }
                                 }
+                                // Guardado como foi colocado: enviado sem mudanca,
+                                // nao segura o robo (ver ehRespostaProntaSemMudanca).
+                                prontasColocadas.current = [...prontasColocadas.current, texto]
                                 setResposta((atual) => (atual.trim() ? `${atual.trimEnd()}\n\n${texto}` : texto))
                               }}
                               title="Coloca o texto de uma resposta pronta no campo, para revisar e enviar"

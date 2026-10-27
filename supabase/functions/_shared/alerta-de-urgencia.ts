@@ -5,6 +5,7 @@ import { textoDoModelo } from './modelos.ts'
 import { quemAtende } from './quem-atende.ts'
 import { chaveDoWhatsApp } from './whatsapp-teste.ts'
 import { MOTIVOS_COM_VEREDITO } from './veredito.ts'
+import { postarNaMeta } from './meta-tentativa.ts'
 
 /**
  * Alerta de urgencia no WhatsApp pessoal do medico, com botoes (17/10/2026,
@@ -103,11 +104,12 @@ export function whatsAppPelaApi(phoneNumberId: string, token: string | undefined
   return async (para, conteudo) => {
     if (!token) return { ok: false, erro: 'WhatsApp da clínica sem token no servidor' }
     try {
-      const r = await buscar(`https://graph.facebook.com/${versao}/${phoneNumberId}/messages`, {
+      // Erro passageiro da Meta tenta de novo (26/10/2026, ver meta-tentativa.ts).
+      const r = await postarNaMeta(`https://graph.facebook.com/${versao}/${phoneNumberId}/messages`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ messaging_product: 'whatsapp', recipient_type: 'individual', to: para, ...conteudo }),
-      })
+      }, { buscar })
       const j = await r.json().catch(() => ({}))
       if (r.ok) return { ok: true, id: j?.messages?.[0]?.id ? String(j.messages[0].id) : null }
       const codigo = typeof j?.error?.code === 'number' ? j.error.code : undefined
