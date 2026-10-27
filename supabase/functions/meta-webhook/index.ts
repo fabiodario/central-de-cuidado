@@ -35,6 +35,7 @@ import {
 import { ANEXO_RECENTE_MS, anexoQueVai, anexoRecenteDaConversa, type AnexoParaEquipe } from '../_shared/anexo-para-equipe.ts'
 import { acompanharEnvioDoAnexo, entregarAnexosPendentes } from '../_shared/anexos-pendentes.ts'
 import { postarNaMeta } from '../_shared/meta-tentativa.ts'
+import { campoDoCelular, type MensagemDoCelular, soNoCelular, tratarAvisoDoCelular } from '../_shared/coexistencia.ts'
 import { MOTIVOS_COM_VEREDITO } from '../_shared/veredito.ts'
 import { pediuReset, podeResetar, resetarConversaDeTeste, respostaDoReset } from '../_shared/reset-de-teste.ts'
 import { repassarRespostaDoPaciente, tratarRespostaDaEquipe } from '../_shared/resposta-ao-alerta.ts'
@@ -320,6 +321,31 @@ Deno.serve(async (req) => {
         // Tudo que veio antes terminou; um erro daqui ate o proximo registrar
         // nao pertence a nenhum evento.
         await registro.concluir()
+
+        // Coexistencia (27/10/2026, ver _shared/coexistencia.ts): o numero do
+        // consultorio no app WhatsApp Business e na API ao mesmo tempo. O
+        // historico do celular, o que a equipe escreve por ele e os contatos
+        // da agenda entram na Central, sem passar pelo robo. Erro sobe para o
+        // catch: a Meta manda de novo, e o id da mensagem evita duplicar.
+        if (campoDoCelular(change.field)) {
+          const doCelular = change.value ?? {}
+          const numeroDoCelular = String(doCelular.metadata?.phone_number_id ?? '')
+          const feito = await tratarAvisoDoCelular(admin, String(change.field), doCelular, {
+            corpo: (m: MensagemDoCelular) => messageBody(m as unknown as WebhookMessage),
+            midia: (m: MensagemDoCelular) => midiaDaMensagem(m as unknown as WebhookMessage),
+            guardarAnexo: (clinica, id, midia) => guardarAnexo(admin, clinica, id, midia, numeroDoCelular),
+          })
+          if (!feito.clinica) console.warn('Coexistencia: aviso de um numero sem clinica', change.field, numeroDoCelular)
+          else console.info('Coexistencia:', JSON.stringify(feito))
+          continue
+        }
+        // O consultorio desligou o numero da API pelo app (Configuracoes >
+        // Conta > Plataforma comercial): o robo e a Central param de receber.
+        // Grita no log; nao ha conversa onde anotar.
+        if (change.field === 'account_update' && change.value?.event === 'PARTNER_REMOVED') {
+          console.error('Coexistencia: o numero foi desconectado da API pelo app WhatsApp Business', entry.id, JSON.stringify(change.value?.disconnection_info ?? {}))
+          continue
+        }
         if (change.field !== 'messages') continue
         const value = change.value ?? {}
         const phoneNumberId = String(value.metadata?.phone_number_id ?? '')
@@ -384,6 +410,13 @@ Deno.serve(async (req) => {
           // historico suja a leitura de quem abre a conversa depois para
           // entender o caso.
           if (message.type === 'reaction') continue
+          // Coexistencia: a mensagem que so o celular mostra (erro 131060). A
+          // de verdade chega em seguida, ou esta no app do celular; o robo nao
+          // pede "escreva em texto" por cima dela. Ver soNoCelular.
+          if (soNoCelular(message)) {
+            console.info('Coexistencia: mensagem so no celular (131060)', externalId)
+            continue
+          }
 
           // Ver eventos-do-webhook.ts: se algo falhar daqui em diante, a chave
           // e apagada no catch e o reenvio da Meta processa de novo.

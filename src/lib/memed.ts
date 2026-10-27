@@ -1,5 +1,12 @@
 import { supabase } from '@/lib/supabase'
-import { idDaReceitaExcluida, memedNaTela, prontaParaComando, type PortaoDaMemed, type QuadroNaPagina } from '@/lib/sinais-da-memed'
+import {
+  CERTIFICADORAS_DA_MEMED,
+  idDaReceitaExcluida,
+  memedNaTela,
+  prontaParaComando,
+  type PortaoDaMemed,
+  type QuadroNaPagina,
+} from '@/lib/sinais-da-memed'
 import type { Consultation, Patient } from '@/types/patient'
 
 /**
@@ -478,15 +485,15 @@ export function prepararPrescricao() {
       const dados = await tokenDoPrescritor()
       await carregarScript(dados.token, dados.producao)
 
-      // So o VIDaaS na lista de certificadoras: e o certificado que o medico
-      // ja usa para assinar o prontuario. Sem isto a Memed oferece sete opcoes
-      // e a pessoa tem de saber qual e a sua.
+      // So a certificadora do medico na lista (o BirdID do Dr. Fabio, ver
+      // CERTIFICADORAS_DA_MEMED). Sem isto a Memed oferece sete opcoes e a
+      // pessoa tem de saber qual e a sua.
       //
       // Fica aqui, e nao no clique, porque nao depende de paciente nem de
       // unidade - e uma vez por sessao basta. Ate 21/09/2026 era o primeiro
       // comando do clique, e a frio custou 8 segundos (ver carregarScript).
       const hub = janela().MdHub
-      if (hub) await comando(hub, 'setFeatureToggle', { setAllowedSignatureProviders: ['vidaas'] })
+      if (hub) await comando(hub, 'setFeatureToggle', { setAllowedSignatureProviders: [...CERTIFICADORAS_DA_MEMED] })
 
       return dados
     })()

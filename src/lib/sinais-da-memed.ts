@@ -88,3 +88,17 @@ export function idDaReceitaExcluida(dados: unknown): string | null {
   const id = String(bruto).trim()
   return id || null
 }
+
+/**
+ * As certificadoras que a Memed oferece na hora de assinar a receita.
+ *
+ * O Dr. Fabio assina com o BirdID, o certificado em nuvem da Soluti. Na Memed
+ * ele se chama 'soluti': e o nome na lista do setFeatureToggle da
+ * documentacao, e no codigo do v4 aparece como "Soluti", "Parceiro Oficial
+ * Memed", entrando com o CPF e o codigo do aplicativo (conferido em
+ * 27/10/2026). Ate esse dia a lista era so 'vidaas', herdada do sistema do
+ * Dr. Marcello, e a tela de assinatura da Memed so mostrava o VIDaaS (o Edu
+ * viu na reuniao de 26/10/2026). Uma so, de proposito: sem a lista a Memed
+ * oferece sete, e o medico tem de saber qual e a dele.
+ */
+export const CERTIFICADORAS_DA_MEMED: readonly string[] = ['soluti']

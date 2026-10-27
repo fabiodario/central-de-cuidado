@@ -183,6 +183,44 @@ prontuário; o retorno não abre outro. A regra mora em
   bloco "Retorno incluido" de `tests/atendimento.test.mjs` (o caso aceita
   `clinicId` para rodar no perfil do Dr. Fábio).
 
+## Coexistência: o número no app e na API (27/10/2026)
+
+O número fixo do consultório vai para a API sem sair do app WhatsApp Business
+dos aparelhos. `_shared/coexistencia.ts` trata os três avisos que a Meta manda
+nesse caso, chamados no `meta-webhook` antes do filtro de `messages`:
+
+- `history`: as conversas dos últimos 6 meses do app, uma vez. Entram com a
+  data original e `origem = 'historico'`, ligadas ao paciente do telefone, sem
+  robô, sem alerta e sem "novas". Foto e áudio vêm como `media_placeholder`;
+  o arquivo, quando vem (só o das duas últimas semanas), chega num segundo
+  `history` com `messages` e entra no lugar.
+- `smb_message_echoes`: o que a equipe escreve pelo app. Entra como resposta
+  da equipe (`automatic = false`, `origem = 'celular'`), e por isso segura o
+  robô pelas 12 horas, como a resposta pela Central; a conversa fica como
+  depois de uma resposta pelo `whatsapp-reply`.
+- `smb_app_state_sync`: contatos da agenda do celular
+  (`whatsapp_contatos_do_celular`). O nome vira `nome_personalizado` só da
+  conversa sem cadastro que ninguém renomeou.
+- `soNoCelular`: o `unsupported` com erro 131060 é ignorado (a mensagem de
+  verdade chega em seguida, ou está no app). `account_update` com
+  `PARTNER_REMOVED` vira erro no log.
+
+O `external_message_id` (único) impede duplicar: a Meta repete aviso e manda
+o histórico em pedaços fora de ordem. A coluna `origem` é lida e gravada à
+parte (sem a migration, grava sem ela). A Central mostra "pelo celular" e "do
+celular" no balão. Testes em `tests/coexistencia.test.mjs`. O que falta para
+ligar (Tech Provider, Cadastro Incorporado, os dois pedidos `smb_app_data` em
+24 horas) está no LEIA-ME, "Número do consultório na API (coexistência)".
+
+## BirdID na Memed (27/10/2026)
+
+O Dr. Fábio assina com o BirdID, que na Memed se chama `soluti`. A lista de
+certificadoras que o sistema manda à Memed é `CERTIFICADORAS_DA_MEMED`
+(`src/lib/sinais-da-memed.ts`); a do Dr. Marcello é só `vidaas`. Ao portar o
+`memed.ts` de lá, não trazer a lista dele: `tests/sinais-da-memed.test.mjs`
+confere. A assinatura do prontuário (`assinar-consulta`, BRy) segue com
+VIDaaS e desligada sem licença.
+
 ## Veredito da urgência (17/10/2026)
 
 Conversa acesa como urgência ou sangramento ganha, na tela de Respostas, os

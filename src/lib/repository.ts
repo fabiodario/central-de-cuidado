@@ -2031,6 +2031,12 @@ export interface ConversationMessage {
   anexoPath: string | null
   /** Mensagem que esta responde, citada como no WhatsApp (20/10/2026). */
   respondeA?: string | null
+  /**
+   * Veio do app WhatsApp Business do consultorio (coexistencia, 27/10/2026):
+   * 'celular' = a equipe escreveu pelo app; 'historico' = conversa de antes
+   * da Central, trazida pela Meta. Nulo = robo, Central ou paciente ao vivo.
+   */
+  origem?: 'historico' | 'celular' | null
 }
 
 /**
@@ -2330,6 +2336,20 @@ export async function listConversationMessages(conversationId: string): Promise<
   } catch (erro) {
     console.warn('Sem whatsapp_messages.responde_a; as citacoes ficam de fora', erro)
   }
+  // De onde veio (coexistencia, 27/10/2026): coluna nova, lida a parte - sem
+  // ela, so a etiqueta "pelo celular" some.
+  const origem = new Map<string, 'historico' | 'celular'>()
+  try {
+    const { data: doCelular, error: erroDaOrigem } = await semTipo
+      .from('whatsapp_messages')
+      .select('id,origem')
+      .eq('conversation_id', conversationId)
+      .not('origem', 'is', null)
+    if (erroDaOrigem) throw erroDaOrigem
+    for (const m of (doCelular ?? []) as { id: string; origem: 'historico' | 'celular' }[]) origem.set(m.id, m.origem)
+  } catch (erro) {
+    console.warn('Sem whatsapp_messages.origem; a etiqueta do celular fica de fora', erro)
+  }
 
   return linhas.map((row) => ({
     id: row.id,
@@ -2343,6 +2363,7 @@ export async function listConversationMessages(conversationId: string): Promise<
     anexoMime: anexos.get(row.id)?.mime ?? null,
     anexoPath: anexos.get(row.id)?.path ?? null,
     respondeA: citada.get(row.id) ?? null,
+    origem: origem.get(row.id) ?? null,
   }))
 }
 

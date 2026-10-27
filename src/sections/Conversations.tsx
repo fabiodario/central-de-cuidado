@@ -2855,6 +2855,13 @@ export default function Conversations({
                                 </p>
                               )}
                               <span className="mt-0.5 flex items-center justify-end gap-1 text-[11px] leading-none text-[#667781]">
+                                {/* Escrita no app do celular do consultorio, e
+                                    nao aqui (coexistencia, 27/10/2026). */}
+                                {message.origem && (
+                                  <span className="font-semibold">
+                                    {message.origem === 'celular' ? 'pelo celular ·' : 'do celular ·'}
+                                  </span>
+                                )}
                                 {formatWhen(message.createdAt)}
                                 {outbound && <Confirmacao status={message.status} />}
                               </span>

@@ -2,7 +2,8 @@
 // foi excluida, nos dois motores dela (o antigo e o sinapse v4, ver
 // src/lib/sinais-da-memed.ts). Os enderecos sao os que a Memed usava em
 // 25/10/2026.
-import { ehQuadroDaV4, idDaReceitaExcluida, memedNaTela, prontaParaComando } from './sinais-da-memed.build.mjs'
+import { readFileSync } from 'node:fs'
+import { CERTIFICADORAS_DA_MEMED, ehQuadroDaV4, idDaReceitaExcluida, memedNaTela, prontaParaComando } from './sinais-da-memed.build.mjs'
 
 let ok = 0
 let falhas = 0
@@ -53,6 +54,21 @@ confere('id nu em texto', idDaReceitaExcluida('169351') === '169351')
 confere('objeto { id } da documentacao', idDaReceitaExcluida({ id: 1234 }) === '1234')
 confere('sem id nao exclui nada', idDaReceitaExcluida({}) === null && idDaReceitaExcluida(null) === null && idDaReceitaExcluida(undefined) === null)
 confere('texto vazio nao exclui nada', idDaReceitaExcluida('  ') === null)
+
+// Certificadora na hora de assinar a receita (27/10/2026): o Dr. Fabio usa o
+// BirdID, que na Memed se chama 'soluti'. Os nomes validos sao os da
+// documentacao do setFeatureToggle e do codigo do v4 nessa data.
+const NOMES_DA_MEMED = ['soluti', 'vidaas', 'safeid', 'certisign', 'lacuna', 'evaltec', 'dinamo']
+confere('BirdID (soluti) liberado na Memed', CERTIFICADORAS_DA_MEMED.includes('soluti'), CERTIFICADORAS_DA_MEMED)
+confere('so a certificadora do medico', CERTIFICADORAS_DA_MEMED.length === 1, CERTIFICADORAS_DA_MEMED)
+confere('nomes que a Memed conhece', CERTIFICADORAS_DA_MEMED.every((n) => NOMES_DA_MEMED.includes(n)), CERTIFICADORAS_DA_MEMED)
+// Trazer o memed.ts do sistema do Dr. Marcello de volta reescreveria a lista
+// ali dentro, com o VIDaaS dele.
+const fonteDaMemed = readFileSync(new URL('../src/lib/memed.ts', import.meta.url), 'utf8')
+confere(
+  'memed.ts manda a lista de CERTIFICADORAS_DA_MEMED',
+  /setAllowedSignatureProviders:\s*\[\.\.\.CERTIFICADORAS_DA_MEMED\]/.test(fonteDaMemed),
+)
 
 console.log(`Sinais da Memed: ${ok} verificações passaram.`)
 if (falhas) {
